@@ -20,6 +20,12 @@ import math
 import torch
 from torch import Tensor, nn
 
+from src.layers.positional_encoding import (
+    AttentionScoreBias,
+    QueryKeyPositionalTransform,
+    ShawRelativePositionBias,
+)
+
 
 def scaled_dot_product_attention(
     query: Tensor,
@@ -27,10 +33,11 @@ def scaled_dot_product_attention(
     value: Tensor,
     mask: Tensor | None = None,
     dropout: nn.Dropout | None = None,
+    bias: Tensor | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Scaled Dot-Product Attention を計算する。
 
-    Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k)) V
+    Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k) + bias) V
 
     Args:
         query: 形状 ``(..., S_q, d_k)`` の Query 行列 Q。
@@ -43,6 +50,10 @@ def scaled_dot_product_attention(
             False の位置のスコアは -inf に置き換えられる
             (PyTorch の ``F.scaled_dot_product_attention`` と同じ規約)。
         dropout: Attention 重みに適用する Dropout モジュール(省略可)。
+        bias: スケーリング後のスコアに加算するバイアス(省略可)。形状は
+            ``(..., S_q, S_k)`` にブロードキャスト可能である必要がある。
+            相対位置エンコーディング(Shaw et al. 方式・T5・ALiBi、
+            トピック 003 参照)を Attention スコアに注入するために使う。
 
     Returns:
         (output, attn_weights) のタプル。
@@ -58,6 +69,9 @@ def scaled_dot_product_attention(
     # スコア行列(logits): (..., S_q, S_k)
     # sqrt(d_k) によるスケーリングが Scaled Dot-Product Attention の「Scaled」に対応する。
     scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d_k)
+
+    if bias is not None:
+        scores = scores + bias
 
     if mask is not None:
         # False(= 参加させない)の位置を -inf にすることで softmax 後の重みを 0 にする。
@@ -90,6 +104,14 @@ class MultiHeadAttention(nn.Module):
         num_heads: ヘッド数 h。
         dropout: Attention 重みに適用する dropout 率。
         bias: 線形射影にバイアス項を持たせるか(原論文は bias なし)。
+        positional_transform: Query・Key を、内積を取る前に位置に応じて変換する
+            モジュール(``QueryKeyPositionalTransform`` のサブクラス、例:
+            ``RotaryPositionEmbedding``)。``None``(既定値)の場合は何も行わず、
+            001・002 と完全に同一の計算になる。
+        attention_score_bias: Attention スコアに位置バイアスを加えるモジュール
+            (``AttentionScoreBias`` のサブクラス、例: ``T5RelativePositionBias``、
+            ``ALiBiPositionBias``、``ShawRelativePositionBias``)。``None``
+            (既定値)の場合は何も加算しない。
     """
 
     def __init__(
@@ -98,6 +120,8 @@ class MultiHeadAttention(nn.Module):
         num_heads: int,
         dropout: float = 0.0,
         bias: bool = False,
+        positional_transform: QueryKeyPositionalTransform | None = None,
+        attention_score_bias: AttentionScoreBias | None = None,
     ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
@@ -108,6 +132,8 @@ class MultiHeadAttention(nn.Module):
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads  # 本実装では d_v = d_k
+        self.positional_transform = positional_transform
+        self.attention_score_bias = attention_score_bias
 
         # W^Q, W^K, W^V(全ヘッド分をまとめたもの)と出力射影 W^O
         self.w_q = nn.Linear(d_model, d_model, bias=bias)
@@ -154,6 +180,7 @@ class MultiHeadAttention(nn.Module):
         key: Tensor,
         value: Tensor,
         mask: Tensor | None = None,
+        positions: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Multi-Head Attention の順伝播。
 
@@ -164,6 +191,11 @@ class MultiHeadAttention(nn.Module):
                 自己注意(self-attention)では query = key = value を渡す。
             mask: True が「参加させる」を表す bool マスク。
                 形状は ``(S_q, S_k)`` / ``(B, S_q, S_k)`` / ``(B, h, S_q, S_k)``。
+            positions: Query 側の絶対位置インデックス(形状 ``(S_q,)``)。
+                ``positional_transform`` に渡される。``None`` のときは 0 から
+                S_q - 1 までの連番として扱う。KV キャッシュを用いた逐次推論
+                (トピック 010)では、生成の各ステップで Query の絶対位置が
+                キャッシュ長だけずれるため、これを外部から指定できるようにしている。
 
         Returns:
             (output, attn_weights) のタプル。
@@ -174,11 +206,36 @@ class MultiHeadAttention(nn.Module):
         k = self._split_heads(self.w_k(key))  # (B, h, S_k, d_k)
         v = self._split_heads(self.w_v(value))  # (B, h, S_k, d_v)
 
+        # 1.5. Query・Key の位置変換(例: RoPE)。指定がなければ従来通り何もしない。
+        if self.positional_transform is not None:
+            q, k = self.positional_transform.apply(q, k, positions)
+
         if mask is not None:
             mask = self._expand_mask(mask)
 
+        # 1.6. Attention スコアへの位置バイアス(例: Shaw et al. 方式・T5・ALiBi)。
+        # 指定がなければ従来通り何も加算しない。
+        score_bias = None
+        if self.attention_score_bias is not None:
+            s_q, s_k = q.size(-2), k.size(-2)
+            if isinstance(self.attention_score_bias, ShawRelativePositionBias):
+                # a^K_mn は Query に内容依存するため、専用の relative_vectors() から
+                # 相対位置ベクトルのみを取得し、ここで Query との内積を直接計算する。
+                relative_vectors = self.attention_score_bias.relative_vectors(
+                    s_q, s_k, q.device, q.dtype
+                )  # (S_q, S_k, d_k)
+                score_bias = torch.einsum("bhqd,qkd->bhqk", q, relative_vectors) / math.sqrt(
+                    self.d_k
+                )
+            else:
+                score_bias = self.attention_score_bias.bias(s_q, s_k, q.device, q.dtype).unsqueeze(
+                    0
+                )  # (1, h, S_q, S_k) -> バッチ方向へブロードキャスト
+
         # 2. 各ヘッドで Scaled Dot-Product Attention
-        head_outputs, attn_weights = scaled_dot_product_attention(q, k, v, mask, self.dropout)
+        head_outputs, attn_weights = scaled_dot_product_attention(
+            q, k, v, mask, self.dropout, score_bias
+        )
 
         # 3. ヘッドを連結して出力射影 W^O を適用
         concatenated = self._merge_heads(head_outputs)  # (B, S_q, d_model)
