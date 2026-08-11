@@ -105,6 +105,12 @@ ai-theories/
 - **日本語をメインの説明言語**とし、専門用語や重要なキーワードには英語を併記する(例:「注意機構(Attention Mechanism)」)。
 - コード内のコメント・docstring も日本語ベース。必要に応じて英語を併記する。
 - `apps/` の README.md も日本語メイン・英語併記。
+- **文中で独自に短縮した略語を使わない**。正式名称を用い、初出時に日本語と英語を併記する。以降も略語に置き換えず正式名称を使う。
+  - 使わない例: LN / Pre-LN / Post-LN / FFN / MHA / PE
+  - 使う例: 「Layer Normalization(層正規化)」「正規化前置(Pre-Layer Normalization)」「正規化後置(Post-Layer Normalization)」「Feed-Forward Network(順伝播ネットワーク)」「Multi-Head Attention(多頭注意機構)」「位置エンコーディング(Positional Encoding)」
+- ただし、**手法名・アーキテクチャ名として定着している略語は使用してよい**(LoRA、RoPE、DPO、RLHF、MoE、CLIP、ViT、BPE、SFT など)。この場合も初出時には正式名称を併記する(例: 「LoRA(Low-Rank Adaptation)」)。
+- **数式中の記号は原論文の表記に従う**(d_model、d_ff、d_k、d_v、h など)。使用時は必ず記号の定義を明記する。
+- このルールは、ノートブックの Markdown セル・コードのコメント・docstring・クラス名・関数名・変数名、および各 README.md のすべてに適用する(例: クラス名を `PreLNBlock` のようにしない)。
 
 ## 実行環境
 
