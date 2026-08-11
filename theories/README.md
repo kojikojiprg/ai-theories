@@ -3,7 +3,6 @@
 LLM / VLM の理論学習ノートブック一覧です。
 This is the index of theory-learning notebooks for LLM / VLM.
 
-理論はカテゴリごとに整理していますが、**表の番号順に学習する**ことを推奨します。
 新しいトピックを追加する際は、対象カテゴリにノートブックを追加し、必ずこの表も更新してください。
 
 ## カテゴリ概要 / Categories
@@ -47,6 +46,9 @@ Theory of text embeddings and retrieval — the theoretical foundation for the R
 > Categories may be freely extended as new theories emerge.
 
 ## 推奨学習順序 / Recommended Order
+
+理論はカテゴリごとに整理していますが、**表の番号順に学習する**ことを推奨します。
+The theories are organized by category, but I recommend **studying them in the numbered order shown in the table**.
 
 | #   | トピック / Topic              | カテゴリ / Category   | 前提知識 / Prerequisites | 扱う内容 / Contents                                                                                                                                                                                                        | ノートブック                                                                    |
 | --- | ----------------------------- | --------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
