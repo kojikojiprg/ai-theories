@@ -39,7 +39,7 @@ Architectural developments beyond the vanilla Transformer (MoE, State Space Mode
 
 ### 07_retrieval
 
-テキスト埋め込みと検索(Retrieval)の理論。`apps/` の RAG アプリの理論的基盤となる。
+テキスト埋め込みと検索(Retrieval)の理論。 `apps/` の RAG アプリの理論的基盤となる。
 Theory of text embeddings and retrieval — the theoretical foundation for the RAG app in `apps/`.
 
 > カテゴリは今後の新理論の追加に応じて自由に拡張してよい。
@@ -47,7 +47,7 @@ Theory of text embeddings and retrieval — the theoretical foundation for the R
 
 ## 推奨学習順序 / Recommended Order
 
-理論はカテゴリごとに整理していますが、**表の番号順に学習する**ことを推奨します。
+理論はカテゴリごとに整理していますが、 **表の番号順に学習する** ことを推奨します。
 The theories are organized by category, but I recommend **studying them in the numbered order shown in the table**.
 
 | #   | トピック / Topic              | カテゴリ / Category   | 前提知識 / Prerequisites | 扱う内容 / Contents                                                                                                                                                                                                        | ノートブック                                                                    |
@@ -84,8 +84,8 @@ The theories are organized by category, but I recommend **studying them in the n
 
 | モジュール                   | 内容                                                                                                    | 初出トピック |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------- | ------------ |
-| `src/layers/attention.py`    | `scaled_dot_product_attention()`、`MultiHeadAttention`、`create_causal_mask()`、`create_padding_mask()` | 001          |
-| `src/utils/visualization.py` | `plot_attention_heatmap()`、`plot_multi_head_attention()`、`plot_learning_curves()`                     | 001          |
+| `src/layers/attention.py`    | `scaled_dot_product_attention()` 、 `MultiHeadAttention` 、 `create_causal_mask()` 、 `create_padding_mask()` | 001          |
+| `src/utils/visualization.py` | `plot_attention_heatmap()` 、 `plot_multi_head_attention()` 、 `plot_learning_curves()`                     | 001          |
 
 ## 各ノートブックの構成 / Notebook Structure
 

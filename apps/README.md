@@ -4,7 +4,7 @@
 This is the index of working systems (web apps) built by applying the theory learned in `theories/`.
 
 基礎的なもの(自作モデルの推論 API 化など)から応用的なもの(RAG、マルチモーダル対話など)まで、
-**難易度順の連番ディレクトリ**で段階的に追加します。
+**難易度順の連番ディレクトリ** で段階的に追加します。
 
 ## アプリ一覧 / App List
 
@@ -20,7 +20,7 @@ This is the index of working systems (web apps) built by applying the theory lea
 
 - **学習・実験(モデル学習、GPU 処理)**: Google Colab 無料枠(T4 GPU など)
 - **デモの公開**: Hugging Face Spaces(標準 UI フレームワークは Gradio)
-- 各アプリディレクトリ(例: `apps/001_simple_chat_app/`)は、**そのまま Hugging Face Spaces のリポジトリルート**として扱う(`app.py` / `requirements.txt` / Spaces 用 README を直下に配置)。
+- 各アプリディレクトリ(例: `apps/001_simple_chat_app/` )は、 **そのまま Hugging Face Spaces のリポジトリルート** として扱う( `app.py` / `requirements.txt` / Spaces 用 README を直下に配置)。
 - ai-theories 本体と Spaces 側リポジトリは別リポジトリとして管理する。push 手順は各アプリの README.md に記載する。
 
 ## 各アプリ README の構成 / App README Structure
