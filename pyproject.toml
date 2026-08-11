@@ -19,7 +19,6 @@ package = false
 dev = [
     "ipykernel>=6.29",
     "nbconvert>=7.16",
-    "nbstripout>=0.9.1",
     "ruff>=0.6",
 ]
 
