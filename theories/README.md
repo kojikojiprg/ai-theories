@@ -10,8 +10,8 @@ This is the index of theory-learning notebooks for LLM / VLM.
 
 | # | トピック / Topic | カテゴリ / Category | 前提知識 / Prerequisites | 扱う内容 / Contents | ノートブック |
 |---|---|---|---|---|---|
-| 001 | Attention Mechanism(注意機構) | 01_foundations | 線形代数(行列積・内積)、PyTorch の基礎 | Query / Key / Value、Scaled Dot-Product Attention とスケーリング係数 $\sqrt{d_k}$ の導出、因果マスク、Multi-Head Attention。実装は `src/layers/attention.py` にスクラッチ実装し、重みの可視化と copy task の学習で検証する | [001_attention_mechanism.ipynb](./01_foundations/001_attention_mechanism.ipynb) |
-| 002 | Transformer Block | 01_foundations | 001 | 残差接続、Layer Normalization、FFN、Pre-LN / Post-LN | (未作成 / TBD) |
+| 001 | 注意機構(Attention Mechanism) | 01_foundations | なし / None | Query / Key / Value、Scaled Dot-Product Attention とスケーリング係数 $\sqrt{d_k}$ の導出、因果マスク、Multi-Head Attention。実装は `src/layers/attention.py` にスクラッチ実装し、重みの可視化と copy task の学習で検証する | [001_attention_mechanism.ipynb](./01_foundations/001_attention_mechanism.ipynb) |
+| 002 | Transformer Block | 01_foundations | 001 | 残差接続、Layer Normalization、FFN、Pre-LN / Post-LN。001 で実装した Multi-Head Attention をブロックに組み込む | (未作成 / TBD) |
 | 003 | 位置エンコーディング / RoPE | 01_foundations | 002 | 絶対位置・相対位置エンコーディング、回転位置エンコーディング | (未作成 / TBD) |
 
 > 「未作成 / TBD」の行は今後追加予定のトピックです。追加のたびにこの表を更新します。
