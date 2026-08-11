@@ -168,6 +168,19 @@ uv run ruff format .
 uv run ruff check --fix .
 ```
 
+### ノートブックの出力管理(nbstripout)
+
+- ノートブック(`.ipynb`)は**実行結果(outputs)を含めずに Git 管理する**。差分をテキストとして読める状態に保つのが目的。
+- **nbstripout の clean フィルタ**で自動的に除去する。作業ツリーのファイルには出力が残るため、ローカルでグラフを見ながら作業できる。
+- フィルタの定義は `.git/config`(リポジトリごとのローカル設定)にあるため、**クローンし直したら以下を再実行する**:
+
+```bash
+uv run nbstripout --install --attributes .gitattributes
+```
+
+- 設定できているかは `git show :<ノートブックのパス> | grep '"outputs"'` などで確認する(出力が空であればよい)。
+- 結果・考察は Markdown セルに文章として残すこと。出力は Git に残らないため、**グラフの読み取り結果や数値は本文に明記**する。
+
 ## 実装依頼時のルール(Claude Code 向け)
 
 - `theories/` の各ノートブックの「理論」セクションの**数式・アルゴリズムを一次情報として**実装を行う。

@@ -1,0 +1,34 @@
+[project]
+name = "ai-theories"
+version = "0.1.0"
+description = "LLM / VLM の理論学習と実践 / Learning LLM & VLM theory and building systems"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib>=3.8",
+    "numpy>=1.26",
+    "torch>=2.2",
+]
+
+[tool.uv]
+# src/ は import される前提の共通モジュール。パッケージとしてはビルドしない。
+package = false
+
+[dependency-groups]
+# ローカルでノートブックを実行するための開発用依存(requirements.txt には含めない)。
+dev = [
+    "ipykernel>=6.29",
+    "nbconvert>=7.16",
+    "nbstripout>=0.9.1",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+docstring-code-format = true

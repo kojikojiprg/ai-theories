@@ -8,15 +8,21 @@ This is the index of theory-learning notebooks for LLM / VLM.
 
 ## 推奨学習順序 / Recommended Order
 
-| # | トピック / Topic | カテゴリ / Category | 前提知識 / Prerequisites | ノートブック |
-|---|---|---|---|---|
-| 001 | Attention Mechanism(注意機構) | 01_foundations | なし / None | [001_attention_mechanism.ipynb](./01_foundations/001_attention_mechanism.ipynb) |
-| 002 | Transformer Block | 01_foundations | 001 | (未作成 / TBD) |
-| 003 | RoPE(回転位置エンコーディング) | 01_foundations | 002 | (未作成 / TBD) |
-| ... | ... | ... | ... | ... |
+| # | トピック / Topic | カテゴリ / Category | 前提知識 / Prerequisites | 扱う内容 / Contents | ノートブック |
+|---|---|---|---|---|---|
+| 001 | Attention Mechanism(注意機構) | 01_foundations | 線形代数(行列積・内積)、PyTorch の基礎 | Query / Key / Value、Scaled Dot-Product Attention とスケーリング係数 $\sqrt{d_k}$ の導出、因果マスク、Multi-Head Attention。実装は `src/layers/attention.py` にスクラッチ実装し、重みの可視化と copy task の学習で検証する | [001_attention_mechanism.ipynb](./01_foundations/001_attention_mechanism.ipynb) |
+| 002 | Transformer Block | 01_foundations | 001 | 残差接続、Layer Normalization、FFN、Pre-LN / Post-LN | (未作成 / TBD) |
+| 003 | 位置エンコーディング / RoPE | 01_foundations | 002 | 絶対位置・相対位置エンコーディング、回転位置エンコーディング | (未作成 / TBD) |
 
-> 上記はサンプル行です。実際のトピック追加時に書き換えてください。
-> The rows above are placeholders — replace them as topics are actually added.
+> 「未作成 / TBD」の行は今後追加予定のトピックです。追加のたびにこの表を更新します。
+> Rows marked "未作成 / TBD" are planned topics; this table is updated whenever a topic is added.
+
+### 実装済みの共通モジュール / Implemented Shared Modules
+
+| モジュール | 内容 | 初出トピック |
+|---|---|---|
+| `src/layers/attention.py` | `scaled_dot_product_attention()`、`MultiHeadAttention`、`create_causal_mask()`、`create_padding_mask()` | 001 |
+| `src/utils/visualization.py` | `plot_attention_heatmap()`、`plot_multi_head_attention()`、`plot_learning_curves()` | 001 |
 
 ## カテゴリ概要 / Categories
 
