@@ -8,6 +8,7 @@ from src.utils.statistics import (
     compute_gradient_norm_by_unit_group,
     compute_gradient_norm_per_layer,
     compute_mean_to_rms_ratio,
+    compute_segmentation_agreement_rate,
     compute_unknown_rate,
 )
 from src.utils.visualization import (
@@ -30,6 +31,7 @@ __all__ = [
     "compute_gradient_norm_by_unit_group",
     "compute_gradient_norm_per_layer",
     "compute_mean_to_rms_ratio",
+    "compute_segmentation_agreement_rate",
     "compute_unknown_rate",
     "plot_attention_heatmap",
     "plot_bar_by_layer",

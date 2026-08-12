@@ -27,56 +27,145 @@ _TINY_SHAKESPEARE_URL = (
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 )
 
-# 日本語コーパス(load_japanese_corpus)の取得元として使う日本語版 Wikipedia の記事
-# タイトル一覧(005 トークナイザで使用)。分野を偏らせないよう、自然科学・人文・
-# 社会・技術・スポーツなど幅広いカテゴリから選んでいる。
-_JAPANESE_WIKIPEDIA_TITLES = [
-    "日本",
-    "東京都",
-    "大阪府",
-    "京都府",
-    "日本語",
-    "英語",
-    "数学",
-    "物理学",
-    "化学",
-    "生物学",
-    "地学",
-    "天文学",
-    "宇宙",
-    "地球",
-    "気象学",
-    "医学",
-    "心理学",
-    "経済学",
-    "政治学",
-    "法学",
-    "歴史学",
-    "哲学",
-    "宗教",
-    "言語学",
-    "文学",
-    "音楽",
-    "映画",
-    "美術",
-    "建築",
-    "料理",
-    "農業",
-    "漁業",
-    "鉄道",
-    "自動車",
-    "航空機",
-    "コンピュータ",
-    "インターネット",
-    "人工知能",
-    "機械学習",
-    "深層学習",
-    "野球",
-    "サッカー",
-    "将棋",
-    "囲碁",
-    "オリンピック",
-]
+# 日本語コーパス(load_japanese_corpus)の取得元として使う日本語版 Wikipedia の記事。
+# 分野を偏らせないよう、自然科学・人文・社会・技術・スポーツなど幅広いカテゴリから
+# 選んでいる(005 トークナイザで使用)。
+#
+# 出典 / Source: フリー百科事典『ウィキペディア(Wikipedia)』日本語版
+#     (https://ja.wikipedia.org/)
+# ライセンス / License: クリエイティブ・コモンズ 表示-継承 4.0 国際
+#     (CC BY-SA 4.0、https://creativecommons.org/licenses/by-sa/4.0/deed.ja)
+#
+# 記事本文は編集され続けるため、記事タイトルだけでは実行のたびに異なる文字列に
+# なりうる(load_tiny_shakespeare や load_code_corpus とは違い、コーパスが厳密に
+# 固定されない)。再現性を保つため、記事タイトルと合わせてリビジョン ID(特定時点の
+# 版を指す ID)を固定する。各記事の当該リビジョンは
+# ``https://ja.wikipedia.org/w/index.php?title=<記事名>&oldid=<リビジョンID>``
+# で参照できる(以下のリビジョン ID はいずれも Wikimedia API に実際にアクセスして
+# 取得した実在の値、取得日 2026-08-13)。
+_JAPANESE_WIKIPEDIA_REVISIONS: dict[str, int] = {
+    "日本": 110578005,
+    "東京都": 110597729,
+    "大阪府": 110565604,
+    "京都府": 109765776,
+    "日本語": 109750467,
+    "英語": 110199747,
+    "数学": 109208023,
+    "物理学": 109540178,
+    "化学": 108462219,
+    "生物学": 110028225,
+    "地学": 75704347,
+    "天文学": 109540232,
+    "宇宙": 110379900,
+    "地球": 110170728,
+    "気象学": 108617045,
+    "医学": 108812371,
+    "心理学": 110472899,
+    "経済学": 110060128,
+    "政治学": 110403427,
+    "法学": 110414694,
+    "歴史学": 110621288,
+    "哲学": 110318691,
+    "宗教": 109958573,
+    "言語学": 109216659,
+    "文学": 109467146,
+    "音楽": 110093563,
+    "映画": 109612030,
+    "美術": 110191146,
+    "建築": 110524075,
+    "料理": 110081576,
+    "農業": 110615080,
+    "漁業": 109958685,
+    "鉄道": 110480788,
+    "自動車": 110315235,
+    "航空機": 110600467,
+    "コンピュータ": 110402036,
+    "インターネット": 110324659,
+    "人工知能": 110610279,
+    "機械学習": 110120637,
+    "深層学習": 55590908,
+    "野球": 110528766,
+    "サッカー": 110613233,
+    "将棋": 109676436,
+    "囲碁": 110232196,
+    "オリンピック": 106676037,
+}
+
+# Wikitext(MediaWiki のマークアップ)を平文に変換する際に、名前空間へのリンク
+# ([[File:...]] 等)として扱い、まるごと削除する接頭辞。
+_WIKI_NAMESPACE_LINK_RE = re.compile(
+    r"^(File|Image|ファイル|画像|Category|カテゴリ):", re.IGNORECASE
+)
+
+
+def _remove_wikitext_templates(text: str) -> str:
+    """``{{...}}`` 形式のテンプレート呼び出しを除去する(入れ子を考慮)。"""
+    while True:
+        new_text, n = re.subn(r"\{\{[^{}]*\}\}", "", text)
+        if n == 0:
+            return new_text
+        text = new_text
+
+
+def _strip_wikitext_links(text: str) -> str:
+    """``[[...]]`` 形式のリンクを、入れ子(画像キャプション内のリンクなど)を
+    考慮して展開・除去する。
+
+    File/Image/Category 名前空間へのリンクは画像・カテゴリのメタデータなので
+    まるごと削除し、通常のリンクは表示テキスト(最後の ``|`` 以降。無ければ
+    リンク先そのもの)だけを残す。
+    """
+    result: list[str] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i : i + 2] == "[[":
+            depth = 1
+            j = i + 2
+            while j < n and depth > 0:
+                if text[j : j + 2] == "[[":
+                    depth += 1
+                    j += 2
+                elif text[j : j + 2] == "]]":
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            inner_clean = _strip_wikitext_links(text[i + 2 : j - 2])
+            if not _WIKI_NAMESPACE_LINK_RE.match(inner_clean):
+                result.append(inner_clean.split("|")[-1])
+            i = j
+        else:
+            result.append(text[i])
+            i += 1
+    return "".join(result)
+
+
+def _wikitext_to_plaintext(wikitext: str) -> str:
+    """Wikitext(MediaWiki のマークアップ)を平文(プレーンテキスト)に変換する。
+
+    ``action=parse&oldid=<リビジョンID>`` で取得した特定リビジョンの wikitext を
+    対象に、コメント・``<ref>`` 参照・テンプレート・表・リンクなど代表的なマークアップ
+    を正規表現ベースで除去する簡易的な変換であり、MediaWiki パーサの完全な再実装では
+    ない。テンプレートは展開せずまるごと除去するため、数値などをテンプレート経由で
+    挿入している箇所は本文から欠落することがある(005 の fertility 集計は文章全体の
+    圧縮効率を見るものであり、この程度の局所的な欠落が結果を大きく左右しないと
+    判断し許容する)。
+    """
+    text = wikitext
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    text = re.sub(r"<ref[^>]*/>", "", text)
+    text = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.DOTALL)
+    text = _remove_wikitext_templates(text)
+    text = re.sub(r"(?s)\{\|.*?\|\}", "", text)
+    text = _strip_wikitext_links(text)
+    text = re.sub(r"\[https?://\S+\s+([^\]]+)\]", r"\1", text)
+    text = re.sub(r"\[https?://\S+\]", "", text)
+    text = text.replace("'''", "").replace("''", "")
+    text = re.sub(r"(?m)^=+\s*(.*?)\s*=+$", r"\1", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"(?m)^[*#:;]+\s*", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 class CharacterLevelTokenizer:
@@ -130,10 +219,17 @@ def load_tiny_shakespeare(cache_dir: str | Path) -> str:
     return cache_path.read_text(encoding="utf-8")
 
 
-def _fetch_wikipedia_extract(
-    title: str, max_retries: int = 5, retry_wait_seconds: float = 5.0
+def _fetch_wikipedia_revision_plaintext(
+    title: str, revid: int, max_retries: int = 5, retry_wait_seconds: float = 5.0
 ) -> str:
-    """日本語版 Wikipedia の 1 記事の本文(プレーンテキスト)を取得する。
+    """日本語版 Wikipedia の指定リビジョンの本文を取得し、平文に変換する。
+
+    ``action=query&prop=extracts`` は常に最新版の本文を返し、``revids`` パラメータを
+    指定しても無視される(実際にリクエストして確認済み: 数年前のリビジョン ID を
+    指定しても最新版と同一の本文が返る)。特定のリビジョンを取得するには
+    ``action=parse&oldid=<リビジョンID>`` を使う必要がある。この API は wikitext
+    (MediaWiki のマークアップ)しか返さないため、``_wikitext_to_plaintext`` で
+    平文に変換する。
 
     Wikimedia API は (1) デフォルトの User-Agent(``python-urllib/...``)からの
     リクエストを 403 で拒否し、(2) 短時間に連続してリクエストすると 429
@@ -142,10 +238,9 @@ def _fetch_wikipedia_extract(
     """
     params = urllib.parse.urlencode(
         {
-            "action": "query",
-            "prop": "extracts",
-            "explaintext": 1,
-            "titles": title,
+            "action": "parse",
+            "oldid": revid,
+            "prop": "wikitext",
             "format": "json",
             "formatversion": 2,
         }
@@ -160,11 +255,8 @@ def _fetch_wikipedia_extract(
             with urllib.request.urlopen(request) as response:  # noqa: S310
                 data = json.loads(response.read().decode("utf-8"))
             time.sleep(1.0)  # 連続リクエストによるレート制限(429)を避ける
-            page = data["query"]["pages"][0]
-            extract = page.get("extract", "")
-            # explaintext=1 でも "== 節見出し ==" 形式のセクション見出しは平文のまま
-            # 残るため、除去する(本文の自然な日本語文のみを残す)。
-            return re.sub(r"(?m)^=+\s*.*?\s*=+$\n?", "", extract)
+            wikitext = data["parse"]["wikitext"]
+            return _wikitext_to_plaintext(wikitext)
         except urllib.error.HTTPError as e:
             if e.code == 429 and attempt < max_retries - 1:
                 time.sleep(retry_wait_seconds * (attempt + 1))
@@ -176,20 +268,23 @@ def _fetch_wikipedia_extract(
 def load_japanese_corpus(cache_dir: str | Path) -> str:
     """日本語コーパスを取得してキャッシュする(005 トークナイザの日本語ドメイン用)。
 
-    日本語版 Wikipedia の MediaWiki API(``action=query``, ``prop=extracts``)を用いて、
-    固定の記事タイトル一覧(``_JAPANESE_WIKIPEDIA_TITLES``)から本文(プレーンテキスト、
-    Wikipedia のマークアップは除去済み)を取得して連結する。
+    出典: フリー百科事典『ウィキペディア(Wikipedia)』日本語版
+    (https://ja.wikipedia.org/)。ライセンス: クリエイティブ・コモンズ 表示-継承 4.0
+    国際(CC BY-SA 4.0)。固定の記事タイトル・リビジョン ID の対応
+    (``_JAPANESE_WIKIPEDIA_REVISIONS``)から、日本語版 Wikipedia の MediaWiki API
+    (``action=parse``、``oldid`` でリビジョンを指定)を用いて各記事の指定リビジョンの
+    本文を取得し、wikitext を平文に変換したうえで連結する。
 
-    記事ごとに個別のファイルへキャッシュする(``cache_dir/japanese_wikipedia_articles/``)。
-    Wikimedia API のレート制限(429)により取得が一部の記事で失敗しても、
-    セルを再実行すれば取得済みの記事はキャッシュから読み、未取得の記事のみ再取得する
-    (1 記事も欠けずに揃うまで、コーパス全体のキャッシュファイルは作らない)。
+    タイトルとリビジョン ID を両方固定しているため、実行時点によらず同一の入力が
+    得られる(``action=query&prop=extracts`` はリビジョンを固定できず最新版を返して
+    しまうため使わない。関数の docstring を参照)。
 
-    Note:
-        記事本文は将来的に編集され得るため、``load_tiny_shakespeare`` とは異なり
-        厳密な意味での再現性(バイト単位での一致)は保証しない。005 の実験は
-        語彙統計(fertility など)の相対比較が目的であり、コーパスが実行のたびに
-        完全に同一である必要はない。
+    記事ごとに個別のファイルへキャッシュする(``cache_dir/japanese_wikipedia_articles/``、
+    ファイル名にリビジョン ID を含めるため、``_JAPANESE_WIKIPEDIA_REVISIONS`` を
+    更新した場合は自動的に再取得される)。Wikimedia API のレート制限(429)により
+    取得が一部の記事で失敗しても、セルを再実行すれば取得済みの記事はキャッシュから
+    読み、未取得の記事のみ再取得する(1 記事も欠けずに揃うまで、コーパス全体の
+    キャッシュファイルは作らない)。
 
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
@@ -204,10 +299,12 @@ def load_japanese_corpus(cache_dir: str | Path) -> str:
 
     if not cache_path.exists():
         texts = []
-        for i, title in enumerate(_JAPANESE_WIKIPEDIA_TITLES):
-            article_path = articles_dir / f"{i:03d}.txt"
+        for i, (title, revid) in enumerate(_JAPANESE_WIKIPEDIA_REVISIONS.items()):
+            article_path = articles_dir / f"{i:03d}_{revid}.txt"
             if not article_path.exists():
-                article_path.write_text(_fetch_wikipedia_extract(title), encoding="utf-8")
+                article_path.write_text(
+                    _fetch_wikipedia_revision_plaintext(title, revid), encoding="utf-8"
+                )
             texts.append(article_path.read_text(encoding="utf-8"))
         cache_path.write_text("\n".join(t for t in texts if t), encoding="utf-8")
 

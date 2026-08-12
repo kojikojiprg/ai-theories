@@ -219,3 +219,66 @@ def compute_exact_match_rate(
     ]
     match_rate = 1.0 - len(mismatches) / len(sequences_a)
     return match_rate, mismatches
+
+
+def compute_segmentation_agreement_rate(
+    segmentation_a: Sequence[str],
+    segmentation_b: Sequence[str],
+) -> float:
+    """2 つの分割の一致度を、トークン境界の集合の Jaccard 係数として計算する。
+
+    なぜ完全一致ではなく境界の Jaccard 係数か: BPE と Unigram 言語モデルのように
+    符号化の慣習そのものが異なる(例: SentencePiece は語頭の空白を ``▁`` として
+    トークンに含めるが、本リポジトリの自作 BPE はそうしない)2 つの分割方式を比較する
+    場合、``compute_exact_match_rate`` のような文単位の完全一致(0 か 1 か)は、
+    表層形の些細な流儀の違いだけで文全体が「不一致」になり、ほぼ常に一致率 0 に
+    張り付いてしまう。これでは、2 つの分割が「どの程度似ているか」という度合いを
+    測れない。トークン境界の位置集合どうしの Jaccard 係数を使うと、些細な流儀の
+    違いがあっても分割の大部分が同じ位置で切れていれば高い値になり、部分的な
+    一致の度合いを連続値として評価できる(005 の実験5-2)。
+
+    具体的には、各分割について部分語の長さを先頭から累積し、トークンの境界となる
+    文字位置の集合を作る(文字列先頭の位置 0 と末尾の位置は、どの分割でも自明に
+    共通するため集合から除く)。2 つの境界位置集合 $A$, $B$ に対して
+
+    $$
+    J(A, B) = \\frac{|A \\cap B|}{|A \\cup B|}
+    $$
+
+    を返す。$A = B = \\emptyset$(両方とも 1 トークンのみで境界が 1 つも無い)場合は
+    $J = 1.0$ とする(空集合どうしは定義上一致とみなす)。
+
+    Args:
+        segmentation_a: 分割結果 A(部分語シンボルのリスト)。
+        segmentation_b: 分割結果 B。連結した文字列が ``segmentation_a`` の
+            連結結果と一致する必要がある(異なる文字列を分割した結果を比較するのは
+            不正な使い方であるため)。
+
+    Returns:
+        トークン境界集合の Jaccard 係数(0 以上 1 以下)。
+
+    Raises:
+        ValueError: 2 つの分割を連結した文字列が一致しない場合。
+    """
+    joined_a = "".join(segmentation_a)
+    joined_b = "".join(segmentation_b)
+    if joined_a != joined_b:
+        raise ValueError(
+            "segmentation_a と segmentation_b を連結した文字列が一致しません"
+            f"(比較対象として不正): {joined_a!r} != {joined_b!r}"
+        )
+
+    def _boundaries(segmentation: Sequence[str]) -> set[int]:
+        positions = set()
+        cursor = 0
+        for piece in segmentation:
+            cursor += len(piece)
+            positions.add(cursor)
+        positions.discard(len(joined_a))  # 末尾は自明な境界なので除く
+        return positions
+
+    boundaries_a = _boundaries(segmentation_a)
+    boundaries_b = _boundaries(segmentation_b)
+    if not boundaries_a and not boundaries_b:
+        return 1.0
+    return len(boundaries_a & boundaries_b) / len(boundaries_a | boundaries_b)
