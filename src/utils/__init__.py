@@ -2,14 +2,20 @@
 
 from src.utils.statistics import (
     compute_always_negative_unit_ratio,
+    compute_chunk_length_statistics,
+    compute_exact_match_rate,
+    compute_fertility,
     compute_gradient_norm_by_unit_group,
     compute_gradient_norm_per_layer,
     compute_mean_to_rms_ratio,
+    compute_unknown_rate,
 )
 from src.utils.visualization import (
     plot_attention_heatmap,
     plot_bar_by_layer,
+    plot_dual_axis_curves,
     plot_function_curves,
+    plot_grouped_bar,
     plot_learning_curves,
     plot_learning_curves_multi_seed,
     plot_multi_head_attention,
@@ -18,12 +24,18 @@ from src.utils.visualization import (
 
 __all__ = [
     "compute_always_negative_unit_ratio",
+    "compute_chunk_length_statistics",
+    "compute_exact_match_rate",
+    "compute_fertility",
     "compute_gradient_norm_by_unit_group",
     "compute_gradient_norm_per_layer",
     "compute_mean_to_rms_ratio",
+    "compute_unknown_rate",
     "plot_attention_heatmap",
     "plot_bar_by_layer",
+    "plot_dual_axis_curves",
     "plot_function_curves",
+    "plot_grouped_bar",
     "plot_learning_curves",
     "plot_learning_curves_multi_seed",
     "plot_multi_head_attention",

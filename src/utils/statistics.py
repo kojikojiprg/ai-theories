@@ -1,6 +1,7 @@
-"""隠れ状態・活性化・勾配の統計量を測定するユーティリティ。
+"""隠れ状態・活性化・勾配・トークナイザの統計量を測定するユーティリティ。
 
-``theories/01_foundations/004_normalization_and_activation.ipynb`` の実験 D・F で使う。
+``theories/01_foundations/004_normalization_and_activation.ipynb`` の実験 D・F、
+``theories/02_pretraining/005_tokenizer.ipynb`` の各実験で使う。
 
 記号 / Notation:
     d_model : 隠れ状態の特徴次元
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 
@@ -131,3 +133,89 @@ def compute_gradient_norm_per_layer(model: nn.Module) -> tuple[list[float], list
     final_norm = raw_norms[-1]
     relative_norms = [v / final_norm for v in raw_norms]
     return raw_norms, relative_norms
+
+
+def compute_fertility(token_count: int, char_count: int) -> float:
+    """fertility(1 文字あたりのトークン数)を計算する。
+
+    Rust et al. (2021) の定義に基づく圧縮効率の指標。値が小さいほど、より少ない
+    トークンで同じ文字数のテキストを表現できている(語彙サイズに対する圧縮効果が
+    高い)ことを意味する。
+
+    Note:
+        原論文の fertility は主に単語単位(1 単語あたりのトークン数)で定義される
+        ことが多いが、本リポジトリは日本語(単語境界が表層に現れない言語)を扱うため、
+        分母を単語数ではなく文字数に統一する(005 の理論セクションを参照)。
+
+    Args:
+        token_count: トークナイザによる符号化後のトークン数。
+        char_count: 符号化対象テキストの文字数。
+
+    Returns:
+        fertility(token_count / char_count)。
+    """
+    return token_count / char_count
+
+
+def compute_unknown_rate(tokens: Sequence[str], unk_token: str = "<unk>") -> float:
+    """トークン列に占める未知語(Out-of-Vocabulary)トークンの割合を計算する。
+
+    Args:
+        tokens: 符号化後のトークン列。
+        unk_token: 未知語を表す特殊トークン。
+
+    Returns:
+        未知語トークンの割合(0 以上 1 以下)。``tokens`` が空の場合は 0.0。
+    """
+    if not tokens:
+        return 0.0
+    return sum(1 for t in tokens if t == unk_token) / len(tokens)
+
+
+def compute_chunk_length_statistics(chunks: Sequence[str]) -> dict[str, float]:
+    """チャンク(事前分割で得た単位)の長さ(文字数)の分布統計を計算する。
+
+    空白による事前分割(pre-tokenization)が言語によって機能するかどうかを、
+    チャンク長の分布として定量的に比較するために使う(005 の実験4)。
+
+    Args:
+        chunks: チャンク(部分文字列)のリスト。
+
+    Returns:
+        ``{"median": ..., "mean": ..., "p90": ..., "max": ...}`` の辞書
+        (いずれも文字数単位)。
+    """
+    lengths = np.array([len(c) for c in chunks], dtype=float)
+    return {
+        "median": float(np.median(lengths)),
+        "mean": float(np.mean(lengths)),
+        "p90": float(np.percentile(lengths, 90)),
+        "max": float(np.max(lengths)),
+    }
+
+
+def compute_exact_match_rate(
+    sequences_a: Sequence[Sequence[str]],
+    sequences_b: Sequence[Sequence[str]],
+) -> tuple[float, list[int]]:
+    """2 組の分割結果を項目ごとに比較し、完全一致率と不一致のインデックス一覧を返す。
+
+    自作の Viterbi 分割と sentencepiece 自身の分割結果の比較、および BPE と
+    Unigram 言語モデルの分割結果の比較に使う(005 の実験5)。
+
+    Args:
+        sequences_a: 分割結果 A(文の数だけ、部分語シンボル列を並べたもの)。
+        sequences_b: 分割結果 B。``sequences_a`` と同じ長さである必要がある。
+
+    Returns:
+        (完全一致率, 不一致の項目インデックスのリスト) のタプル。
+    """
+    if len(sequences_a) != len(sequences_b):
+        raise ValueError("sequences_a と sequences_b の要素数が一致しません")
+    mismatches = [
+        i
+        for i, (a, b) in enumerate(zip(sequences_a, sequences_b, strict=True))
+        if list(a) != list(b)
+    ]
+    match_rate = 1.0 - len(mismatches) / len(sequences_a)
+    return match_rate, mismatches

@@ -9,6 +9,8 @@ Note:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -398,4 +400,128 @@ def plot_learning_curves(
         ax.set_yscale("log")
     ax.grid(alpha=0.3)
     ax.legend()
+    return ax
+
+
+def plot_grouped_bar(
+    values_by_series: dict[str, dict[str, float]],
+    title: str = "",
+    ylabel: str = "Value",
+    xlabel: str = "",
+    ax: Axes | None = None,
+    log_scale: bool = False,
+) -> Axes:
+    """カテゴリ(x 軸)ごとに複数系列の値を並べた棒グラフを描画する。
+
+    ドメイン(英語・日本語・コードなど)× 条件(chunk_split_mode など)のように、
+    2 つの離散軸を持つ値を比較する際に使う(005 の実験4など)。
+
+    Args:
+        values_by_series: ``{系列名: {カテゴリ名: 値}}`` の辞書。全系列でカテゴリの
+            集合が揃っている必要がある(最初の系列のキー順を x 軸の順序として使う)。
+        title: 図のタイトル。
+        ylabel: 縦軸ラベル。
+        xlabel: 横軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+        log_scale: 縦軸を対数スケールにするか。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 4.2))
+
+    series_names = list(values_by_series.keys())
+    categories = list(next(iter(values_by_series.values())).keys())
+    n_series = len(series_names)
+    x = np.arange(len(categories))
+    bar_width = 0.8 / n_series
+
+    for i, name in enumerate(series_names):
+        offset = (i - (n_series - 1) / 2) * bar_width
+        values = [values_by_series[name][c] for c in categories]
+        ax.bar(x + offset, values, width=bar_width, label=name)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories)
+    if log_scale:
+        ax.set_yscale("log")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(fontsize=8)
+    return ax
+
+
+def plot_dual_axis_curves(
+    x: Sequence[float],
+    left_curves: dict[str, Sequence[float]],
+    right_curves: dict[str, Sequence[float]],
+    xlabel: str = "",
+    left_ylabel: str = "",
+    right_ylabel: str = "",
+    title: str = "",
+    ax: Axes | None = None,
+    log_x: bool = False,
+) -> Axes:
+    """左右で異なる尺度を持つ 2 種類の系列を、共通の x 軸上に重ねて描画する。
+
+    埋め込み行列のパラメータ数(語彙サイズに比例して増加)と、系列長に依存する
+    演算量(語彙サイズが増えるほど fertility が下がり減少する)のように、
+    スケールの異なる量を同一の x 軸(語彙サイズなど)上で比較する際に使う
+    (005 の実験6、語彙サイズと計算量のトレードオフ)。
+
+    Args:
+        x: 共通の横軸の値。
+        left_curves: 左側 y 軸に描く ``{系列名: 値}`` の辞書。
+        right_curves: 右側 y 軸に描く ``{系列名: 値}`` の辞書。
+        xlabel: 横軸ラベル。
+        left_ylabel: 左側縦軸ラベル。
+        right_ylabel: 右側縦軸ラベル。
+        title: 図のタイトル。
+        ax: 描画先の Axes(左側)。None なら新規作成する。
+        log_x: 横軸を対数スケールにするか。
+
+    Returns:
+        左側の Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 4.2))
+    right_ax = ax.twinx()
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    lines = []
+    for i, (name, values) in enumerate(left_curves.items()):
+        (line,) = ax.plot(
+            x,
+            values,
+            color=color_cycle[i % len(color_cycle)],
+            linestyle="-",
+            marker="o",
+            label=f"{name} (left)",
+        )
+        lines.append(line)
+    n_left = len(left_curves)
+    for i, (name, values) in enumerate(right_curves.items()):
+        (line,) = right_ax.plot(
+            x,
+            values,
+            color=color_cycle[(n_left + i) % len(color_cycle)],
+            linestyle="--",
+            marker="s",
+            label=f"{name} (right)",
+        )
+        lines.append(line)
+
+    if log_x:
+        ax.set_xscale("log")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(left_ylabel)
+    right_ax.set_ylabel(right_ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(lines, [line.get_label() for line in lines], fontsize=8, loc="best")
     return ax

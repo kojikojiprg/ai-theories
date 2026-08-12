@@ -98,6 +98,8 @@ pyparsing==3.3.2
     # via matplotlib
 python-dateutil==2.9.0.post0
     # via matplotlib
+sentencepiece==0.2.2
+    # via ai-theories
 setuptools==84.0.0
     # via torch
 six==1.17.0
