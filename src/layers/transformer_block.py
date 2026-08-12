@@ -7,6 +7,12 @@ Ba et al., 2016)を組み合わせたブロックを実装する。
 正規化前置(Pre-Layer Normalization)と正規化後置(Post-Layer Normalization)の
 どちらの構造を使うかは ``norm_first`` 引数で切り替える(Xiong et al., 2020 の議論に対応)。
 
+004 で ``normalization_factory``・``feed_forward_factory`` 引数を追加し、
+正規化層・順伝播ネットワークの実装(RMSNorm、SwiGLUFeedForwardNetwork など)を
+ブロック内部の注入点として差し替え可能にした(003 で ``MultiHeadAttention`` に
+``positional_transform`` 等を注入したのと同じ設計方針。ラッパークラスを増やすのではなく、
+注入点がブロック内部にあるため optional 引数で拡張する)。
+
 記号 / Notation:
     d_model : ブロックの入出力次元
     h       : Multi-Head Attention のヘッド数
@@ -14,6 +20,8 @@ Ba et al., 2016)を組み合わせたブロックを実装する。
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from torch import Tensor, nn
 
@@ -43,9 +51,22 @@ class EncoderBlock(nn.Module):
         num_heads: Multi-Head Attention のヘッド数 h。
         d_ff: Feed-Forward Network の中間層次元。
         dropout: Attention 重み・各サブレイヤー出力に適用する dropout 率。
-        activation: Feed-Forward Network の活性化関数("relu" または "gelu")。
         norm_first: True で正規化前置(Pre-Layer Normalization)、
             False で正規化後置(Post-Layer Normalization)。
+        normalization_factory: 正規化層を生成する callable(004 で追加)。
+            ``d_model`` を受け取り ``nn.Module`` を返す(例: ``RMSNorm`` を使いたい場合は
+            ``lambda d: RMSNorm(d)``)。``None``(既定値)の場合は従来通り
+            ``LayerNormalization`` を使う。
+        feed_forward_factory: Feed-Forward Network を生成する引数なしの callable
+            (004 で追加)。``nn.Module`` を返す(例: ``SwiGLUFeedForwardNetwork`` を
+            使いたい場合は ``functools.partial`` や ``lambda`` で ``d_model``・``d_ff``
+            を束縛して渡す)。``None``(既定値)の場合は従来通り ``activation_fn=None``
+            の ``FeedForwardNetwork``(ReLU)を使う。
+        activation_fn: ``feed_forward_factory`` が ``None`` のときに使う
+            ``FeedForwardNetwork`` の活性化関数(004 で追加、``FeedForwardNetwork``
+            にそのまま透過する)。``None``(既定値)の場合は ReLU
+            (001・002・003 と同一の挙動)。``feed_forward_factory`` が指定された
+            場合はこの引数は無視される。
     """
 
     def __init__(
@@ -54,18 +75,23 @@ class EncoderBlock(nn.Module):
         num_heads: int,
         d_ff: int,
         dropout: float = 0.0,
-        activation: str = "relu",
         norm_first: bool = True,
+        normalization_factory: Callable[[int], nn.Module] | None = None,
+        feed_forward_factory: Callable[[], nn.Module] | None = None,
+        activation_fn: Callable[[Tensor], Tensor] | None = None,
     ) -> None:
         super().__init__()
         self.norm_first = norm_first
 
         self.self_attn = MultiHeadAttention(d_model, num_heads, dropout=dropout)
-        self.feed_forward = FeedForwardNetwork(
-            d_model, d_ff, activation=activation, dropout=dropout
+        self.feed_forward = (
+            feed_forward_factory()
+            if feed_forward_factory is not None
+            else FeedForwardNetwork(d_model, d_ff, dropout=dropout, activation_fn=activation_fn)
         )
-        self.norm1 = LayerNormalization(d_model)
-        self.norm2 = LayerNormalization(d_model)
+        norm_fn = normalization_factory or LayerNormalization
+        self.norm1 = norm_fn(d_model)
+        self.norm2 = norm_fn(d_model)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
@@ -117,8 +143,16 @@ class DecoderBlock(nn.Module):
         num_heads: Multi-Head Attention のヘッド数 h。
         d_ff: Feed-Forward Network の中間層次元。
         dropout: Attention 重み・各サブレイヤー出力に適用する dropout 率。
-        activation: Feed-Forward Network の活性化関数("relu" または "gelu")。
         norm_first: True で正規化前置、False で正規化後置。
+        normalization_factory: 正規化層を生成する callable(004 で追加)。
+            ``d_model`` を受け取り ``nn.Module`` を返す。``None``(既定値)の場合は
+            従来通り ``LayerNormalization`` を使う(詳細は ``EncoderBlock`` の説明を参照)。
+        feed_forward_factory: Feed-Forward Network を生成する引数なしの callable
+            (004 で追加)。``None``(既定値)の場合は従来通り ``activation_fn=None``
+            の ``FeedForwardNetwork``(ReLU)を使う(詳細は ``EncoderBlock`` の説明を参照)。
+        activation_fn: ``feed_forward_factory`` が ``None`` のときに使う
+            ``FeedForwardNetwork`` の活性化関数(004 で追加)。``None``(既定値)の
+            場合は ReLU(001・002・003 と同一の挙動)。
     """
 
     def __init__(
@@ -127,20 +161,25 @@ class DecoderBlock(nn.Module):
         num_heads: int,
         d_ff: int,
         dropout: float = 0.0,
-        activation: str = "relu",
         norm_first: bool = True,
+        normalization_factory: Callable[[int], nn.Module] | None = None,
+        feed_forward_factory: Callable[[], nn.Module] | None = None,
+        activation_fn: Callable[[Tensor], Tensor] | None = None,
     ) -> None:
         super().__init__()
         self.norm_first = norm_first
 
         self.self_attn = MultiHeadAttention(d_model, num_heads, dropout=dropout)
         self.cross_attn = MultiHeadAttention(d_model, num_heads, dropout=dropout)
-        self.feed_forward = FeedForwardNetwork(
-            d_model, d_ff, activation=activation, dropout=dropout
+        self.feed_forward = (
+            feed_forward_factory()
+            if feed_forward_factory is not None
+            else FeedForwardNetwork(d_model, d_ff, dropout=dropout, activation_fn=activation_fn)
         )
-        self.norm1 = LayerNormalization(d_model)
-        self.norm2 = LayerNormalization(d_model)
-        self.norm3 = LayerNormalization(d_model)
+        norm_fn = normalization_factory or LayerNormalization
+        self.norm1 = norm_fn(d_model)
+        self.norm2 = norm_fn(d_model)
+        self.norm3 = norm_fn(d_model)
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
         self.dropout3 = nn.Dropout(dropout)

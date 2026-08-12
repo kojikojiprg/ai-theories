@@ -155,6 +155,157 @@ def plot_multi_head_attention(
     return fig
 
 
+def plot_seed_scatter(
+    values_by_condition: dict[str, list[float]],
+    title: str = "",
+    ylabel: str = "Value",
+    ax: Axes | None = None,
+    log_scale: bool = False,
+) -> Axes:
+    """条件ごとに、乱数シード(seed)ごとの値を平均・範囲とともに散布図で描画する。
+
+    複数シードで実行した実験(004 の実験 C・E・G など)で、平均値だけでなく
+    個々のシードの値をすべて重ねて表示するために使う。条件間で最小値〜最大値の
+    区間が重なるかどうかを目視で判定できるようにすることが目的。
+
+    Args:
+        values_by_condition: ``{条件名: シードごとの値のリスト}`` の辞書。
+        title: 図のタイトル。
+        ylabel: 縦軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+        log_scale: 縦軸を対数スケールにするか。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(max(4.0, 1.2 * len(values_by_condition) + 2.0), 4.2))
+
+    rng = np.random.default_rng(0)
+    for x, (_name, values) in enumerate(values_by_condition.items()):
+        values_arr = np.asarray(values, dtype=float)
+        jitter = rng.uniform(-0.12, 0.12, size=len(values_arr))
+        ax.scatter(
+            np.full(len(values_arr), x) + jitter,
+            values_arr,
+            color="tab:gray",
+            alpha=0.7,
+            s=22,
+            zorder=2,
+            label="individual seeds" if x == 0 else None,
+        )
+        mean = values_arr.mean()
+        low, high = values_arr.min(), values_arr.max()
+        ax.errorbar(
+            [x],
+            [mean],
+            yerr=[[mean - low], [high - mean]],
+            fmt="o",
+            color="tab:red",
+            capsize=4,
+            markersize=7,
+            zorder=3,
+            label="mean (min-max range)" if x == 0 else None,
+        )
+
+    ax.set_xticks(range(len(values_by_condition)))
+    ax.set_xticklabels(list(values_by_condition.keys()), rotation=20, ha="right")
+    ax.set_ylabel(ylabel)
+    if log_scale:
+        ax.set_yscale("log")
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(fontsize=8)
+    return ax
+
+
+def plot_bar_by_layer(
+    values_by_condition: dict[str, list[float]],
+    title: str = "",
+    ylabel: str = "Value",
+    xlabel: str = "Layer index (1 = closest to input)",
+    ax: Axes | None = None,
+) -> Axes:
+    """層ごとの統計量を、条件ごとに並べた棒グラフで描画する。
+
+    隠れ状態の平均/RMS 比(実験 D)や死んだユニット(dead unit)の割合(実験 F)など、
+    層番号を横軸にした条件間比較に使う。
+
+    Args:
+        values_by_condition: ``{条件名: 層ごとの値のリスト}`` の辞書。
+            すべての条件で層数(リストの長さ)が揃っている必要がある。
+        title: 図のタイトル。
+        ylabel: 縦軸ラベル。
+        xlabel: 横軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 4.2))
+
+    n_conditions = len(values_by_condition)
+    n_layers = len(next(iter(values_by_condition.values())))
+    layer_positions = np.arange(1, n_layers + 1)
+    bar_width = 0.8 / n_conditions
+
+    for i, (name, values) in enumerate(values_by_condition.items()):
+        offset = (i - (n_conditions - 1) / 2) * bar_width
+        ax.bar(layer_positions + offset, values, width=bar_width, label=name)
+
+    ax.set_xticks(layer_positions)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(fontsize=8)
+    return ax
+
+
+def plot_function_curves(
+    x: torch.Tensor | np.ndarray,
+    curves: dict[str, torch.Tensor | np.ndarray],
+    title: str = "",
+    xlabel: str = "x",
+    ylabel: str = "f(x)",
+    ax: Axes | None = None,
+) -> Axes:
+    """複数の関数の値(または導関数)を同一の x 軸上に重ねて描画する。
+
+    活性化関数の形状比較(004 の実験 A、ReLU / GELU / Swish とその導関数)に使う。
+
+    Args:
+        x: 形状 ``(N,)`` の共通の横軸の値。
+        curves: ``{系列名: f(x) の値}`` の辞書。各値は x と同じ形状 ``(N,)``。
+        title: 図のタイトル。
+        xlabel: 横軸ラベル。
+        ylabel: 縦軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.0, 4.2))
+
+    x_np = _to_numpy(x)
+    for name, values in curves.items():
+        ax.plot(x_np, _to_numpy(values), label=name, linewidth=1.8)
+
+    ax.axhline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax.axvline(0.0, color="gray", linewidth=0.8, linestyle="--")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    return ax
+
+
 def plot_learning_curves(
     histories: dict[str, list[float]],
     title: str = "Learning curve",
