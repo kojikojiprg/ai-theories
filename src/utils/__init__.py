@@ -11,6 +11,7 @@ from src.utils.visualization import (
     plot_bar_by_layer,
     plot_function_curves,
     plot_learning_curves,
+    plot_learning_curves_multi_seed,
     plot_multi_head_attention,
     plot_seed_scatter,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "plot_bar_by_layer",
     "plot_function_curves",
     "plot_learning_curves",
+    "plot_learning_curves_multi_seed",
     "plot_multi_head_attention",
     "plot_seed_scatter",
 ]

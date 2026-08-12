@@ -220,6 +220,64 @@ def plot_seed_scatter(
     return ax
 
 
+def plot_learning_curves_multi_seed(
+    histories_by_condition: dict[str, list[dict]],
+    step_key: str = "step",
+    value_key: str = "evaluation_loss",
+    title: str = "Learning curve",
+    xlabel: str = "Step",
+    ylabel: str = "Loss",
+    ax: Axes | None = None,
+    log_scale: bool = False,
+) -> Axes:
+    """条件ごとに、複数シードの学習曲線をすべて重ねて描画する。
+
+    条件ごとに色を揃え、シードごとの線は細く半透明にすることで、シード間のばらつきを
+    見せつつ条件間の違いも読み取れるようにする。凡例には条件名のみを表示し、
+    シード番号は出さない(`ax.plot([], [], ...)`でシードごとの線とは別に凡例専用の
+    ダミー線を 1 本だけ登録する)。
+
+    Args:
+        histories_by_condition: ``{条件名: シードごとの history 辞書のリスト}``。
+            各 history は`train_character_level_language_model()`の戻り値のように
+            ``step_key``・``value_key``をキーに持つ辞書を想定する。
+        step_key: history から横軸の値を取り出すキー。
+        value_key: history から縦軸の値を取り出すキー。
+        title: 図のタイトル。
+        xlabel: 横軸ラベル。
+        ylabel: 縦軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+        log_scale: 縦軸を対数スケールにするか。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 4.5))
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, (name, histories) in enumerate(histories_by_condition.items()):
+        color = color_cycle[i % len(color_cycle)]
+        for history in histories:
+            ax.plot(
+                history[step_key],
+                history[value_key],
+                color=color,
+                alpha=0.35,
+                linewidth=1.0,
+            )
+        ax.plot([], [], color=color, linewidth=2.0, label=name)
+
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if log_scale:
+        ax.set_yscale("log")
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    return ax
+
+
 def plot_bar_by_layer(
     values_by_condition: dict[str, list[float]],
     title: str = "",
