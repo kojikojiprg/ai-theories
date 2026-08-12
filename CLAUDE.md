@@ -109,6 +109,7 @@ ai-theories/
   - 使わない例: LN / Pre-LN / Post-LN / FFN / MHA / PE
   - 使う例: 「Layer Normalization(層正規化)」「正規化前置(Pre-Layer Normalization)」「正規化後置(Post-Layer Normalization)」「Feed-Forward Network(順伝播ネットワーク)」「Multi-Head Attention(多頭注意機構)」「位置エンコーディング(Positional Encoding)」
 - ただし、**手法名・アーキテクチャ名として定着している略語は使用してよい** (LoRA、RoPE、DPO、RLHF、MoE、CLIP、ViT、BPE、SFT など)。この場合も初出時には正式名称を併記する(例: 「LoRA(Low-Rank Adaptation)」)。
+  また、**原論文が数式中の関数名・記号として使っている略語は、数式内に限り使用してよい** (例: $\mathrm{FFN}$)。この場合も散文中では正式名称(順伝播ネットワーク / Feed-Forward Network)を用いる。
 - **数式中の記号は原論文の表記に従う** (d_model、d_ff、d_k、d_v、h など)。使用時は必ず記号の定義を明記する。
 - このルールは、ノートブックの Markdown セル・コードのコメント・docstring・クラス名・関数名・変数名、および各 README.md のすべてに適用する(例: クラス名を`PreLNBlock`のようにしない)。
 - **強調記法(`**`・`*`)の前後が日本語の文字である場合は、防御的に半角スペースを入れる**。CommonMark 準拠のパーサではスペースなしでも描画されるが、一部のエディタ・プレビュー実装では強調として認識されないことがあるため。
