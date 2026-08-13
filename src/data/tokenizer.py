@@ -11,6 +11,7 @@ Model)の Viterbi 最尤分割をスクラッチ実装する。Unigram 言語モ
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -46,6 +47,10 @@ def _build_byte_to_unicode() -> dict[int, str]:
 
 
 _BYTE_TO_UNICODE: dict[int, str] = _build_byte_to_unicode()
+_UNICODE_TO_BYTE: dict[str, int] = {ch: b for b, ch in _BYTE_TO_UNICODE.items()}
+
+
+_WHITESPACE_CHUNK_RE = re.compile(r"\s*\S+|\s+")
 
 
 def pretokenize(text: str, chunk_split_mode: ChunkSplitMode) -> list[str]:
@@ -55,15 +60,25 @@ def pretokenize(text: str, chunk_split_mode: ChunkSplitMode) -> list[str]:
     Args:
         text: 分割対象のテキスト。
         chunk_split_mode:
-            ``"whitespace"``: 空白文字(スペース・タブ・改行)で分割する
-                (英語などスペース区切りの言語で一般的な単語分割)。
+            ``"whitespace"``: 空白文字(スペース・タブ・改行)の直前で分割し、
+                空白をその直後のチャンクの先頭に含める(GPT-2 のバイトレベル BPE
+                と同じ方式)。例えば ``"a  b"`` は ``["a", "  b"]`` になる
+                (``"b"`` の前の 2 個の空白がチャンク先頭に付く)。連続する空白・
+                タブ・改行はすべて 1 つの塊としてまとめて次のチャンクの先頭に付く。
+                テキスト末尾が空白で終わる場合、後続の非空白文字が無いため、
+                その空白の塊だけが独立したチャンクになる。チャンクをすべて連結すると
+                元のテキストが過不足なく復元できる(``BPETokenizer.encode()`` の
+                可逆性の根拠。5 節の可逆性の検証を参照)。
             ``"none"``: 事前分割を行わない。ただし改行のみは区切りとして扱う
                 (実装上の理由。改行をまたぐマージを許すとチャンクが際限なく
-                大きくなり実装が煩雑になるため。空白の有無のみを実験の対照条件と
+                大きくなり実装が煩雑になるため)。改行以外の空白(スペース・タブ)は
+                チャンク内にそのまま残る。この改行の扱いにより、複数行にわたる
+                テキストでは ``chunk_split_mode="whitespace"`` と異なり、
+                改行が失われるため可逆ではない(空白の有無のみを実験の対照条件と
                 するための単純化であり、005 の実装方針で明記する)。
     """
     if chunk_split_mode == "whitespace":
-        return text.split()
+        return _WHITESPACE_CHUNK_RE.findall(text)
     if chunk_split_mode == "none":
         return [line for line in text.split("\n") if line]
     raise ValueError(f"未知の chunk_split_mode: {chunk_split_mode!r}")
@@ -150,6 +165,23 @@ class BPETokenizer:
         for chunk in pretokenize(text, self.chunk_split_mode):
             tokens.extend(self.encode_chunk(chunk))
         return tokens
+
+    def decode(self, tokens: Sequence[str]) -> str:
+        """符号化されたトークン列を元のテキストに復元する。
+
+        ``chunk_split_mode="whitespace"`` は空白をチャンク先頭に保持するため、
+        トークンを単純に連結するだけで元のテキストが復元できる
+        (``chunk_split_mode="none"`` は改行を保持しないため、複数行にわたる
+        テキストでは復元できない、``pretokenize`` の docstring を参照)。
+        ``byte_level=True`` の場合、各トークンは UTF-8 バイト値を表す Unicode
+        1 文字の列(``_BYTE_TO_UNICODE`` によるマッピング)であるため、バイト列に
+        戻してから UTF-8 としてデコードする。
+        """
+        joined = "".join(tokens)
+        if not self.byte_level:
+            return joined
+        byte_values = bytes(_UNICODE_TO_BYTE[ch] for ch in joined)
+        return byte_values.decode("utf-8")
 
 
 def learn_bpe(
