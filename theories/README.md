@@ -93,7 +93,7 @@ The theories are organized by category, but I recommend **studying them in the n
 | `src/layers/activation.py`           | `gelu_exact()`、`gelu_tanh_approximation()`、`swish()`                                                    | 004          |
 | `src/data/text.py`                   | `CharacterLevelTokenizer`、`load_tiny_shakespeare()`、`split_train_val()`、`get_random_batch()`(004)。005 で`load_japanese_corpus()`(日本語版 Wikipedia の記事本文を取得)・`load_code_corpus()`(本リポジトリ自身の`src/`を連結)を追加 | 004, 005     |
 | `src/data/tokenizer.py`              | `learn_bpe()`・`BPETokenizer`(BPE の学習・符号化・`decode()`、`byte_level`によるバイトレベル BPE 切り替え)、`pretokenize()`(事前分割、`chunk_split_mode`。`whitespace` は空白をチャンク先頭に保持し可逆)、`viterbi_segment()`(Unigram 言語モデルの Viterbi 最尤分割)、`UnigramTokenizer`・`train_unigram_model()`(sentencepiece への語彙学習の委譲) | 005          |
-| `src/utils/statistics.py`            | `compute_mean_to_rms_ratio()`、`compute_always_negative_unit_ratio()`、`compute_gradient_norm_by_unit_group()`、`compute_gradient_norm_per_layer()`(004)。005 で`compute_fertility()`・`compute_unknown_rate()`・`compute_chunk_length_statistics()`・`compute_exact_match_rate()`・`compute_segmentation_agreement_rate()`(トークン境界集合の Jaccard 係数)を追加 | 004, 005     |
+| `src/utils/statistics.py`            | `compute_mean_to_rms_ratio()`、`compute_always_negative_unit_ratio()`、`compute_gradient_norm_by_unit_group()`、`compute_gradient_norm_per_layer()`(004)。005 で`compute_fertility()`・`compute_unknown_rate()`・`compute_chunk_length_statistics()`(先頭の連続空白を除いた統計も返す)・`compute_exact_match_rate()`・`compute_segmentation_agreement_rate()`(トークン境界集合の Jaccard 係数)を追加 | 004, 005     |
 
 ## 各ノートブックの構成 / Notebook Structure
 

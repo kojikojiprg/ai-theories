@@ -176,21 +176,39 @@ def compute_chunk_length_statistics(chunks: Sequence[str]) -> dict[str, float]:
     """チャンク(事前分割で得た単位)の長さ(文字数)の分布統計を計算する。
 
     空白による事前分割(pre-tokenization)が言語によって機能するかどうかを、
-    チャンク長の分布として定量的に比較するために使う(005 の実験4)。
+    チャンク長の分布として定量的に比較するために使う(005 の実験5)。
+
+    ``chunk_split_mode="whitespace"`` の下では、チャンクは空白の直前で区切られ、
+    区切られた空白がチャンクの先頭に付く(``pretokenize`` を参照)。このため、
+    インデントを持つコードのようにチャンク先頭に長い連続空白が付きうるドメインでは、
+    チャンク長が「単語の長さ」ではなく「先頭の連続空白の長さ(コードであれば
+    インデントの深さ)」を主に反映することがある。この 2 つの要因を切り分けられるよう、
+    先頭の連続空白(``str.lstrip()`` が除去する、半角空白・タブ・改行を含む
+    Unicode の空白文字)を除いた長さについても同じ統計を返す
+    (キーに ``_without_leading_whitespace`` を付す)。
 
     Args:
         chunks: チャンク(部分文字列)のリスト。
 
     Returns:
-        ``{"median": ..., "mean": ..., "p90": ..., "max": ...}`` の辞書
-        (いずれも文字数単位)。
+        ``{"median": ..., "mean": ..., "p90": ..., "max": ...,
+        "median_without_leading_whitespace": ..., "mean_without_leading_whitespace": ...,
+        "p90_without_leading_whitespace": ..., "max_without_leading_whitespace": ...}``
+        の辞書(いずれも文字数単位)。
     """
     lengths = np.array([len(c) for c in chunks], dtype=float)
+    lengths_without_leading_whitespace = np.array([len(c.lstrip()) for c in chunks], dtype=float)
     return {
         "median": float(np.median(lengths)),
         "mean": float(np.mean(lengths)),
         "p90": float(np.percentile(lengths, 90)),
         "max": float(np.max(lengths)),
+        "median_without_leading_whitespace": float(np.median(lengths_without_leading_whitespace)),
+        "mean_without_leading_whitespace": float(np.mean(lengths_without_leading_whitespace)),
+        "p90_without_leading_whitespace": float(
+            np.percentile(lengths_without_leading_whitespace, 90)
+        ),
+        "max_without_leading_whitespace": float(np.max(lengths_without_leading_whitespace)),
     }
 
 
