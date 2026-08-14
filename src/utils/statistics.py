@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 import torch
 from torch import Tensor, nn
+
+from src.data.tokenizer import try_decode_byte_level_symbol
 
 
 def compute_mean_to_rms_ratio(hidden_states: Sequence[Tensor]) -> list[float]:
@@ -300,3 +302,52 @@ def compute_segmentation_agreement_rate(
     if not boundaries_a and not boundaries_b:
         return 1.0
     return len(boundaries_a & boundaries_b) / len(boundaries_a | boundaries_b)
+
+
+def compute_character_coverage(
+    vocabulary: Iterable[str],
+    corpus: str,
+) -> tuple[int, int, float]:
+    """コーパスに出現するユニーク文字のうち、単一トークンとして語彙に含まれる
+    ものの数を数える。
+
+    語彙の各要素(シンボル)が「1 文字を表す単一トークン」かどうかは、次の手順で
+    判定する。
+
+    1. ``try_decode_byte_level_symbol``(``src/data/tokenizer.py``)で、そのシンボルを
+       バイトレベル BPE の表現とみなして UTF-8 文字列へのデコードを試みる。
+       成功し、かつ結果がちょうど 1 文字であれば、その文字を被覆しているとみなす。
+       これは、複数バイトにまたがる文字(日本語など)を表すには、対応するバイト列の
+       マージが完了している必要があることに対応する。
+    2. 1 が失敗する場合(シンボルの文字がバイトレベル表現の定義域に無い場合。
+       文字レベル語彙のシンボルは通常ここに該当する)、シンボルそのものが 1 文字の
+       文字列であれば、その文字を被覆しているとみなす。
+
+    この手順により、``byte_level`` の真偽を明示的に受け取らなくても、バイトレベル・
+    文字レベルいずれの語彙に対しても正しく動作する。文字レベル初期語彙は学習コーパスの
+    全ユニーク文字を初期シンボルとして含む(005 の 3.3 節)ため、被覆率は常に 1.0 になる
+    (この関数の対照としての振る舞い)。
+
+    Args:
+        vocabulary: 語彙(``BPETokenizer.vocab`` などのシンボル文字列の集合)。
+        corpus: 被覆率を測る対象のコーパス。
+
+    Returns:
+        (被覆した文字種数, コーパスのユニーク文字種数, 被覆率) のタプル。
+        コーパスが空文字列の場合、被覆率は 1.0 とする。
+    """
+    corpus_chars = set(corpus)
+    covered: set[str] = set()
+    for symbol in vocabulary:
+        decoded = try_decode_byte_level_symbol(symbol)
+        if decoded is not None:
+            if len(decoded) == 1:
+                covered.add(decoded)
+        elif len(symbol) == 1:
+            covered.add(symbol)
+
+    covered_in_corpus = covered & corpus_chars
+    num_total = len(corpus_chars)
+    num_covered = len(covered_in_corpus)
+    coverage = num_covered / num_total if num_total else 1.0
+    return num_covered, num_total, coverage

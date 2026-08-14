@@ -50,6 +50,32 @@ _BYTE_TO_UNICODE: dict[int, str] = _build_byte_to_unicode()
 _UNICODE_TO_BYTE: dict[str, int] = {ch: b for b, ch in _BYTE_TO_UNICODE.items()}
 
 
+def try_decode_byte_level_symbol(symbol: str) -> str | None:
+    """バイトレベル BPE の 1 シンボル(語彙の要素)を UTF-8 文字列としてデコードを試み、
+    成功すればその文字列を、失敗すれば ``None`` を返す。
+
+    シンボルの各文字を ``_UNICODE_TO_BYTE`` で対応するバイト値に戻し、その
+    バイト列を UTF-8 としてデコードする。以下のいずれかの場合に失敗する
+    (``None`` を返す)。
+
+    - シンボルの文字が ``_UNICODE_TO_BYTE`` の定義域(バイト値 0〜255 に対応する
+      256 個の Unicode 文字)に含まれない場合(バイトレベル表現として解釈できない、
+      例えば文字レベル語彙のシンボルを渡した場合)。
+    - バイト列が正しい UTF-8 として不正な場合(BPE のマージが 1 つの Unicode 文字を
+      再構成しきっていない、すなわちマルチバイト文字の一部のバイトだけが
+      マージされた状態)。
+
+    005 の ``compute_character_coverage``(``src/utils/statistics.py``)で、
+    バイトレベル語彙のある要素が特定の 1 文字を単一トークンとして表現できているかを
+    判定するために使う。
+    """
+    try:
+        byte_values = bytes(_UNICODE_TO_BYTE[ch] for ch in symbol)
+        return byte_values.decode("utf-8")
+    except (KeyError, UnicodeDecodeError):
+        return None
+
+
 _WHITESPACE_CHUNK_RE = re.compile(r"\s*\S+|\s+")
 
 

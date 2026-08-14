@@ -14,6 +14,7 @@ from src.data.tokenizer import (
     learn_bpe,
     pretokenize,
     train_unigram_model,
+    try_decode_byte_level_symbol,
     viterbi_segment,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "pretokenize",
     "split_train_val",
     "train_unigram_model",
+    "try_decode_byte_level_symbol",
     "viterbi_segment",
 ]

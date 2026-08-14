@@ -2,6 +2,7 @@
 
 from src.utils.statistics import (
     compute_always_negative_unit_ratio,
+    compute_character_coverage,
     compute_chunk_length_statistics,
     compute_exact_match_rate,
     compute_fertility,
@@ -25,6 +26,7 @@ from src.utils.visualization import (
 
 __all__ = [
     "compute_always_negative_unit_ratio",
+    "compute_character_coverage",
     "compute_chunk_length_statistics",
     "compute_exact_match_rate",
     "compute_fertility",
