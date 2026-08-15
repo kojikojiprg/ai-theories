@@ -216,7 +216,7 @@ uv export --format requirements-txt --no-hash --no-emit-project > requirements.t
 
 ```python
 # 環境セットアップ(Google Colab)
-!git clone https://github.com/<user>/ai-theories.git
+!git clone https://github.com/kojikojiprg/ai-theories.git
 %cd ai-theories
 !pip install uv -q
 !uv pip install --system -r requirements.txt
