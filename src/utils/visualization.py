@@ -16,6 +16,7 @@ import numpy as np
 import torch
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 
 
 def _to_numpy(weights: torch.Tensor | np.ndarray) -> np.ndarray:
@@ -410,6 +411,7 @@ def plot_grouped_bar(
     xlabel: str = "",
     ax: Axes | None = None,
     log_scale: bool = False,
+    noise_band: float | None = None,
 ) -> Axes:
     """カテゴリ(x 軸)ごとに複数系列の値を並べた棒グラフを描画する。
 
@@ -424,6 +426,15 @@ def plot_grouped_bar(
         xlabel: 横軸ラベル。
         ax: 描画先の Axes。None なら新規作成する。
         log_scale: 縦軸を対数スケールにするか。
+        noise_band: 測定ノイズ床(noise floor)の半値幅(006 で追加)。``None``
+            (既定値、従来の呼び出しはこの値のまま影響を受けない)の場合は描画しない。
+            指定した場合、``values_by_series`` の **最初の系列を基準条件(baseline)**
+            とみなし(x 軸の順序を決めるのと同じ系列)、カテゴリごとにその値
+            ``± noise_band`` の範囲を棒の背後に灰色の帯として描画する。他の系列の
+            値がこの帯からはみ出しているかどうかで、条件間の差が測定ノイズ床を
+            超えているかを目視で判定できるようにする(複数シードでの繰り返し測定の
+            ばらつきなどを noise_band として渡す想定、``plot_seed_scatter`` の
+            min-max range と同種の意図)。
 
     Returns:
         描画に使った Axes。
@@ -437,10 +448,27 @@ def plot_grouped_bar(
     x = np.arange(len(categories))
     bar_width = 0.8 / n_series
 
+    if noise_band is not None:
+        baseline_series = values_by_series[series_names[0]]
+        for i, category in enumerate(categories):
+            baseline_value = baseline_series[category]
+            ax.add_patch(
+                Rectangle(
+                    (x[i] - 0.4, baseline_value - noise_band),
+                    0.8,
+                    2 * noise_band,
+                    facecolor="gray",
+                    alpha=0.25,
+                    edgecolor="none",
+                    zorder=0,
+                    label="noise floor" if i == 0 else None,
+                )
+            )
+
     for i, name in enumerate(series_names):
         offset = (i - (n_series - 1) / 2) * bar_width
         values = [values_by_series[name][c] for c in categories]
-        ax.bar(x + offset, values, width=bar_width, label=name)
+        ax.bar(x + offset, values, width=bar_width, label=name, zorder=2)
 
     ax.set_xticks(x)
     ax.set_xticklabels(categories)

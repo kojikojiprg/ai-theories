@@ -27,69 +27,15 @@ _TINY_SHAKESPEARE_URL = (
     "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt"
 )
 
-# 日本語コーパス(load_japanese_corpus)の取得元として使う日本語版 Wikipedia の記事。
-# 分野を偏らせないよう、自然科学・人文・社会・技術・スポーツなど幅広いカテゴリから
-# 選んでいる(005 トークナイザで使用)。
+# Wikipedia コーパス(load_wikipedia_corpus)の既定の記事タイトル・リビジョン ID の
+# 対応(JSON、``src/data/wikipedia_manifests/`` に言語・用途ごとにコミット済み)を
+# 探す場所。
 #
-# 出典 / Source: フリー百科事典『ウィキペディア(Wikipedia)』日本語版
-#     (https://ja.wikipedia.org/)
+# 出典 / Source: フリー百科事典『ウィキペディア(Wikipedia)』
+#     (https://<language>.wikipedia.org/、language は "ja"・"en" など)
 # ライセンス / License: クリエイティブ・コモンズ 表示-継承 4.0 国際
 #     (CC BY-SA 4.0、https://creativecommons.org/licenses/by-sa/4.0/deed.ja)
-#
-# 記事本文は編集され続けるため、記事タイトルだけでは実行のたびに異なる文字列に
-# なりうる(load_tiny_shakespeare や load_code_corpus とは違い、コーパスが厳密に
-# 固定されない)。再現性を保つため、記事タイトルと合わせてリビジョン ID(特定時点の
-# 版を指す ID)を固定する。各記事の当該リビジョンは
-# ``https://ja.wikipedia.org/w/index.php?title=<記事名>&oldid=<リビジョンID>``
-# で参照できる(以下のリビジョン ID はいずれも Wikimedia API に実際にアクセスして
-# 取得した実在の値、取得日 2026-08-13)。
-_JAPANESE_WIKIPEDIA_REVISIONS: dict[str, int] = {
-    "日本": 110578005,
-    "東京都": 110597729,
-    "大阪府": 110565604,
-    "京都府": 109765776,
-    "日本語": 109750467,
-    "英語": 110199747,
-    "数学": 109208023,
-    "物理学": 109540178,
-    "化学": 108462219,
-    "生物学": 110028225,
-    "地学": 75704347,
-    "天文学": 109540232,
-    "宇宙": 110379900,
-    "地球": 110170728,
-    "気象学": 108617045,
-    "医学": 108812371,
-    "心理学": 110472899,
-    "経済学": 110060128,
-    "政治学": 110403427,
-    "法学": 110414694,
-    "歴史学": 110621288,
-    "哲学": 110318691,
-    "宗教": 109958573,
-    "言語学": 109216659,
-    "文学": 109467146,
-    "音楽": 110093563,
-    "映画": 109612030,
-    "美術": 110191146,
-    "建築": 110524075,
-    "料理": 110081576,
-    "農業": 110615080,
-    "漁業": 109958685,
-    "鉄道": 110480788,
-    "自動車": 110315235,
-    "航空機": 110600467,
-    "コンピュータ": 110402036,
-    "インターネット": 110324659,
-    "人工知能": 110610279,
-    "機械学習": 110120637,
-    "深層学習": 55590908,
-    "野球": 110528766,
-    "サッカー": 110613233,
-    "将棋": 109676436,
-    "囲碁": 110232196,
-    "オリンピック": 106676037,
-}
+_WIKIPEDIA_MANIFEST_DIR = Path(__file__).parent / "wikipedia_manifests"
 
 # Wikitext(MediaWiki のマークアップ)を平文に変換する際に、名前空間へのリンク
 # ([[File:...]] 等)として扱い、まるごと削除する接頭辞。
@@ -220,22 +166,42 @@ def load_tiny_shakespeare(cache_dir: str | Path) -> str:
 
 
 def _fetch_wikipedia_revision_plaintext(
-    title: str, revid: int, max_retries: int = 5, retry_wait_seconds: float = 5.0
+    language: str,
+    title: str,
+    revid: int,
+    max_retries: int = 5,
+    retry_wait_seconds: float = 5.0,
+    request_timeout: float = 30.0,
 ) -> str:
-    """日本語版 Wikipedia の指定リビジョンの本文を取得し、平文に変換する。
+    """指定言語版 Wikipedia の指定リビジョンの本文を取得し、平文に変換する。
 
     ``action=query&prop=extracts`` は常に最新版の本文を返し、``revids`` パラメータを
     指定しても無視される(実際にリクエストして確認済み: 数年前のリビジョン ID を
     指定しても最新版と同一の本文が返る)。特定のリビジョンを取得するには
     ``action=parse&oldid=<リビジョンID>`` を使う必要がある。この API は wikitext
     (MediaWiki のマークアップ)しか返さないため、``_wikitext_to_plaintext`` で
-    平文に変換する。
+    平文に変換する(この変換ロジック自体は言語に依存しない一般的な MediaWiki
+    マークアップの除去である)。
 
     Wikimedia API は (1) デフォルトの User-Agent(``python-urllib/...``)からの
     リクエストを 403 で拒否し、(2) 短時間に連続してリクエストすると 429
     (Too Many Requests)を返すことがある。そのため識別可能な User-Agent を
     付与し、各リクエストの間隔を空け、429 発生時は指数的に待機して再試行する。
+    また ``urlopen`` にタイムアウトを指定しない場合、接続が確立した後にサーバー側で
+    応答が止まる(スタール)と無期限にハングしうる(数百記事を連続取得する
+    ``load_wikipedia_corpus`` では、この無期限ハングが 1 回でも起きると呼び出し全体が
+    止まってしまうため、明示的なタイムアウトと再試行が必須)。
+
+    Args:
+        language: Wikipedia の言語コード(``"ja"``・``"en"`` など)。
+        title: 記事タイトル(取得自体には使わない。呼び出し側がキャッシュファイル名の
+            対応付けに使うために受け取るだけの引数)。
+        revid: 取得するリビジョン ID。
+        max_retries: 429・タイムアウト発生時の最大再試行回数。
+        retry_wait_seconds: 429・タイムアウト発生時の基本待機秒数(試行回数に比例して延びる)。
+        request_timeout: 1 リクエストあたりの ``urlopen`` タイムアウト秒数。
     """
+    del title  # 取得は revid のみで行う(引数の説明は docstring を参照)
     params = urllib.parse.urlencode(
         {
             "action": "parse",
@@ -245,14 +211,14 @@ def _fetch_wikipedia_revision_plaintext(
             "formatversion": 2,
         }
     )
-    url = f"https://ja.wikipedia.org/w/api.php?{params}"
+    url = f"https://{language}.wikipedia.org/w/api.php?{params}"
     request = urllib.request.Request(
-        url, headers={"User-Agent": "ai-theories-tokenizer-notebook/1.0"}
+        url, headers={"User-Agent": "ai-theories-wikipedia-corpus/1.0"}
     )
 
     for attempt in range(max_retries):
         try:
-            with urllib.request.urlopen(request) as response:  # noqa: S310
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:  # noqa: S310
                 data = json.loads(response.read().decode("utf-8"))
             time.sleep(1.0)  # 連続リクエストによるレート制限(429)を避ける
             wikitext = data["parse"]["wikitext"]
@@ -262,53 +228,98 @@ def _fetch_wikipedia_revision_plaintext(
                 time.sleep(retry_wait_seconds * (attempt + 1))
                 continue
             raise
+        except OSError:
+            # タイムアウト(TimeoutError)、接続確立時の失敗(URLError、いずれも
+            # OSError のサブクラス)、接続確立後にサーバーが応答を止めて切断する
+            # RemoteDisconnected(http.client、これも OSError のサブクラス)を
+            # まとめて一時的なネットワークエラーとして再試行する。
+            if attempt < max_retries - 1:
+                time.sleep(retry_wait_seconds * (attempt + 1))
+                continue
+            raise
     return ""
 
 
-def load_japanese_corpus(cache_dir: str | Path) -> str:
-    """日本語コーパスを取得してキャッシュする(005 トークナイザの日本語ドメイン用)。
+def load_wikipedia_corpus(
+    language: str,
+    cache_dir: str | Path,
+    manifest_path: str | Path | None = None,
+) -> str:
+    """指定言語版 Wikipedia の固定記事集合を取得してキャッシュする(006、言語モデル
+    事前学習用のコーパス取得)。
 
-    出典: フリー百科事典『ウィキペディア(Wikipedia)』日本語版
-    (https://ja.wikipedia.org/)。ライセンス: クリエイティブ・コモンズ 表示-継承 4.0
-    国際(CC BY-SA 4.0)。固定の記事タイトル・リビジョン ID の対応
-    (``_JAPANESE_WIKIPEDIA_REVISIONS``)から、日本語版 Wikipedia の MediaWiki API
-    (``action=parse``、``oldid`` でリビジョンを指定)を用いて各記事の指定リビジョンの
-    本文を取得し、wikitext を平文に変換したうえで連結する。
+    出典: フリー百科事典『ウィキペディア(Wikipedia)』(https://<language>.wikipedia.org/、
+    language は ``"ja"``・``"en"`` など)。ライセンス: クリエイティブ・コモンズ
+    表示-継承 4.0 国際(CC BY-SA 4.0)。
 
-    タイトルとリビジョン ID を両方固定しているため、実行時点によらず同一の入力が
-    得られる(``action=query&prop=extracts`` はリビジョンを固定できず最新版を返して
-    しまうため使わない。関数の docstring を参照)。
+    ``manifest_path`` の JSON(``{"記事タイトル": リビジョン ID, ...}``)に列挙された
+    記事を、Wikimedia API(``action=parse``、``oldid`` でリビジョンを指定)を用いて
+    取得し、wikitext を平文に変換したうえで連結する。タイトルとリビジョン ID を
+    両方固定しているため、実行時点によらず同一の入力が得られる
+    (``action=query&prop=extracts`` はリビジョンを固定できず最新版を返してしまうため
+    使わない。``_fetch_wikipedia_revision_plaintext`` の docstring を参照)。
 
-    記事ごとに個別のファイルへキャッシュする(``cache_dir/japanese_wikipedia_articles/``、
-    ファイル名にリビジョン ID を含めるため、``_JAPANESE_WIKIPEDIA_REVISIONS`` を
-    更新した場合は自動的に再取得される)。Wikimedia API のレート制限(429)により
-    取得が一部の記事で失敗しても、セルを再実行すれば取得済みの記事はキャッシュから
-    読み、未取得の記事のみ再取得する(1 記事も欠けずに揃うまで、コーパス全体の
-    キャッシュファイルは作らない)。
+    記事ごとに個別のファイルへキャッシュする(``cache_dir/wikipedia_<language>_articles/``、
+    ファイル名にリビジョン ID を含めるため、manifest を更新した場合は自動的に
+    再取得される)。Wikimedia API のレート制限(429)により取得が一部の記事で
+    失敗しても、呼び出しを再試行すれば取得済みの記事はキャッシュから読み、
+    未取得の記事のみ再取得する(1 記事も欠けずに揃うまで、コーパス全体のキャッシュ
+    ファイルは作らない)。
 
     Args:
+        language: Wikipedia の言語コード(``"ja"``・``"en"`` など)。
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
+        manifest_path: 記事タイトル・リビジョン ID の対応を記した JSON ファイルへの
+            パス。``None``(既定値)の場合、
+            ``src/data/wikipedia_manifests/<language>_006_pretraining.json``
+            (UTF-8 で 20 MB 以上を目標に Wikipedia の長大記事(Longpages)から
+            選定した記事集合、本リポジトリにコミット済み)を使う。
 
     Returns:
         取得した記事本文を連結した 1 つの文字列。
     """
+    if manifest_path is None:
+        manifest_path = _WIKIPEDIA_MANIFEST_DIR / f"{language}_006_pretraining.json"
+    manifest: dict[str, int] = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+
     cache_dir = Path(cache_dir)
-    articles_dir = cache_dir / "japanese_wikipedia_articles"
+    articles_dir = cache_dir / f"wikipedia_{language}_articles"
     articles_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / "japanese_wikipedia.txt"
+    cache_path = cache_dir / f"wikipedia_{language}.txt"
 
     if not cache_path.exists():
         texts = []
-        for i, (title, revid) in enumerate(_JAPANESE_WIKIPEDIA_REVISIONS.items()):
+        for i, (title, revid) in enumerate(manifest.items()):
             article_path = articles_dir / f"{i:03d}_{revid}.txt"
             if not article_path.exists():
                 article_path.write_text(
-                    _fetch_wikipedia_revision_plaintext(title, revid), encoding="utf-8"
+                    _fetch_wikipedia_revision_plaintext(language, title, revid),
+                    encoding="utf-8",
                 )
             texts.append(article_path.read_text(encoding="utf-8"))
         cache_path.write_text("\n".join(t for t in texts if t), encoding="utf-8")
 
     return cache_path.read_text(encoding="utf-8")
+
+
+def load_japanese_corpus(cache_dir: str | Path) -> str:
+    """日本語コーパスを取得してキャッシュする(005 トークナイザの日本語ドメイン用)。
+
+    ``load_wikipedia_corpus("ja", cache_dir, manifest_path=...)`` の薄いラッパー。
+    005 で使った固定の 44 記事(``src/data/wikipedia_manifests/
+    ja_005_tokenizer_legacy.json``、005 時点の記事タイトル・リビジョン ID の対応と
+    同一)を対象とし、既定の引数値・返り値は 005 時点から変えていない(006 で
+    ``load_wikipedia_corpus`` に一般化する際に、005 の呼び出し結果が変わらないことを
+    検証済み)。
+
+    Args:
+        cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
+
+    Returns:
+        取得した記事本文を連結した 1 つの文字列(005 時点と同一)。
+    """
+    manifest_path = _WIKIPEDIA_MANIFEST_DIR / "ja_005_tokenizer_legacy.json"
+    return load_wikipedia_corpus("ja", cache_dir, manifest_path=manifest_path)
 
 
 def load_code_corpus(repo_root: str | Path = ".") -> str:
@@ -371,3 +382,99 @@ def get_random_batch(
     inputs = torch.stack([data[s : s + seq_len] for s in starts])
     targets = torch.stack([data[s + 1 : s + seq_len + 1] for s in starts])
     return inputs, targets
+
+
+def split_train_val_text(text: str, validation_ratio: float) -> tuple[str, str]:
+    """テキストを文字列の段階で学習用・検証用に分割する(006)。
+
+    時系列順を保ったまま末尾側を検証用に割り当てる(シャッフルしない、
+    ``split_train_val`` と同じ方針)。**トークン化の前に文字列のまま分割する** 点が
+    ``split_train_val`` との違いであり、これが必須である理由は 2 つある。
+
+    1. トークナイザ条件(文字レベル・BPE・語彙サイズの違いなど)をまたいで比較する
+       とき、条件ごとにトークン化してから分割すると、同じトークン数の割合で切っても
+       対応する文字範囲(検証テキストの中身そのもの)が条件ごとに変わってしまう。
+       文字列の段階で分割しておけば、全条件が完全に同一の検証テキストに対する
+       bits-per-byte を測ることになり、条件間で公平に比較できる。
+    2. サブワード分割は文脈(前後の文字)によって同じ文字列でも異なる区切り方に
+       なりうるため、先にトークン化してから ID 列を分割すると、学習用・検証用の
+       境界をまたぐ位置でトークンが本来と異なる形に分割される可能性がある。
+
+    Args:
+        text: 分割対象のテキスト全体。
+        validation_ratio: 検証用に割り当てる割合(0 以上 1 未満)。
+
+    Returns:
+        (train_text, val_text) のタプル。
+    """
+    n_val = int(len(text) * validation_ratio)
+    return text[:-n_val], text[-n_val:]
+
+
+def encode_corpus(tokenizer, text: str) -> Tensor:
+    """トークナイザでコーパス全体を符号化して ID の配列を返す(006)。
+
+    ``tokenizer`` は ``encode(text) -> Sequence[int]``(整数 ID の列を直接返す)を
+    持つ想定(``CharacterLevelTokenizer`` と同じインターフェース)。005 の
+    ``BPETokenizer``・``UnigramTokenizer`` は ``encode()`` が部分語シンボルの文字列
+    (``list[str]``)を返し、シンボル <-> 整数 ID の対応を持たないため、そのままでは
+    ここに渡せない(整数 ID を割り当てる語彙ラッパーの追加は 006 のノートブック
+    段階で扱う)。
+
+    Args:
+        tokenizer: ``encode(text) -> Sequence[int]`` を持つトークナイザ。
+        text: 符号化対象のテキスト全体。
+
+    Returns:
+        1 次元の LongTensor(トークン ID 列)。
+    """
+    return torch.tensor(tokenizer.encode(text), dtype=torch.long)
+
+
+def make_evaluation_windows(
+    token_ids: Tensor,
+    sequence_length: int,
+) -> tuple[Tensor, Tensor]:
+    """検証用の非重複窓(non-overlapping window)を作る(006)。
+
+    ``token_ids`` を長さ ``sequence_length`` の窓に先頭から順に区切る(非重複)。
+    末尾の端数トークンは **切り捨てず、パディングして最終窓を埋める**(006、当初は
+    切り捨てていたが、トークナイザ条件によって fertility が異なり、切り捨てられる
+    原文バイト数が条件ごとに変わってしまう問題があったため変更した)。パディング位置を
+    示す bool マスクを併せて返す(True が実トークン、False がパディング)。
+
+    パディング値には ``0`` を使う(語彙に含まれる有効な ID である必要はあるが、
+    マスクにより損失計算から除外されるため、どの値でもよい)。
+
+    bits-per-byte の分母(評価対象の UTF-8 バイト数)は、この関数では計算しない。
+    トークナイザ条件によらず **検証テキスト全体の UTF-8 バイト数が全条件で同一の
+    定数になる** ため(006、3.5 節)、呼び出し側が符号化前のテキストから直接
+    ``len(text.encode("utf-8"))`` として求める(``evaluate_bits_per_byte`` に渡す)。
+
+    Args:
+        token_ids: 1 次元の LongTensor(``encode_corpus`` の出力)。
+        sequence_length: 窓の長さ S。
+
+    Returns:
+        (windows, mask) のタプル。いずれも形状 ``(num_windows, sequence_length)``。
+        ``windows`` は LongTensor(末尾窓のパディング位置は ``0``)、``mask`` は
+        bool の Tensor(True が実トークン、False がパディング)。
+    """
+    n = len(token_ids)
+    num_windows = -(-n // sequence_length)  # 切り上げ除算
+    padded_length = num_windows * sequence_length
+    pad_amount = padded_length - n
+
+    if pad_amount > 0:
+        padding = torch.zeros(pad_amount, dtype=token_ids.dtype)
+        padded_ids = torch.cat([token_ids, padding])
+        flat_mask = torch.cat(
+            [torch.ones(n, dtype=torch.bool), torch.zeros(pad_amount, dtype=torch.bool)]
+        )
+    else:
+        padded_ids = token_ids
+        flat_mask = torch.ones(n, dtype=torch.bool)
+
+    windows = padded_ids.view(num_windows, sequence_length)
+    mask = flat_mask.view(num_windows, sequence_length)
+    return windows, mask

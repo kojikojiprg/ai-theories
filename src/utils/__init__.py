@@ -2,6 +2,7 @@
 
 from src.utils.statistics import (
     compute_always_negative_unit_ratio,
+    compute_bits_per_byte,
     compute_character_coverage,
     compute_chunk_length_statistics,
     compute_exact_match_rate,
@@ -9,8 +10,10 @@ from src.utils.statistics import (
     compute_gradient_norm_by_unit_group,
     compute_gradient_norm_per_layer,
     compute_mean_to_rms_ratio,
+    compute_perplexity,
     compute_segmentation_agreement_rate,
     compute_unknown_rate,
+    count_non_embedding_parameters,
 )
 from src.utils.visualization import (
     plot_attention_heatmap,
@@ -26,6 +29,7 @@ from src.utils.visualization import (
 
 __all__ = [
     "compute_always_negative_unit_ratio",
+    "compute_bits_per_byte",
     "compute_character_coverage",
     "compute_chunk_length_statistics",
     "compute_exact_match_rate",
@@ -33,8 +37,10 @@ __all__ = [
     "compute_gradient_norm_by_unit_group",
     "compute_gradient_norm_per_layer",
     "compute_mean_to_rms_ratio",
+    "compute_perplexity",
     "compute_segmentation_agreement_rate",
     "compute_unknown_rate",
+    "count_non_embedding_parameters",
     "plot_attention_heatmap",
     "plot_bar_by_layer",
     "plot_dual_axis_curves",

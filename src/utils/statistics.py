@@ -1,7 +1,8 @@
-"""隠れ状態・活性化・勾配・トークナイザの統計量を測定するユーティリティ。
+"""隠れ状態・活性化・勾配・トークナイザ・言語モデルの統計量を測定するユーティリティ。
 
 ``theories/01_foundations/004_normalization_and_activation.ipynb`` の実験 D・F、
-``theories/02_pretraining/005_tokenizer.ipynb`` の各実験で使う。
+``theories/02_pretraining/005_tokenizer.ipynb`` の各実験、および 006(小型 GPT の
+事前学習)で使う。
 
 記号 / Notation:
     d_model : 隠れ状態の特徴次元
@@ -11,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 
 import numpy as np
@@ -351,3 +353,74 @@ def compute_character_coverage(
     num_covered = len(covered_in_corpus)
     coverage = num_covered / num_total if num_total else 1.0
     return num_covered, num_total, coverage
+
+
+def compute_bits_per_byte(total_negative_log_likelihood_nats: float, total_bytes: int) -> float:
+    """bits-per-byte(1 バイトあたりのビット数)を計算する。
+
+    負の対数尤度(negative log-likelihood)の総和(単位: nats、自然対数)を、
+    底を 2 に変換したうえで評価対象の UTF-8 バイト数で割る。
+
+        bits_per_byte = total_negative_log_likelihood_nats / (ln(2) * total_bytes)
+
+    語彙サイズ(トークナイザの粒度)に依存せずモデル間で比較できる指標であるため、
+    006 以降の条件比較(トークナイザ・アーキテクチャの違いなど)で
+    perplexity の代わりに用いる。
+
+    Args:
+        total_negative_log_likelihood_nats: 評価対象全体の負の対数尤度の総和(nats)。
+        total_bytes: 評価対象の UTF-8 バイト数(``make_evaluation_windows`` の出力を想定)。
+
+    Returns:
+        bits-per-byte(値が小さいほど圧縮効率、すなわちモデルの予測性能が高い)。
+    """
+    return total_negative_log_likelihood_nats / (math.log(2) * total_bytes)
+
+
+def compute_perplexity(mean_loss_per_token: float) -> float:
+    """Perplexity(困惑度)を計算する。
+
+    perplexity = exp(mean_loss_per_token)
+
+    ``mean_loss_per_token`` はトークンあたりの平均負の対数尤度(cross entropy、nats)。
+    語彙サイズ(トークナイザの粒度)が異なる条件間では比較できない指標である点に注意
+    (006 以降でトークナイザ条件をまたいで比較する場合は ``compute_bits_per_byte`` を使う)。
+
+    Args:
+        mean_loss_per_token: トークンあたりの平均損失(nats)。
+
+    Returns:
+        perplexity。
+    """
+    return math.exp(mean_loss_per_token)
+
+
+def count_non_embedding_parameters(model: nn.Module) -> int:
+    """埋め込み行列と出力層を除いたパラメータ数を数える。
+
+    語彙サイズ V が条件間で異なる場合(トークナイザの違いなど)、トークン埋め込み
+    (``token_embedding``)と出力層(``lm_head``)のパラメータ数は V に比例して変化し、
+    モデルの「実質的な計算能力」を反映しない。この関数が返す値を条件間で揃えることで、
+    語彙サイズの違いを比較の公平性から切り離す(006 以降の条件比較で使用)。
+
+    ``lm_head`` がトークン埋め込みと重みを共有している場合(``tie_embeddings=True``、
+    ``GPTLanguageModel`` 参照)、共有された重みは 1 回のみ除外する
+    (``id()`` によるパラメータの同一性判定)。
+
+    Args:
+        model: ``token_embedding: nn.Embedding`` 属性と ``lm_head: nn.Linear`` 属性を
+            持つモデル(``GPTLanguageModel`` を想定)。
+
+    Returns:
+        埋め込み行列・出力層を除いた全パラメータ数の合計。
+    """
+    excluded_param_ids: set[int] = set()
+    token_embedding = getattr(model, "token_embedding", None)
+    if token_embedding is not None:
+        excluded_param_ids.add(id(token_embedding.weight))
+    lm_head = getattr(model, "lm_head", None)
+    if lm_head is not None:
+        excluded_param_ids.add(id(lm_head.weight))
+        if lm_head.bias is not None:
+            excluded_param_ids.add(id(lm_head.bias))
+    return sum(p.numel() for p in model.parameters() if id(p) not in excluded_param_ids)

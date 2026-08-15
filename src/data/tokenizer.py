@@ -202,12 +202,20 @@ class BPETokenizer:
         ``byte_level=True`` の場合、各トークンは UTF-8 バイト値を表す Unicode
         1 文字の列(``_BYTE_TO_UNICODE`` によるマッピング)であるため、バイト列に
         戻してから UTF-8 としてデコードする。
+
+        ``tokens`` がテキスト全体を符号化した完全な列であれば常に正しい UTF-8 の
+        バイト列になるが、系列の途中で切り出した任意の部分列(例:
+        ``make_evaluation_windows``、``src/data/text.py``、006 で評価窓を作る際に
+        使う)は、マルチバイト文字の途中で切れることがある。そのため
+        ``errors="replace"`` でデコードし、不正なバイト列は置換文字
+        (U+FFFD)に変換する(例外を送出しない)。005 の可逆性検証はテキスト全体を
+        符号化した完全な列を復号するため、この変更による影響を受けない。
         """
         joined = "".join(tokens)
         if not self.byte_level:
             return joined
         byte_values = bytes(_UNICODE_TO_BYTE[ch] for ch in joined)
-        return byte_values.decode("utf-8")
+        return byte_values.decode("utf-8", errors="replace")
 
 
 def learn_bpe(
@@ -391,7 +399,13 @@ class UnigramTokenizer:
         return viterbi_segment(self.normalize(text), self.vocab)
 
 
-def train_unigram_model(text: str, vocab_size: int, model_prefix: str | Path) -> UnigramTokenizer:
+def train_unigram_model(
+    text: str,
+    vocab_size: int,
+    model_prefix: str | Path,
+    byte_fallback: bool = False,
+    character_coverage: float = 0.9995,
+) -> UnigramTokenizer:
     """sentencepiece を用いて Unigram 言語モデルの語彙を学習する。
 
     語彙学習(候補語彙からの EM ベースの反復的な縮小、Kudo 2018)は sentencepiece の
@@ -404,6 +418,18 @@ def train_unigram_model(text: str, vocab_size: int, model_prefix: str | Path) ->
         vocab_size: 目標語彙サイズ。
         model_prefix: 学習済みモデルの出力先パスの接頭辞
             (``{model_prefix}.model`` / ``{model_prefix}.vocab`` が生成される)。
+        byte_fallback: True の場合、語彙に含まれない文字を UTF-8 バイト列(256 個の
+            バイトトークン)へ退避させる(sentencepiece の byte fallback)。False
+            (既定値、sentencepiece 自身の既定と同一)の場合、語彙に含まれない文字は
+            すべて単一の未知語トークン(``<unk>``)に潰れ、その文字が本来持っていた
+            情報が失われる(006 の言語モデル評価で、この情報損失を避けるために
+            ``byte_fallback=True`` を明示的に指定する。005 の既定値
+            ``byte_fallback=False`` は変えていないため、005 の呼び出し結果は
+            変わらない)。
+        character_coverage: 語彙に含める文字の被覆率。既定値 0.9995(sentencepiece
+            自身の既定と同一)は訓練コーパスの低頻度文字の一部を語彙から除外する。
+            006 では ``byte_fallback=True`` と組み合わせて 1.0 を指定し、除外された
+            文字も byte fallback 経由で表現できるようにする。
 
     Returns:
         学習済みの ``UnigramTokenizer``。
@@ -421,6 +447,8 @@ def train_unigram_model(text: str, vocab_size: int, model_prefix: str | Path) ->
         normalization_rule_name="identity",
         remove_extra_whitespaces=False,
         add_dummy_prefix=True,
+        byte_fallback=byte_fallback,
+        character_coverage=character_coverage,
         unk_id=0,
         bos_id=-1,
         eos_id=-1,
