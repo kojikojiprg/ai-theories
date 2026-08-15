@@ -23,6 +23,10 @@ import sentencepiece as spm
 
 ChunkSplitMode = Literal["whitespace", "none"]
 
+# BPETokenizer._chunk_cache(006、本番実行前の修正 22)がキャッシュするチャンクの
+# 最大件数。メモリ量が際限なく増えないよう上限を設ける。
+_MAX_CHUNK_CACHE_ENTRIES = 200_000
+
 
 def _build_byte_to_unicode() -> dict[int, str]:
     """UTF-8 バイト値(0〜255)を印字可能な Unicode 1 文字に単射で対応付ける。
@@ -79,7 +83,47 @@ def try_decode_byte_level_symbol(symbol: str) -> str | None:
 _WHITESPACE_CHUNK_RE = re.compile(r"\s*\S+|\s+")
 
 
-def pretokenize(text: str, chunk_split_mode: ChunkSplitMode) -> list[str]:
+def _split_chunk_by_max_bytes(chunk: str, max_chunk_bytes: int) -> list[str]:
+    """チャンクの UTF-8 バイト長が ``max_chunk_bytes`` を超える場合、文字境界
+    (Unicode コードポイントの境界)を壊さない位置で分割する(006、本番実行前の
+    修正 21)。
+
+    Python の文字列は 1 文字ずつ反復してもマルチバイト文字が分断されないため、
+    文字単位でバイト長を積算し、上限を超える直前で区切ることで、UTF-8 として
+    不正な断片を作らない。1 文字だけで ``max_chunk_bytes`` を超える場合(絵文字など)
+    は、その 1 文字のみからなる断片を許容する(それ以上分割しようがないため)。
+
+    Args:
+        chunk: 分割対象のチャンク(``pretokenize`` の内部でのみ呼ばれる)。
+        max_chunk_bytes: 断片ごとの UTF-8 バイト長の上限。
+
+    Returns:
+        分割後の断片のリスト。すべて連結すると ``chunk`` に戻る(可逆性は保たれる)。
+    """
+    if len(chunk.encode("utf-8")) <= max_chunk_bytes:
+        return [chunk]
+
+    pieces: list[str] = []
+    current: list[str] = []
+    current_bytes = 0
+    for ch in chunk:
+        ch_bytes = len(ch.encode("utf-8"))
+        if current and current_bytes + ch_bytes > max_chunk_bytes:
+            pieces.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(ch)
+        current_bytes += ch_bytes
+    if current:
+        pieces.append("".join(current))
+    return pieces
+
+
+def pretokenize(
+    text: str,
+    chunk_split_mode: ChunkSplitMode,
+    max_chunk_bytes: int | None = None,
+) -> list[str]:
     """事前分割(pre-tokenization)。BPE のマージはチャンクの内部でのみ行われ、
     チャンクをまたいでは行われない。
 
@@ -102,12 +146,27 @@ def pretokenize(text: str, chunk_split_mode: ChunkSplitMode) -> list[str]:
                 テキストでは ``chunk_split_mode="whitespace"`` と異なり、
                 改行が失われるため可逆ではない(空白の有無のみを実験の対照条件と
                 するための単純化であり、005 の実装方針で明記する)。
+        max_chunk_bytes: 指定すると、``chunk_split_mode`` による分割の後、
+            なお UTF-8 バイト長がこの値を超えるチャンクをさらに分割する
+            (``_split_chunk_by_max_bytes`` 参照、006、本番実行前の修正 21)。
+            ``chunk_split_mode="whitespace"`` が機能しない言語(日本語など、005 の
+            議論を参照)では 1 チャンクが 1 行・1 段落まるごとになり、チャンク長に
+            対して超線形な BPE の学習・符号化コストが爆発しうる。この上限は
+            そのコストの上限を抑えるための計算量対策であり、既定値 ``None``
+            (上限なし)では 005 と完全に同一の結果を返す。
     """
     if chunk_split_mode == "whitespace":
-        return _WHITESPACE_CHUNK_RE.findall(text)
-    if chunk_split_mode == "none":
-        return [line for line in text.split("\n") if line]
-    raise ValueError(f"未知の chunk_split_mode: {chunk_split_mode!r}")
+        chunks = _WHITESPACE_CHUNK_RE.findall(text)
+    elif chunk_split_mode == "none":
+        chunks = [line for line in text.split("\n") if line]
+    else:
+        raise ValueError(f"未知の chunk_split_mode: {chunk_split_mode!r}")
+
+    if max_chunk_bytes is None:
+        return chunks
+    return [
+        piece for chunk in chunks for piece in _split_chunk_by_max_bytes(chunk, max_chunk_bytes)
+    ]
 
 
 def _count_pairs(symbols: Sequence[str], freq: int) -> Counter[tuple[str, str]]:
@@ -151,6 +210,11 @@ class BPETokenizer:
             学習コーパスに出現した Unicode 文字が初期語彙になる(未知語が発生しうる)。
         chunk_split_mode: 事前分割(pre-tokenization)の方式(``pretokenize`` 参照)。
         unk_token: 未知語(``byte_level=False`` のときのみ発生しうる)を表す特殊トークン。
+        max_chunk_bytes: チャンクの UTF-8 バイト長の上限(``pretokenize`` 参照、006、
+            本番実行前の修正 21)。**学習(``learn_bpe``)時と符号化(``encode``)時で
+            必ず同一の値を使うこと**(異なる値では学習時と異なる分割になり、
+            符号化結果が学習した語彙と整合しなくなる)。既定値 ``None``(上限なし)
+            では 005 と完全に同一の結果になる。
     """
 
     merges: list[tuple[str, str]]
@@ -158,12 +222,26 @@ class BPETokenizer:
     byte_level: bool
     chunk_split_mode: ChunkSplitMode
     unk_token: str = "<unk>"
+    max_chunk_bytes: int | None = None
 
     @cached_property
     def merge_ranks(self) -> dict[tuple[str, str], int]:
         """マージ規則の学習順の順位(rank)。符号化時に「最も早く学習された
         マージ規則」を優先して適用するために使う(rank が小さいほど優先)。"""
         return {pair: rank for rank, pair in enumerate(self.merges)}
+
+    @cached_property
+    def _chunk_cache(self) -> dict[str, list[str]]:
+        """チャンク文字列 -> ``encode_chunk`` の結果のメモ化キャッシュ(006、
+        本番実行前の修正 22)。``max_chunk_bytes`` によるチャンク分割で同一チャンクの
+        反復出現が増えるため、キャッシュの効果が大きい。
+
+        件数が ``_MAX_CHUNK_CACHE_ENTRIES`` に達すると、それ以降の新規チャンクは
+        キャッシュに追加しない(``encode`` 参照)。追加しないだけで、その後も
+        ``encode_chunk`` で計算はでき符号化結果自体は変わらない。速度上の恩恵が
+        なくなるだけであり、正しさには影響しない。
+        """
+        return {}
 
     def _initial_symbols(self, chunk: str) -> list[str]:
         if self.byte_level:
@@ -186,10 +264,19 @@ class BPETokenizer:
         return symbols
 
     def encode(self, text: str) -> list[str]:
-        """テキスト全体を部分語シンボル列に変換する(チャンクをまたぐマージは行わない)。"""
+        """テキスト全体を部分語シンボル列に変換する(チャンクをまたぐマージは行わない)。
+
+        チャンク単位でメモ化する(``_chunk_cache``、006、本番実行前の修正 22)。
+        """
+        cache = self._chunk_cache
         tokens: list[str] = []
-        for chunk in pretokenize(text, self.chunk_split_mode):
-            tokens.extend(self.encode_chunk(chunk))
+        for chunk in pretokenize(text, self.chunk_split_mode, self.max_chunk_bytes):
+            symbols = cache.get(chunk)
+            if symbols is None:
+                symbols = self.encode_chunk(chunk)
+                if len(cache) < _MAX_CHUNK_CACHE_ENTRIES:
+                    cache[chunk] = symbols
+            tokens.extend(symbols)
         return tokens
 
     def decode(self, tokens: Sequence[str]) -> str:
@@ -223,6 +310,7 @@ def learn_bpe(
     vocab_size: int,
     byte_level: bool = False,
     chunk_split_mode: ChunkSplitMode = "whitespace",
+    max_chunk_bytes: int | None = None,
 ) -> BPETokenizer:
     """BPE(Byte Pair Encoding、Gage 1994 / Sennrich et al. 2016)の語彙を学習する。
 
@@ -246,11 +334,16 @@ def learn_bpe(
             (バイトレベル BPE、byte-level BPE)。False の場合は学習コーパスに
             出現した Unicode 文字を初期語彙にする。
         chunk_split_mode: 事前分割の方式(``pretokenize`` 参照)。
+        max_chunk_bytes: チャンクの UTF-8 バイト長の上限(``pretokenize`` 参照、006、
+            本番実行前の修正 21)。返す ``BPETokenizer`` にもこの値を設定するため、
+            ``encode()`` が学習時と同じ分割を再現できる(学習と符号化で異なる値を
+            使うと結果が壊れることに注意、``BPETokenizer.max_chunk_bytes`` の
+            docstring を参照)。
 
     Returns:
         学習済みの ``BPETokenizer``。
     """
-    chunks = pretokenize(text, chunk_split_mode)
+    chunks = pretokenize(text, chunk_split_mode, max_chunk_bytes)
     chunk_freq = Counter(chunks)
 
     words: list[list[str]]
@@ -304,6 +397,7 @@ def learn_bpe(
         vocab=vocab,
         byte_level=byte_level,
         chunk_split_mode=chunk_split_mode,
+        max_chunk_bytes=max_chunk_bytes,
     )
 
 
