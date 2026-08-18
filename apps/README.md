@@ -25,7 +25,7 @@ This is the index of working systems (web apps) built by applying the theory lea
 
 ## 各アプリ README の構成 / App README Structure
 
-各アプリディレクトリの`README.md`は以下の構成で統一する(詳細は`CLAUDE.md`を参照)。
+各アプリディレクトリの`README.md`は以下の構成で統一する。
 
 1. 概要 — 何を作るシステムか
 2. 使用した理論 — `theories/`内の該当ノートブックへのリンクと説明
