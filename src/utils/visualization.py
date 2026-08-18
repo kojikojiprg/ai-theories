@@ -483,6 +483,60 @@ def plot_grouped_bar(
     return ax
 
 
+def plot_gradient_norm_trace(
+    gradient_norms: Sequence[float],
+    clip_threshold: float | None = None,
+    title: str = "",
+    xlabel: str = "Step",
+    ylabel: str = "Gradient norm",
+    ax: Axes | None = None,
+    log_scale: bool = False,
+) -> Axes:
+    """勾配ノルムの時系列を折れ線で描画し、gradient clipping 閾値を水平線で重畳表示する(007)。
+
+    ``gradient_norms`` は ``train_language_model``(``src/training/trainer.py``)の
+    history の ``"gradient_norm"``(クリッピング適用前の値)を想定する。学習中の
+    勾配ノルムのスパイクと、それが ``clip_threshold`` に対してどの程度の大きさかを
+    目視で確認する(007 主張 3、gradient clipping の効果の検証)。
+
+    Args:
+        gradient_norms: ステップごとの勾配ノルム(クリッピング適用前)。
+        clip_threshold: gradient clipping の閾値。``None``(既定値)の場合、
+            水平線は描画しない(クリッピングを使わない条件を想定)。
+        title: 図のタイトル。
+        xlabel: 横軸ラベル。
+        ylabel: 縦軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+        log_scale: 縦軸を対数スケールにするか。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 4.2))
+
+    steps = np.arange(1, len(gradient_norms) + 1)
+    ax.plot(steps, gradient_norms, color="tab:blue", linewidth=1.2, label="gradient norm")
+    if clip_threshold is not None:
+        ax.axhline(
+            clip_threshold,
+            color="tab:red",
+            linewidth=1.4,
+            linestyle="--",
+            label=f"clip threshold ({clip_threshold:.3g})",
+        )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if log_scale:
+        ax.set_yscale("log")
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    return ax
+
+
 def plot_dual_axis_curves(
     x: Sequence[float],
     left_curves: dict[str, Sequence[float]],

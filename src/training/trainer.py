@@ -1,12 +1,16 @@
 """言語モデルの事前学習ループ・評価関数のスクラッチ実装。
 
-**006 の時点では意図的に素朴な設定に留める。** 007(学習の安定化)で拡張する前提のため、
-以下は実装しない: AdamW(Loshchilov & Hutter, ICLR 2019)、学習率スケジュール、
-gradient clipping、mixed precision。Optimizer は Adam(Kingma & Ba, ICLR 2015)を
-固定学習率で使い、演算は fp32(単精度浮動小数点)のみで行う。
+**006 の時点では意図的に素朴な設定に留めていた**(AdamW(Loshchilov & Hutter,
+ICLR 2019)・学習率スケジュール・gradient clipping・mixed precision のいずれも
+実装しない、Optimizer は Adam(Kingma & Ba, ICLR 2015)を固定学習率で使う)。
+007(学習の安定化)で、AdamW・warmup + cosine スケジュール・gradient clipping を
+``optimizer``・``learning_rate_schedule``・``gradient_clip_threshold`` 引数として
+追加した(mixed precision は 03_efficient_training の別トピックで扱うため対象外。
+演算は引き続き fp32(単精度浮動小数点)のみで行う)。**これら 3 引数を渡さない場合、
+006 と完全に同一の挙動になる**(後方互換性を検証済み、007 5 節)。
 
-勾配ノルムは実験 H(007 で扱う gradient clipping の要否の検証)で使うため、
-clipping を行わずに測定のみ記録する。
+勾配ノルムは実験 H(006)・007 の主張 1〜4 で使うため、``gradient_clip_threshold``
+の指定の有無によらず、**クリッピング適用前の値を常に記録する**(007 2-3 節)。
 
 記号 / Notation:
     B : 訓練バッチサイズ
@@ -16,12 +20,32 @@ clipping を行わずに測定のみ記録する。
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import torch
 import torch.nn.functional as functional
 from torch import Tensor, nn
 
 from src.data.text import get_random_batch
 from src.utils.statistics import compute_bits_per_byte
+
+OptimizerLike = object
+"""``step()``・``zero_grad()`` を持つ optimizer の型注釈用エイリアス
+(``torch.optim.Optimizer`` および ``src.training.optimizer`` のスクラッチ実装の
+いずれも受け付けることを示す、構造的な型制約は課さない)。"""
+
+
+def _set_optimizer_learning_rate(optimizer: OptimizerLike, lr: float) -> None:
+    """optimizer の種類によらず学習率を更新する。
+
+    ``src.training.optimizer`` のスクラッチ実装(``set_learning_rate`` メソッドを
+    持つ)と ``torch.optim.Optimizer``(``param_groups`` を持つ)の両方に対応する。
+    """
+    if hasattr(optimizer, "set_learning_rate"):
+        optimizer.set_learning_rate(lr)
+    else:
+        for group in optimizer.param_groups:
+            group["lr"] = lr
 
 
 def evaluate_bits_per_byte(
@@ -91,8 +115,12 @@ def train_language_model(
     eval_interval: int,
     device: torch.device | str,
     seed: int,
+    optimizer: OptimizerLike | None = None,
+    learning_rate_schedule: Callable[[int], float] | None = None,
+    gradient_clip_threshold: float | None = None,
 ) -> dict[str, list[float]]:
-    """Adam・固定学習率・fp32 の素朴な学習ループ。
+    """Adam・固定学習率・fp32 の学習ループ(007 で AdamW・学習率スケジュール・
+    gradient clipping に対応、後方互換性あり)。
 
     訓練データは ``get_random_batch``(``src/data/text.py``)でランダムな連続区間を
     切り出してミニバッチを作る(訓練はランダムサンプリングでよい。評価との違いは
@@ -109,11 +137,29 @@ def train_language_model(
         num_steps: 学習ステップ数。
         batch_size: 訓練バッチサイズ B。
         sequence_length: 訓練系列長 S。
-        learning_rate: Adam の学習率(固定、スケジュールなし)。
+        learning_rate: 固定学習率。``optimizer`` が ``None`` の場合、この値で
+            ``torch.optim.Adam`` を構築する(006 と同一の挙動)。``optimizer`` が
+            指定された場合、この引数は無視される(optimizer 自身が保持する学習率、
+            または ``learning_rate_schedule`` が使われる)。
         eval_interval: このステップ数ごとに検証 bits-per-byte を測定する。
         device: 学習に使うデバイス。
         seed: 乱数シード。関数の先頭で明示的に ``torch.manual_seed`` を呼び、
             バッチサンプリング用の ``torch.Generator`` にも同じ値を使う。
+        optimizer: 学習に使う optimizer(``step()``・``zero_grad()`` を持つ、
+            ``src.training.optimizer`` のスクラッチ実装または
+            ``torch.optim.Optimizer`` のインスタンス)。``None``(既定値)の場合、
+            ``torch.optim.Adam(model.parameters(), lr=learning_rate)`` を使う
+            (006 と同一の挙動、後方互換性)。呼び出し側が ``model.parameters()``
+            から構築済みのインスタンスを渡す。
+        learning_rate_schedule: ステップ番号(1-indexed)から学習率を返す callable
+            (``compute_warmup_cosine_learning_rate`` を ``functools.partial`` で
+            束縛したものを想定、``src/training/schedule.py``)。``None``(既定値)の
+            場合は固定学習率のまま(006 と同一の挙動)。指定された場合、毎ステップ
+            ``optimizer`` の学習率をこの関数の戻り値で上書きする。
+        gradient_clip_threshold: グローバルノルムでの gradient clipping の閾値。
+            ``None``(既定値)の場合は無効(006 と同一の挙動、勾配ノルムの測定のみ
+            行う)。指定された場合、``optimizer.step()`` の前に全パラメータの勾配を
+            ``min(1, gradient_clip_threshold / gradient_norm)`` でスケーリングする。
 
     Returns:
         以下のキーを持つ履歴の辞書:
@@ -121,7 +167,13 @@ def train_language_model(
         - ``"step"``: 学習ステップ番号のリスト(1-indexed)。
         - ``"train_loss"``: ステップごとの訓練損失(cross entropy、nats、バッチ平均)。
         - ``"gradient_norm"``: ステップごとの勾配ノルム(全パラメータの勾配を
-          連結した L2 ノルム。clipping は行わず測定のみ、実験 H で使用)。
+          連結した L2 ノルム、**gradient clipping 適用前の値**。clipping の有無に
+          関わらず常に記録する、007 2-3 節)。
+        - ``"loss_step_delta"``: 直前ステップとの訓練損失の差(``train_loss[i] -
+          train_loss[i-1]``)。最初のステップは比較対象が無いため ``0.0``。
+          最大単一ステップ損失上昇幅(007 主張 3・4)の算出に使う。
+        - ``"learning_rate"``: ステップごとに実際に使われた学習率
+          (``learning_rate_schedule`` 指定時はその出力、それ以外は固定値)。
         - ``"eval_step"``: 検証を行ったステップ番号のリスト。
         - ``"eval_bits_per_byte"``: ``eval_step`` に対応する検証 bits-per-byte。
     """
@@ -130,18 +182,29 @@ def train_language_model(
     generator.manual_seed(seed)
 
     model = model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    if optimizer is None:
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     history: dict[str, list[float]] = {
         "step": [],
         "train_loss": [],
         "gradient_norm": [],
+        "loss_step_delta": [],
+        "learning_rate": [],
         "eval_step": [],
         "eval_bits_per_byte": [],
     }
 
+    previous_loss: float | None = None
     for step in range(1, num_steps + 1):
         model.train()
+
+        if learning_rate_schedule is not None:
+            current_lr = learning_rate_schedule(step)
+            _set_optimizer_learning_rate(optimizer, current_lr)
+        else:
+            current_lr = learning_rate
+
         inputs, targets = get_random_batch(train_token_ids, batch_size, sequence_length, generator)
         inputs, targets = inputs.to(device), targets.to(device)
 
@@ -151,17 +214,31 @@ def train_language_model(
         optimizer.zero_grad()
         loss.backward()
 
-        # clipping はせず、全パラメータの勾配を連結した L2 ノルムを測定のみ行う(実験 H)。
+        # クリッピング適用前の、全パラメータの勾配を連結した L2 ノルムを常に測定する
+        # (007 2-3 節、クリッピングの効果を測定するため適用前の値を残す)。
         gradient_norm_sq = sum(
             p.grad.detach().pow(2).sum() for p in model.parameters() if p.grad is not None
         )
         gradient_norm = float(gradient_norm_sq**0.5)
 
+        if gradient_clip_threshold is not None and gradient_norm > 0.0:
+            clip_scale = min(1.0, gradient_clip_threshold / gradient_norm)
+            if clip_scale < 1.0:
+                for p in model.parameters():
+                    if p.grad is not None:
+                        p.grad.detach().mul_(clip_scale)
+
         optimizer.step()
 
+        loss_value = loss.item()
+        loss_step_delta = 0.0 if previous_loss is None else loss_value - previous_loss
+        previous_loss = loss_value
+
         history["step"].append(step)
-        history["train_loss"].append(loss.item())
+        history["train_loss"].append(loss_value)
         history["gradient_norm"].append(gradient_norm)
+        history["loss_step_delta"].append(loss_step_delta)
+        history["learning_rate"].append(current_lr)
 
         if step % eval_interval == 0:
             bits_per_byte = evaluate_bits_per_byte(

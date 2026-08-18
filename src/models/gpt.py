@@ -80,6 +80,15 @@ class GPTLanguageModel(nn.Module):
         tie_embeddings: True(既定値)の場合、トークン埋め込み行列と出力層
             (``lm_head``)の重みを共有する(Press & Wolf 2017、Inan et al. 2017)。
         dropout: Attention 重み・各サブレイヤー出力に適用する dropout 率。
+        norm_first: True(既定値)で正規化前置(Pre-Layer Normalization)、False で
+            正規化後置(Post-Layer Normalization、007 で追加)。006 までは
+            ``DecoderBlock`` に常に ``norm_first=True`` を渡していた(002 の知見に
+            従い、深い層でも学習が安定するため)。007 では、002 で観測した
+            正規化後置の勾配の不均衡・004 で観測した正規化欠如条件でのシード間
+            ばらつきの増大を踏まえ、意図的に不安定性を誘発する条件として
+            ``norm_first=False`` を使う。``DecoderBlock`` 自体は 004 の時点で
+            ``norm_first`` 引数を既に持っており(``src/layers/transformer_block.py``)、
+            本引数はそれを ``GPTLanguageModel`` の呼び出し側に透過するのみである。
     """
 
     def __init__(
@@ -95,6 +104,7 @@ class GPTLanguageModel(nn.Module):
         feed_forward_factory: Callable[[], nn.Module] | None = None,
         tie_embeddings: bool = True,
         dropout: float = 0.0,
+        norm_first: bool = True,
     ) -> None:
         super().__init__()
         self.vocabulary_size = vocabulary_size
@@ -120,6 +130,7 @@ class GPTLanguageModel(nn.Module):
                     normalization_factory,
                     feed_forward_factory,
                     positional_transform,
+                    norm_first,
                 )
                 for _ in range(num_layers)
             ]
@@ -139,6 +150,7 @@ class GPTLanguageModel(nn.Module):
         normalization_factory: Callable[[int], nn.Module] | None,
         feed_forward_factory: Callable[[], nn.Module] | None,
         positional_transform: QueryKeyPositionalTransform | None,
+        norm_first: bool = True,
     ) -> DecoderBlock:
         """交差注意を持たない ``DecoderBlock`` を 1 層分構築する。
 
@@ -151,7 +163,7 @@ class GPTLanguageModel(nn.Module):
             num_heads,
             d_ff,
             dropout=dropout,
-            norm_first=True,
+            norm_first=norm_first,
             normalization_factory=normalization_factory,
             feed_forward_factory=feed_forward_factory,
             use_cross_attention=False,

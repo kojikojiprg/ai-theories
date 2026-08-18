@@ -395,6 +395,82 @@ def compute_perplexity(mean_loss_per_token: float) -> float:
     return math.exp(mean_loss_per_token)
 
 
+def compute_gradient_norm_peak_to_mean_ratio(gradient_norms: Sequence[float]) -> float:
+    """勾配ノルムの時系列から、ピーク(最大値)と平均値の比を計算する(007)。
+
+    006 の実験 H で導入した指標を関数化したもの。この比が大きいほど、学習全体を通じた
+    典型的な勾配ノルム(平均)に対して、突発的なスパイクが大きいことを意味する
+    (007 主張 1・2a・2b で、正規化方式・学習率が不安定性の誘発にどう効くかを
+    比較する診断量として使う)。
+
+    Args:
+        gradient_norms: ステップごとの勾配ノルム(``train_language_model`` の
+            history の ``"gradient_norm"``、クリッピング適用前の値)。
+
+    Returns:
+        ピーク / 平均比(``max(gradient_norms) / mean(gradient_norms)``)。
+    """
+    norms = np.asarray(gradient_norms, dtype=float)
+    return float(norms.max() / norms.mean())
+
+
+def compute_max_single_step_loss_increase(loss_step_deltas: Sequence[float]) -> float:
+    """訓練損失の単一ステップ上昇幅の最大値を計算する(007)。
+
+    ``train_language_model`` の history の ``"loss_step_delta"``(直前ステップとの
+    損失の差)から、最大値(最も大きな上昇)を取り出す。全ステップで損失が
+    単調に減少・横ばいだった場合、戻り値は 0 以下になる(上昇が一度も無かったことを
+    意味する。007 主張 3・4 で、gradient clipping・warmup + cosine スケジュールが
+    損失の暴れを抑える効果を測る診断量として使う)。
+
+    Args:
+        loss_step_deltas: ステップごとの損失の差(``train_language_model`` の
+            history の ``"loss_step_delta"``)。
+
+    Returns:
+        単一ステップ損失上昇幅の最大値。
+    """
+    return float(max(loss_step_deltas))
+
+
+def compute_effective_decay_divergence(
+    initial_values: Sequence[float],
+    final_values: Sequence[float],
+) -> dict[str, object]:
+    """重み減衰の実効的な強度が、パラメータ群間でどれだけ乖離しているかを計算する(007 主張 6)。
+
+    勾配の二次モーメント推定の大きさが異なる複数のパラメータ群(例えば「勾配が
+    常に大きい群」「勾配が常に小さい群」)に、同一の名目上の重み減衰係数 λ を
+    与えて学習したときの、群ごとの **実効減衰率**(初期値からどれだけ縮んだか)
+
+    .. math::
+
+        d_i = (\\theta_i^{(0)} - \\theta_i^{(T)}) / \\theta_i^{(0)}
+
+    を群 :math:`i` ごとに計算し、群間の最大値と最小値の差(乖離、divergence)を返す。
+    AdamW(``src/training/optimizer.py``)は重み減衰をモーメント推定から独立させて
+    いるため、群間の勾配スケールが違っても :math:`d_i` はほぼ揃う(divergence が
+    小さい)ことが期待される。Adam(L2 正則化混入、``AdamWithL2Regularization``)は
+    重み減衰が二次モーメント推定 v を経由するため、勾配スケールが小さい群ほど
+    v に占める減衰由来の寄与が相対的に大きくなり、群間で :math:`d_i` が乖離する
+    (divergence が大きくなる)ことが期待される。
+
+    Args:
+        initial_values: 群ごとの初期値 :math:`\\theta_i^{(0)}`(群の数だけの長さ)。
+        final_values: 群ごとの最終値 :math:`\\theta_i^{(T)}`(``initial_values`` と
+            同じ長さ・同じ群順)。
+
+    Returns:
+        ``{"decay_fractions": 群ごとの d_i のリスト, "divergence": 群間の
+        max(d_i) - min(d_i)}`` の辞書。
+    """
+    if len(initial_values) != len(final_values):
+        raise ValueError("initial_values と final_values の長さが一致しません")
+    decay_fractions = [(i0 - fT) / i0 for i0, fT in zip(initial_values, final_values, strict=True)]
+    divergence = max(decay_fractions) - min(decay_fractions)
+    return {"decay_fractions": decay_fractions, "divergence": divergence}
+
+
 def count_non_embedding_parameters(model: nn.Module) -> int:
     """埋め込み行列と出力層を除いたパラメータ数を数える。
 
