@@ -169,6 +169,11 @@ def train_language_model(
         - ``"gradient_norm"``: ステップごとの勾配ノルム(全パラメータの勾配を
           連結した L2 ノルム、**gradient clipping 適用前の値**。clipping の有無に
           関わらず常に記録する、007 2-3 節)。
+        - ``"gradient_clip_triggered"``: ステップごとに gradient clipping が実際に
+          発動したか(``gradient_norm > gradient_clip_threshold``)を示す bool の
+          リスト。``gradient_clip_threshold`` が ``None`` の場合は常に ``False``。
+          gradient clipping を有効にした条件で実際に発動しているかどうかの前提条件
+          (precondition)の検証に使う(007 前提条件 P2)。
         - ``"loss_step_delta"``: 直前ステップとの訓練損失の差(``train_loss[i] -
           train_loss[i-1]``)。最初のステップは比較対象が無いため ``0.0``。
           最大単一ステップ損失上昇幅(007 主張 3・4)の算出に使う。
@@ -189,6 +194,7 @@ def train_language_model(
         "step": [],
         "train_loss": [],
         "gradient_norm": [],
+        "gradient_clip_triggered": [],
         "loss_step_delta": [],
         "learning_rate": [],
         "eval_step": [],
@@ -221,12 +227,17 @@ def train_language_model(
         )
         gradient_norm = float(gradient_norm_sq**0.5)
 
-        if gradient_clip_threshold is not None and gradient_norm > 0.0:
-            clip_scale = min(1.0, gradient_clip_threshold / gradient_norm)
-            if clip_scale < 1.0:
-                for p in model.parameters():
-                    if p.grad is not None:
-                        p.grad.detach().mul_(clip_scale)
+        # 発動の判定基準は「クリッピング適用前の勾配ノルムが閾値を超えたか」であり、
+        # gradient_clip_threshold が None(クリッピング無効)の条件では常に False とする
+        # (007 前提条件 P2: gradient clipping を有効にした条件で実際に発動しているかの検証に使う)。
+        clip_triggered = (
+            gradient_clip_threshold is not None and gradient_norm > gradient_clip_threshold
+        )
+        if clip_triggered:
+            clip_scale = gradient_clip_threshold / gradient_norm
+            for p in model.parameters():
+                if p.grad is not None:
+                    p.grad.detach().mul_(clip_scale)
 
         optimizer.step()
 
@@ -237,6 +248,7 @@ def train_language_model(
         history["step"].append(step)
         history["train_loss"].append(loss_value)
         history["gradient_norm"].append(gradient_norm)
+        history["gradient_clip_triggered"].append(clip_triggered)
         history["loss_step_delta"].append(loss_step_delta)
         history["learning_rate"].append(current_lr)
 
