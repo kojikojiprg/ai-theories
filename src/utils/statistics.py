@@ -433,6 +433,25 @@ def compute_max_single_step_loss_increase(loss_step_deltas: Sequence[float]) -> 
     return float(max(loss_step_deltas))
 
 
+def compute_loss_step_delta_std(loss_step_deltas: Sequence[float]) -> float:
+    """訓練損失の単一ステップ差分の標準偏差を計算する(007 主張 4')。
+
+    ``train_language_model`` の history の ``"loss_step_delta"``(直前ステップとの
+    損失の差)系列全体のばらつきを、``compute_max_single_step_loss_increase()``の
+    ような最大値(極値統計)ではなく標準偏差(分布全体の統計量)で捉える。
+    先頭要素(比較対象が無いための ``0.0``、``train_language_model``の docstring
+    参照)は除外せず含める(``compute_max_single_step_loss_increase()``と同じ扱い)。
+
+    Args:
+        loss_step_deltas: ステップごとの損失の差(``train_language_model`` の
+            history の ``"loss_step_delta"``)。
+
+    Returns:
+        単一ステップ損失差分の標準偏差(``numpy.std``、``ddof=0``)。
+    """
+    return float(np.std(np.asarray(loss_step_deltas, dtype=float)))
+
+
 def compute_effective_decay_divergence(
     initial_values: Sequence[float],
     final_values: Sequence[float],
