@@ -490,6 +490,70 @@ def compute_effective_decay_divergence(
     return {"decay_fractions": decay_fractions, "divergence": divergence}
 
 
+def compute_ngram_repetition_rate(token_ids: Sequence[int] | Tensor, n: int) -> float:
+    """生成系列内の n-gram 重複率を計算する(008、Welleck et al.,
+    "Neural Text Generation with Unlikelihood Training", ICLR 2020 の
+    seq-rep-n に基づく)。
+
+    系列中に出現する長さ ``n`` の連続部分列(n-gram)の総数のうち、重複して
+    出現した(ユニークでない)ものの割合を返す。
+
+    .. math::
+
+        \\mathrm{rep}\\text{-}n = 1 - \\frac{|\\mathrm{unique}(n\\text{-grams})|}{|n\\text{-grams}|}
+
+    値が大きいほど、同じ n-gram の繰り返しが多い(退化(degeneration)の兆候、
+    Holtzman et al., 2020)ことを意味する。
+
+    Args:
+        token_ids: 生成されたトークン ID の列(``list[int]`` または 1 次元 Tensor)。
+        n: n-gram の長さ(1 以上)。
+
+    Returns:
+        n-gram 重複率(0 以上 1 未満)。系列長が ``n`` 未満で n-gram が
+        1 つも作れない場合は ``0.0``(重複が測定できないことを重複なしと区別せず、
+        便宜上 0.0 とする)。
+    """
+    if isinstance(token_ids, Tensor):
+        token_ids = token_ids.tolist()
+    ids = list(token_ids)
+    num_ngrams = len(ids) - n + 1
+    if num_ngrams <= 0:
+        return 0.0
+    ngrams = [tuple(ids[i : i + n]) for i in range(num_ngrams)]
+    return 1.0 - len(set(ngrams)) / len(ngrams)
+
+
+def compute_distinct_n(token_ids: Sequence[int] | Tensor, n: int) -> float:
+    """distinct-n(多様性指標)を計算する(008、Li et al., "A Diversity-Promoting
+    Objective Function for Neural Conversation Models", NAACL 2016 に基づく)。
+
+    .. math::
+
+        \\mathrm{distinct}\\text{-}n =
+            \\frac{|\\mathrm{unique}(n\\text{-grams})|}{|n\\text{-grams}|}
+
+    ``compute_ngram_repetition_rate`` の余事象(``1 - rep-n``)にあたる量だが、
+    「多様性が高いほど値が大きい」向きに揃えた別名の指標として独立に提供する。
+
+    Args:
+        token_ids: 生成されたトークン ID の列(``list[int]`` または 1 次元 Tensor)。
+        n: n-gram の長さ(1 以上)。
+
+    Returns:
+        distinct-n(0 以上 1 以下)。系列長が ``n`` 未満で n-gram が 1 つも
+        作れない場合は ``0.0``。
+    """
+    if isinstance(token_ids, Tensor):
+        token_ids = token_ids.tolist()
+    ids = list(token_ids)
+    num_ngrams = len(ids) - n + 1
+    if num_ngrams <= 0:
+        return 0.0
+    ngrams = [tuple(ids[i : i + n]) for i in range(num_ngrams)]
+    return len(set(ngrams)) / len(ngrams)
+
+
 def count_non_embedding_parameters(model: nn.Module) -> int:
     """埋め込み行列と出力層を除いたパラメータ数を数える。
 

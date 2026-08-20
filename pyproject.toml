@@ -5,6 +5,7 @@ description = "LLM / VLM の理論学習と実践 / Learning LLM & VLM theory an
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "huggingface-hub>=1.28.0",
     "matplotlib>=3.8",
     "numpy>=1.26",
     "sentencepiece>=0.2.2",
