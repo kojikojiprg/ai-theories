@@ -537,6 +537,106 @@ def plot_gradient_norm_trace(
     return ax
 
 
+def plot_isoflop_profile(
+    profiles: dict[float, dict[str, object]],
+    title: str = "",
+    xlabel: str = "log N (non-embedding params)",
+    ylabel: str = "Loss",
+    ax: Axes | None = None,
+) -> Axes:
+    """IsoFLOP プロファイル(計算量予算ごとの (log N, L) の点と、あてはめた放物線・
+    頂点)を重ね描きする(009、Hoffmann et al., 2022 Approach 2)。
+
+    Args:
+        profiles: ``{計算量予算 C: {"log_n": [...], "loss": [...],
+            "parabola_coeffs": (a, b, c), "vertex": (vertex_log_n, vertex_loss) または None}}``
+            の辞書(``src.scaling.laws.reconstruct_optimal_frontier`` の
+            ``FrontierResult.profiles`` をそのまま渡せる)。``vertex`` は頂点が
+            内点でない場合 ``None`` にして頂点マーカーの描画を省略する。
+        title: 図のタイトル。
+        xlabel: 横軸ラベル。
+        ylabel: 縦軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 4.5))
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, (compute, profile) in enumerate(sorted(profiles.items())):
+        color = color_cycle[i % len(color_cycle)]
+        log_n = np.asarray(profile["log_n"], dtype=float)
+        loss = np.asarray(profile["loss"], dtype=float)
+        ax.scatter(log_n, loss, color=color, s=28, zorder=3)
+
+        a, b, c = profile["parabola_coeffs"]
+        curve_x = np.linspace(log_n.min(), log_n.max(), 100)
+        curve_y = a * curve_x**2 + b * curve_x + c
+        ax.plot(curve_x, curve_y, color=color, linewidth=1.5, label=f"C={compute:.2e}")
+
+        vertex = profile.get("vertex")
+        if vertex is not None:
+            ax.scatter(
+                [vertex[0]],
+                [vertex[1]],
+                color=color,
+                marker="*",
+                s=140,
+                edgecolor="black",
+                linewidth=0.6,
+                zorder=4,
+            )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    return ax
+
+
+def plot_optimal_frontier(
+    frontiers: dict[str, tuple[Sequence[float], Sequence[float], float | None]],
+    title: str = "",
+    xlabel: str = "log C (compute budget)",
+    ylabel: str = "log N_opt",
+    ax: Axes | None = None,
+) -> Axes:
+    """log N_opt 対 log C のフロンティアを、複数の計算量の数え方で重ね描きする(009)。
+
+    Args:
+        frontiers: ``{数え方の名前: (log_c の系列, log_n_opt の系列,
+            べき乗則あてはめの指数 a または None)}`` の辞書。指数が ``None`` でなければ
+            凡例に指数の値を併記する。
+        title: 図のタイトル。
+        xlabel: 横軸ラベル。
+        ylabel: 縦軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.5, 4.5))
+
+    color_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for i, (name, (log_c, log_n_opt, exponent)) in enumerate(frontiers.items()):
+        color = color_cycle[i % len(color_cycle)]
+        label = f"{name} (a={exponent:.3f})" if exponent is not None else name
+        ax.plot(log_c, log_n_opt, "o-", color=color, linewidth=1.6, markersize=6, label=label)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8)
+    return ax
+
+
 def plot_dual_axis_curves(
     x: Sequence[float],
     left_curves: dict[str, Sequence[float]],

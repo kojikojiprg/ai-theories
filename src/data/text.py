@@ -322,6 +322,27 @@ def load_japanese_corpus(cache_dir: str | Path) -> str:
     return load_wikipedia_corpus("ja", cache_dir, manifest_path=manifest_path)
 
 
+def load_english_scaling_corpus(cache_dir: str | Path) -> str:
+    """英語コーパスを取得してキャッシュする(009 スケーリング則の学習グリッド用)。
+
+    ``load_wikipedia_corpus("en", cache_dir, manifest_path=...)`` の薄いラッパー。
+    006 で使った 356 記事(``en_006_pretraining.json``)に、Wikipedia の
+    Special:LongPages(長大記事一覧)から追加で選定した 644 記事を加えた計 1000 記事
+    (``src/data/wikipedia_manifests/en_009_scaling.json``)を対象とする。006 の
+    マニフェストを部分集合として含む形で拡張しているため、006・008 で既に取得済みの
+    記事のキャッシュ(``wikipedia_en_articles/``)をそのまま再利用でき、追加で
+    取得が必要なのは新規記事分のみである。
+
+    Args:
+        cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
+
+    Returns:
+        取得した記事本文を連結した 1 つの文字列。
+    """
+    manifest_path = _WIKIPEDIA_MANIFEST_DIR / "en_009_scaling.json"
+    return load_wikipedia_corpus("en", cache_dir, manifest_path=manifest_path)
+
+
 def load_code_corpus(repo_root: str | Path = ".") -> str:
     """コードコーパスを取得する(005 トークナイザのコードドメイン用)。
 
