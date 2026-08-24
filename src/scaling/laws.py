@@ -27,6 +27,18 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+# 非線形あてはめ(飽和べき乗則の alpha、Chinchilla あてはめの alpha・beta)の
+# 許容範囲。範囲外は識別不能なあてはめ(平坦・狭いデータに対して指数を際限なく
+# 大きく/小さくして局所的にフィットしようとする発散的な挙動)とみなし、対数空間
+# でのクリップにより探索範囲を制限する(実データでの overflow を防ぐ、009 第 2
+# ラウンド修正)。Kaplan らの 0.73・Chinchilla の 0.5 を包含しつつ、数値的に
+# 安全な範囲として (0.02, 2.5) を採用する。
+_ALPHA_BETA_MIN = 0.02
+_ALPHA_BETA_MAX = 2.5
+_LOG_ALPHA_BETA_MIN = float(np.log(_ALPHA_BETA_MIN))
+_LOG_ALPHA_BETA_MAX = float(np.log(_ALPHA_BETA_MAX))
+
+
 # ---------------------------------------------------------------------------
 # トークンあたりの計算量
 # ---------------------------------------------------------------------------
@@ -176,7 +188,10 @@ def _levenberg_marquardt(
     residuals = residual_fn(params)
     if weights is None:
         weights = np.ones_like(residuals)
-    cost = float(np.sum(weights * residuals**2))
+    with np.errstate(over="ignore", invalid="ignore"):
+        cost = float(np.sum(weights * residuals**2))
+    if np.isnan(cost):
+        cost = np.inf
 
     lambda_ = 1e-3
     converged = False
@@ -262,33 +277,54 @@ def fit_saturating_power_law(x: Sequence[float], y: Sequence[float]) -> Saturati
 
     def residual_fn(params: np.ndarray) -> np.ndarray:
         l_inf, log_x_c, log_alpha = params
-        x_c = np.exp(log_x_c)
-        alpha = np.exp(log_alpha)
-        with np.errstate(over="ignore"):
+        with np.errstate(over="ignore", invalid="ignore"):
             # multi-start の探索中に極端なパラメータを試すことがあり、その際の
-            # オーバーフロー(inf)は次善のコスト値として自然に棄却されるため無害。
+            # オーバーフロー(inf)は次善のコスト値として自然に棄却されるため無害
+            # (009 第 2 ラウンド修正: exp() 自体もこのブロック内で行う必要がある。
+            # 呼び出し元がデータ形状に合わないパラメータ範囲を探索する場合、
+            # log_x_c・log_alpha が exp() 単体でオーバーフローしうるため)。
+            x_c = np.exp(log_x_c)
+            alpha = np.exp(log_alpha)
             pred = l_inf + (x_c / x_arr) ** alpha
+        pred = np.nan_to_num(pred, nan=1e12, posinf=1e12, neginf=-1e12)
         return pred - y_arr
 
     y_min = float(y_arr.min())
     x_median = float(np.median(x_arr))
+    # alpha(減衰の速さ)は Chinchilla パラメトリックあてはめと同じ範囲に緩やかに拘束する
+    # (009 第 2 ラウンド修正、識別不能なデータに対する発散防止)。x_c はデータの尺度
+    # (D の範囲)に依存するため固定範囲は設けないが、あてはめ後に有限値であることは保証する。
+    log_alpha_min, log_alpha_max = _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX
 
-    best_params, best_cost, best_converged = None, np.inf, False
-    for l_inf_init_frac in (0.5, 0.8, 0.95):
-        for alpha_init in (0.1, 0.3, 0.5, 0.8):
-            params0 = np.array(
-                [y_min * l_inf_init_frac, np.log(x_median), np.log(alpha_init)], dtype=float
-            )
-            params, converged = _levenberg_marquardt(residual_fn, params0)
-            cost = float(np.sum(residual_fn(params) ** 2))
-            if cost < best_cost:
-                best_params, best_cost, best_converged = params, cost, converged
+    best_params: np.ndarray | None = None
+    best_cost = np.inf
+    best_converged = False
+    with np.errstate(over="ignore", invalid="ignore"):
+        for l_inf_init_frac in (0.5, 0.8, 0.95):
+            for alpha_init in (0.1, 0.3, 0.5, 0.8):
+                params0 = np.array(
+                    [y_min * l_inf_init_frac, np.log(x_median), np.log(alpha_init)], dtype=float
+                )
+                if best_params is None:
+                    best_params = params0  # 最低限のフォールバック
+                params, converged = _levenberg_marquardt(residual_fn, params0)
+                params[2] = np.clip(params[2], log_alpha_min, log_alpha_max)
+                cost = float(np.sum(residual_fn(params) ** 2))
+                if np.isfinite(cost) and cost < best_cost:
+                    best_params, best_cost, best_converged = params, cost, converged
 
+    assert best_params is not None
     l_inf, log_x_c, log_alpha = best_params
+    log_alpha = float(np.clip(log_alpha, log_alpha_min, log_alpha_max))
+    with np.errstate(over="ignore", invalid="ignore"):
+        x_c = float(np.exp(log_x_c))
+        alpha = float(np.exp(log_alpha))
+    if not np.isfinite(x_c):
+        x_c = float(np.clip(np.exp(np.clip(log_x_c, -700, 700)), 1e-12, 1e300))
     return SaturatingPowerLawFit(
         l_inf=float(l_inf),
-        x_c=float(np.exp(log_x_c)),
-        alpha=float(np.exp(log_alpha)),
+        x_c=x_c,
+        alpha=alpha,
         converged=best_converged,
         residuals=residual_fn(best_params),
     )
@@ -421,13 +457,39 @@ class ChinchillaParametricFit:
     residuals: np.ndarray
 
 
+def _chinchilla_residual(
+    params: np.ndarray, n_arr: np.ndarray, d_arr: np.ndarray, log_loss: np.ndarray
+) -> np.ndarray:
+    """Chinchilla パラメトリックあてはめの残差関数(対数空間)。
+
+    ``fit_chinchilla_parametric`` と ``bootstrap_scaling_analysis`` の両方から
+    共有される(重複実装による bounds の食い違いを防ぐ、009 第 2 ラウンド修正)。
+    ``alpha``・``beta`` は ``_LOG_ALPHA_BETA_MIN``・``_LOG_ALPHA_BETA_MAX`` の範囲に
+    クリップしてから使う(識別不能なデータに対する発散を防ぐ)。``errstate`` で
+    オーバーフロー由来の警告を抑制し、``pred`` が非有限になった場合は Huber 損失が
+    大きな有限値として扱えるよう ``log(pred)`` を有限の上限にクリップする。
+    """
+    log_e, log_a, log_b, log_alpha, log_beta = params
+    log_alpha = np.clip(log_alpha, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX)
+    log_beta = np.clip(log_beta, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX)
+    with np.errstate(over="ignore", invalid="ignore"):
+        e, a_coef, b_coef = np.exp(log_e), np.exp(log_a), np.exp(log_b)
+        alpha, beta = np.exp(log_alpha), np.exp(log_beta)
+        pred = e + a_coef / n_arr**alpha + b_coef / d_arr**beta
+        log_pred = np.log(pred)
+    # pred が 0(アンダーフロー)や inf(オーバーフロー)になった場合、log は -inf/inf/nan に
+    # なりうる。Huber 損失側でこれを「大きいが有限な残差」として扱えるよう有限値に落とす。
+    log_pred = np.nan_to_num(log_pred, nan=1e6, posinf=1e6, neginf=-1e6)
+    return log_pred - log_loss
+
+
 def fit_chinchilla_parametric(
     n: Sequence[float],
     d: Sequence[float],
     loss: Sequence[float],
     huber_delta: float = 0.05,
-    init_alpha_grid: Sequence[float] = (0.2, 0.35, 0.5),
-    init_beta_grid: Sequence[float] = (0.2, 0.35, 0.5),
+    init_alpha_grid: Sequence[float] = (0.1, 0.2, 0.35, 0.5, 0.7),
+    init_beta_grid: Sequence[float] = (0.1, 0.2, 0.35, 0.5, 0.7),
 ) -> ChinchillaParametricFit:
     """Chinchilla のパラメトリックあてはめ L(N,D) = E + A/N^alpha + B/D^beta を
     対数空間の Huber 損失であてはめる(Hoffmann et al., 2022, Approach 3)。
@@ -435,12 +497,20 @@ def fit_chinchilla_parametric(
     ``E, A, B, alpha, beta`` が正であるという制約を、対数空間でパラメータ化する
     ことで自動的に満たす(``params = [log E, log A, log B, log alpha, log beta]``
     を実際の最適化変数とし、非制約の Levenberg-Marquardt を IRLS 経由で適用する、
-    ``_fit_nonlinear_huber`` 参照)。
+    ``_fit_nonlinear_huber`` 参照)。``alpha``・``beta`` はさらに ``_chinchilla_residual``
+    内で ``(0.02, 2.5)`` にクリップし、識別不能なデータ(N・D の範囲が狭い、
+    L がほぼ一定など)に対して指数が際限なく発散するのを防ぐ(009 第 2 ラウンド修正、
+    実データでの ``overflow encountered in exp / in power`` 警告への対処)。
 
     Chinchilla のパラメトリックあてはめは初期値に敏感であることが知られている
     (Besiroglu et al., "Chinchilla Scaling: A replication attempt", 2024)ため、
     ``init_alpha_grid`` x ``init_beta_grid`` の全組み合わせを初期値として試す
-    multi-start を行い、最良の Huber 損失を与える解を採用する。
+    multi-start を行い、最良の Huber 損失を与える解を採用する。初期値の係数
+    (``A``・``B``)は、外れ値の影響を受けにくい中央値(``N``・``D`` の中央値)を
+    基準に見積もる(平均値は N・D が桁で広がる場合に外れ値の影響を受けやすいため)。
+    どの初期値からの最適化も改善しなかった場合(データが極端に識別不能な場合)でも、
+    最初の初期値をフォールバックとして返す(``best_params`` が ``None`` のまま
+    関数を抜けることはない)。
 
     Args:
         n: 非埋め込みパラメータ数 N の測定値の系列。
@@ -451,39 +521,53 @@ def fit_chinchilla_parametric(
         init_beta_grid: multi-start に使う beta の初期値候補。
 
     Returns:
-        ChinchillaParametricFit。
+        ChinchillaParametricFit。``converged=False`` は「収束しなかった」ことを示す
+        だけであり、例外は発生させない(呼び出し側は必ず ``ChinchillaParametricFit``
+        インスタンスを受け取れる)。
     """
     n_arr = np.asarray(n, dtype=float)
     d_arr = np.asarray(d, dtype=float)
     log_loss = np.log(np.asarray(loss, dtype=float))
 
     def residual_fn(params: np.ndarray) -> np.ndarray:
-        log_e, log_a, log_b, log_alpha, log_beta = params
-        e, a_coef, b_coef = np.exp(log_e), np.exp(log_a), np.exp(log_b)
-        alpha, beta = np.exp(log_alpha), np.exp(log_beta)
-        pred = e + a_coef / n_arr**alpha + b_coef / d_arr**beta
-        return np.log(pred) - log_loss
+        return _chinchilla_residual(params, n_arr, d_arr, log_loss)
 
-    loss_min = float(np.exp(log_loss).min())
-    best_params, best_cost, best_converged = None, np.inf, False
-    for alpha_init in init_alpha_grid:
-        for beta_init in init_beta_grid:
-            params0 = np.array(
-                [
-                    np.log(max(loss_min * 0.5, 1e-6)),
-                    np.log(max(loss_min * float(n_arr.mean()) ** alpha_init * 0.5, 1e-6)),
-                    np.log(max(loss_min * float(d_arr.mean()) ** beta_init * 0.5, 1e-6)),
-                    np.log(alpha_init),
-                    np.log(beta_init),
-                ],
-                dtype=float,
-            )
-            params, converged = _fit_nonlinear_huber(residual_fn, params0, huber_delta)
-            cost = float(np.sum(_huber_loss(residual_fn(params), huber_delta)))
-            if cost < best_cost:
-                best_params, best_cost, best_converged = params, cost, converged
+    # E の初期値: 損失の下位 10 パーセンタイル(最小値そのものより外れ値に頑健)。
+    e_init = float(np.percentile(np.exp(log_loss), 10))
+    n_median = float(np.median(n_arr))
+    d_median = float(np.median(d_arr))
 
+    best_params: np.ndarray | None = None
+    best_cost = np.inf
+    best_converged = False
+    with np.errstate(over="ignore", invalid="ignore"):
+        for alpha_init in init_alpha_grid:
+            for beta_init in init_beta_grid:
+                a_coef_init = max(e_init * n_median**alpha_init * 0.5, 1e-8)
+                b_coef_init = max(e_init * d_median**beta_init * 0.5, 1e-8)
+                if not (np.isfinite(a_coef_init) and np.isfinite(b_coef_init)):
+                    continue  # この初期値の組み合わせは N・D の桁に対して不適切(次を試す)
+                params0 = np.array(
+                    [
+                        np.log(max(e_init * 0.5, 1e-8)),
+                        np.log(a_coef_init),
+                        np.log(b_coef_init),
+                        np.log(alpha_init),
+                        np.log(beta_init),
+                    ],
+                    dtype=float,
+                )
+                if best_params is None:
+                    best_params = params0  # 最低限のフォールバック(改善が一切なくても返す値)
+                params, converged = _fit_nonlinear_huber(residual_fn, params0, huber_delta)
+                cost = float(np.sum(_huber_loss(residual_fn(params), huber_delta)))
+                if np.isfinite(cost) and cost < best_cost:
+                    best_params, best_cost, best_converged = params, cost, converged
+
+    assert best_params is not None, "init_alpha_grid・init_beta_grid が空(呼び出し側の誤り)"
     log_e, log_a, log_b, log_alpha, log_beta = best_params
+    log_alpha = float(np.clip(log_alpha, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX))
+    log_beta = float(np.clip(log_beta, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX))
     return ChinchillaParametricFit(
         e=float(np.exp(log_e)),
         a_coef=float(np.exp(log_a)),
@@ -731,21 +815,31 @@ def bootstrap_scaling_analysis(
             noisy_grid, target_compute_budgets, flops_per_token_body_output
         )
         if result_body.power_law_fit is None or result_bo.power_law_fit is None:
+            # 内点予算が 2 未満でフロンティアのべき乗則あてはめができない反復
+            # (前提条件 P1 に相当する状況がこの反復のノイズ付与標本で崩れた場合)。
             continue
 
-        def residual_fn_local(
-            params: np.ndarray, n_values=n_values, d_values=d_values, noisy_l=noisy_l
-        ) -> np.ndarray:
-            log_e, log_a, log_b, log_alpha, log_beta = params
-            e, a_coef, b_coef = np.exp(log_e), np.exp(log_a), np.exp(log_b)
-            alpha, beta = np.exp(log_alpha), np.exp(log_beta)
-            pred = e + a_coef / n_values**alpha + b_coef / d_values**beta
-            return np.log(pred) - np.log(noisy_l)
+        # Chinchilla あてはめ(IRLS)が数値的に破綻する可能性(次元がほぼ退化した
+        # ノイズ付与標本など)に備え、例外を伝播させず当該反復をスキップする
+        # (009 第 2 ラウンド修正、bootstrap_scaling_analysis のエラーハンドリング)。
+        try:
+            log_noisy_l = np.log(noisy_l)
 
-        chinchilla_params, _ = _fit_nonlinear_huber(residual_fn_local, warm_params, huber_delta)
-        _, _, _, log_alpha3, log_beta3 = chinchilla_params
-        alpha_i, beta_i = float(np.exp(log_alpha3)), float(np.exp(log_beta3))
-        a3, _ = compute_optimal_allocation_exponents(alpha_i, beta_i)
+            def residual_fn_local(
+                params: np.ndarray, n_values=n_values, d_values=d_values, log_noisy_l=log_noisy_l
+            ) -> np.ndarray:
+                return _chinchilla_residual(params, n_values, d_values, log_noisy_l)
+
+            chinchilla_params, _ = _fit_nonlinear_huber(residual_fn_local, warm_params, huber_delta)
+            _, _, _, log_alpha3, log_beta3 = chinchilla_params
+            log_alpha3 = np.clip(log_alpha3, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX)
+            log_beta3 = np.clip(log_beta3, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX)
+            alpha_i, beta_i = float(np.exp(log_alpha3)), float(np.exp(log_beta3))
+            if not (np.isfinite(alpha_i) and np.isfinite(beta_i)):
+                continue
+            a3, _ = compute_optimal_allocation_exponents(alpha_i, beta_i)
+        except (np.linalg.LinAlgError, FloatingPointError, ValueError):
+            continue
 
         a_body_list.append(result_body.power_law_fit.exponent)
         a_bo_list.append(result_bo.power_law_fit.exponent)
