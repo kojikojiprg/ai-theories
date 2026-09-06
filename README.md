@@ -16,6 +16,8 @@ Notebookをまとめた記事は、[Zenn](https://zenn.dev/kojikojiprg/books/ai-
   Hands-on system building (web apps, etc.) that applies the theory learned above.
 - `src/` — `theories/`・`apps/`から利用する共通モジュール  
   Shared modules reused by both `theories/` and `apps/`.
+- `scripts/` — 特定のトピック・アプリに紐付かない、リポジトリ運用スクリプト  
+  Repository-maintenance scripts not tied to a specific topic or app.
 
 詳細な学習順序・トピック一覧は [`theories/README.md`](./theories/README.md)、アプリ一覧・デプロイ方法は [`apps/README.md`](./apps/README.md) を参照してください。
 See [`theories/README.md`](./theories/README.md) for the recommended learning order and topic list,and [`apps/README.md`](./apps/README.md) for the app list and deployment details.
