@@ -337,7 +337,7 @@ def load_wikipedia_corpus(
         return_metadata: True の場合、``(text, metadata)``のタプルを返す。
             ``metadata``は``{"manifest_article_count": int, "fetched_article_count":
             int, "skipped_articles": [{"title": str, "reason": str}, ...]}``を含む
-            (``scripts/fetch_and_upload_corpus_en_009.ipynb``で使用)。既定値``False``
+            (``scripts/promote_canonical_corpora.ipynb``で使用)。既定値``False``
             の場合は従来通り``text``のみを返す(005・006・008・009 の既存呼び出しの
             返り値は不変)。
 
@@ -424,10 +424,11 @@ def load_japanese_corpus(cache_dir: str | Path) -> str:
     return load_wikipedia_corpus("ja", cache_dir, manifest_path=manifest_path)
 
 
-def load_english_scaling_corpus(
+def load_english_wikipedia_corpus(
     cache_dir: str | Path, return_metadata: bool = False
 ) -> str | tuple[str, dict]:
-    """英語コーパスを取得してキャッシュする(009 スケーリング則の学習グリッド用)。
+    """英語版 Wikipedia の記事集合からコーパスを取得してキャッシュする(009 スケーリング則
+    の学習グリッド用に選定したマニフェストを使う)。
 
     ``load_wikipedia_corpus("en", cache_dir, manifest_path=...)`` の薄いラッパー。
     006 で使った 356 記事(``en_006_pretraining.json``)に、Wikipedia の
@@ -440,7 +441,7 @@ def load_english_scaling_corpus(
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
         return_metadata: ``load_wikipedia_corpus``にそのまま渡す(``scripts/
-            fetch_and_upload_corpus_en_009.ipynb``で使用)。既定値``False``の場合、
+            promote_canonical_corpora.ipynb``で使用)。既定値``False``の場合、
             009 の既存呼び出しの返り値は不変。
 
     Returns:
@@ -453,23 +454,23 @@ def load_english_scaling_corpus(
     )
 
 
-_EN_009_CORPUS_REPO_ID = "kojikojiprg/ai-theories-corpus-en-009-scaling"
+_EN_WIKIPEDIA_CORPUS_REPO_ID = "kojikojiprg/ai-theories-corpus-en"
 
 
-def load_english_scaling_corpus_with_fallback(cache_dir: str | Path) -> str:
-    """英語コーパスを取得する(009 スケーリング則の学習グリッド用)。
+def load_english_wikipedia_corpus_with_fallback(cache_dir: str | Path) -> str:
+    """英語版 Wikipedia のコーパスを取得する。
 
-    まず``kojikojiprg/ai-theories-corpus-en-009-scaling``(Hugging Face Hub の
-    Dataset リポジトリ、``scripts/fetch_and_upload_corpus_en_009.ipynb``で
-    アップロードしたもの)から``corpus.json``を取得し、``"raw_text"``フィールドを
-    読む。取得に失敗した場合(リポジトリが未作成・ネットワーク障害など)のみ、
-    ``load_english_scaling_corpus()``による Wikipedia API からの直接取得に
-    フォールバックする。1000 記事の直接取得は Colab で数十〜100 分規模の時間を
-    要するため(009、5.4 節)、Hub のデータセットが存在すればそれを優先する。
+    まず``kojikojiprg/ai-theories-corpus-en``(Hugging Face Hub の Dataset
+    リポジトリ、``scripts/promote_canonical_corpora.ipynb``でアップロードしたもの)
+    から``corpus.json``を取得し、``"raw_text"``フィールドを読む。取得に失敗した場合
+    (リポジトリが未作成・ネットワーク障害など)のみ、``load_english_wikipedia_corpus()``
+    による Wikipedia API からの直接取得にフォールバックする。1000 記事の直接取得は
+    Colab で数十〜100 分規模の時間を要するため(009、5.4 節)、Hub のデータセットが
+    存在すればそれを優先する。
 
     Args:
         cache_dir: 直接取得にフォールバックした場合のキャッシュ先ディレクトリ
-            (``load_english_scaling_corpus()``にそのまま渡す)。
+            (``load_english_wikipedia_corpus()``にそのまま渡す)。
 
     Returns:
         取得したコーパス全文。取得元(Hub / 直接取得のどちらだったか)は標準出力に
@@ -479,18 +480,50 @@ def load_english_scaling_corpus_with_fallback(cache_dir: str | Path) -> str:
         from huggingface_hub import hf_hub_download
 
         path = hf_hub_download(
-            repo_id=_EN_009_CORPUS_REPO_ID, filename="corpus.json", repo_type="dataset"
+            repo_id=_EN_WIKIPEDIA_CORPUS_REPO_ID, filename="corpus.json", repo_type="dataset"
         )
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-        print(f"コーパス取得元: {_EN_009_CORPUS_REPO_ID}(Hugging Face Hub)")
+        print(f"コーパス取得元: {_EN_WIKIPEDIA_CORPUS_REPO_ID}(Hugging Face Hub)")
         return data["raw_text"]
     except Exception as e:  # noqa: BLE001  # Hub 取得の失敗理由を問わずフォールバックする
         print(
             f"Hub からの取得に失敗した({e!r})。Wikipedia API からの直接取得にフォールバックする。"
         )
-        text = load_english_scaling_corpus(cache_dir)
+        text = load_english_wikipedia_corpus(cache_dir)
         print("コーパス取得元: Wikipedia API(直接取得)")
         return text
+
+
+def upload_corpus_artifact_to_hub(
+    repo_id: str,
+    corpus_json_path: str | Path,
+    dataset_card_text: str,
+    token: str,
+) -> None:
+    """指定した Dataset リポジトリを作成し(存在しなければ)、corpus.json とデータセット
+    カードをアップロードする(``scripts/promote_canonical_corpora.ipynb``で使用)。
+
+    ``src/data/tokenizer.py``の``upload_tokenizer_artifact_to_hub()``と対になる関数
+    (``repo_type="dataset"``である点、アップロードするファイル名(``corpus.json``)が
+    異なる)。呼び出し側が``DRY_RUN``・``IN_COLAB``のガードを行った上でのみ呼び出す
+    こと。トークンの取得・環境変数への設定はここでは行わない(呼び出し側が用意して渡す)。
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=False)
+    api.upload_file(
+        path_or_fileobj=str(corpus_json_path),
+        path_in_repo="corpus.json",
+        repo_id=repo_id,
+        repo_type="dataset",
+    )
+    api.upload_file(
+        path_or_fileobj=dataset_card_text.encode("utf-8"),
+        path_in_repo="README.md",
+        repo_id=repo_id,
+        repo_type="dataset",
+    )
 
 
 def load_code_corpus(repo_root: str | Path = ".") -> str:
