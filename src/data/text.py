@@ -226,14 +226,25 @@ def _fetch_wikipedia_revision_plaintext(
     ``load_wikipedia_corpus`` では、この無期限ハングが 1 回でも起きると呼び出し全体が
     止まってしまうため、明示的なタイムアウトと再試行が必須)。
 
+    HTTP ステータスが 200 でも、応答 JSON に ``"parse"`` キーがないことがある
+    (記事が見つからない、リダイレクト、API 側のエラーオブジェクトを返す場合など。
+    009 の本番実行で ``KeyError: 'parse'`` により全体が停止した不具合の修正)。
+    この場合も 429・タイムアウトと同様に再試行対象として扱う。
+
     Args:
         language: Wikipedia の言語コード(``"ja"``・``"en"`` など)。
         title: 記事タイトル(取得自体には使わない。呼び出し側がキャッシュファイル名の
             対応付けに使うために受け取るだけの引数)。
         revid: 取得するリビジョン ID。
-        max_retries: 429・タイムアウト発生時の最大再試行回数。
-        retry_wait_seconds: 429・タイムアウト発生時の基本待機秒数(試行回数に比例して延びる)。
+        max_retries: 429・タイムアウト・``"parse"``キー欠落発生時の最大再試行回数。
+        retry_wait_seconds: 429・タイムアウト・``"parse"``キー欠落発生時の基本待機秒数
+            (試行回数に比例して延びる)。
         request_timeout: 1 リクエストあたりの ``urlopen`` タイムアウト秒数。
+
+    Raises:
+        RuntimeError: ``max_retries``回再試行してもなお応答 JSON に``"parse"``キーが
+            ない場合。呼び出し元(``load_wikipedia_corpus``)はこれを捕捉して当該記事を
+            スキップする。
     """
     del title  # 取得は revid のみで行う(引数の説明は docstring を参照)
     params = urllib.parse.urlencode(
@@ -251,14 +262,22 @@ def _fetch_wikipedia_revision_plaintext(
     )
 
     for attempt in range(max_retries):
+        is_last_attempt = attempt == max_retries - 1
         try:
             with urllib.request.urlopen(request, timeout=request_timeout) as response:  # noqa: S310
                 data = json.loads(response.read().decode("utf-8"))
             time.sleep(1.0)  # 連続リクエストによるレート制限(429)を避ける
-            wikitext = data["parse"]["wikitext"]
-            return _wikitext_to_plaintext(wikitext)
+            if "parse" in data:
+                return _wikitext_to_plaintext(data["parse"]["wikitext"])
+            if not is_last_attempt:
+                time.sleep(retry_wait_seconds * (attempt + 1))
+                continue
+            raise RuntimeError(
+                f"{language} revid={revid}: 応答 JSON に 'parse' キーがない"
+                f"(error={data.get('error')!r})"
+            )
         except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < max_retries - 1:
+            if e.code == 429 and not is_last_attempt:
                 time.sleep(retry_wait_seconds * (attempt + 1))
                 continue
             raise
@@ -267,18 +286,19 @@ def _fetch_wikipedia_revision_plaintext(
             # OSError のサブクラス)、接続確立後にサーバーが応答を止めて切断する
             # RemoteDisconnected(http.client、これも OSError のサブクラス)を
             # まとめて一時的なネットワークエラーとして再試行する。
-            if attempt < max_retries - 1:
+            if not is_last_attempt:
                 time.sleep(retry_wait_seconds * (attempt + 1))
                 continue
             raise
-    return ""
+    raise RuntimeError(f"{language} revid={revid}: 取得に失敗した(到達しないはずの分岐)")
 
 
 def load_wikipedia_corpus(
     language: str,
     cache_dir: str | Path,
     manifest_path: str | Path | None = None,
-) -> str:
+    return_metadata: bool = False,
+) -> str | tuple[str, dict]:
     """指定言語版 Wikipedia の固定記事集合を取得してキャッシュする(006、言語モデル
     事前学習用のコーパス取得)。
 
@@ -297,8 +317,14 @@ def load_wikipedia_corpus(
     ファイル名にリビジョン ID を含めるため、manifest を更新した場合は自動的に
     再取得される)。Wikimedia API のレート制限(429)により取得が一部の記事で
     失敗しても、呼び出しを再試行すれば取得済みの記事はキャッシュから読み、
-    未取得の記事のみ再取得する(1 記事も欠けずに揃うまで、コーパス全体のキャッシュ
-    ファイルは作らない)。
+    未取得の記事のみ再取得する。
+
+    **記事単位の取得失敗は全体を止めない**(009 の本番実行が`KeyError: 'parse'`で
+    全体停止した不具合の修正)。``_fetch_wikipedia_revision_plaintext``が
+    ``max_retries``回再試行してもなお失敗した記事はスキップし、取得できた記事数・
+    スキップした記事とその理由を``cache_dir/wikipedia_<language>_fetch_metadata.json``
+    に記録した上で、取得できた記事だけでコーパスを組み立てる(目標記事数を下回った
+    場合はその旨を標準出力に警告として出す)。
 
     Args:
         language: Wikipedia の言語コード(``"ja"``・``"en"`` など)。
@@ -308,9 +334,16 @@ def load_wikipedia_corpus(
             ``src/data/wikipedia_manifests/<language>_006_pretraining.json``
             (UTF-8 で 20 MB 以上を目標に Wikipedia の長大記事(Longpages)から
             選定した記事集合、本リポジトリにコミット済み)を使う。
+        return_metadata: True の場合、``(text, metadata)``のタプルを返す。
+            ``metadata``は``{"manifest_article_count": int, "fetched_article_count":
+            int, "skipped_articles": [{"title": str, "reason": str}, ...]}``を含む
+            (``scripts/fetch_and_upload_corpus_en_009.ipynb``で使用)。既定値``False``
+            の場合は従来通り``text``のみを返す(005・006・008・009 の既存呼び出しの
+            返り値は不変)。
 
     Returns:
-        取得した記事本文を連結した 1 つの文字列。
+        ``return_metadata=False``(既定)の場合、取得できた記事本文を連結した 1 つの
+        文字列。``return_metadata=True``の場合は``(text, metadata)``のタプル。
     """
     if manifest_path is None:
         manifest_path = _WIKIPEDIA_MANIFEST_DIR / f"{language}_006_pretraining.json"
@@ -320,20 +353,55 @@ def load_wikipedia_corpus(
     articles_dir = cache_dir / f"wikipedia_{language}_articles"
     articles_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"wikipedia_{language}.txt"
+    metadata_path = cache_dir / f"wikipedia_{language}_fetch_metadata.json"
 
     if not cache_path.exists():
         texts = []
+        skipped_articles: list[dict[str, str]] = []
         for i, (title, revid) in enumerate(manifest.items()):
             article_path = articles_dir / f"{i:03d}_{revid}.txt"
             if not article_path.exists():
-                article_path.write_text(
-                    _fetch_wikipedia_revision_plaintext(language, title, revid),
-                    encoding="utf-8",
-                )
+                try:
+                    plaintext = _fetch_wikipedia_revision_plaintext(language, title, revid)
+                except Exception as e:  # noqa: BLE001  # 記事単位の失敗理由を問わずスキップする
+                    skipped_articles.append({"title": title, "reason": repr(e)})
+                    continue
+                article_path.write_text(plaintext, encoding="utf-8")
             texts.append(article_path.read_text(encoding="utf-8"))
         cache_path.write_text("\n".join(t for t in texts if t), encoding="utf-8")
 
-    return cache_path.read_text(encoding="utf-8")
+        metadata = {
+            "manifest_article_count": len(manifest),
+            "fetched_article_count": len(texts),
+            "skipped_articles": skipped_articles,
+        }
+        metadata_path.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if skipped_articles:
+            print(
+                f"[警告] {language}: 目標 {len(manifest)} 記事中 {len(texts)} 記事のみ"
+                f"取得できた(スキップ {len(skipped_articles)} 件)。"
+                f"詳細は {metadata_path} を参照。"
+            )
+        else:
+            print(f"{language}: {len(texts)}/{len(manifest)} 記事を取得した")
+
+    text = cache_path.read_text(encoding="utf-8")
+    if not return_metadata:
+        return text
+
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    else:
+        # metadata の記録を追加する前にキャッシュ済みだった corpus(全記事取得済みの
+        # 前提で扱う。当時は全記事が揃わない限りキャッシュファイルを作らなかったため)。
+        metadata = {
+            "manifest_article_count": len(manifest),
+            "fetched_article_count": len(manifest),
+            "skipped_articles": [],
+        }
+    return text, metadata
 
 
 def load_japanese_corpus(cache_dir: str | Path) -> str:
@@ -356,7 +424,9 @@ def load_japanese_corpus(cache_dir: str | Path) -> str:
     return load_wikipedia_corpus("ja", cache_dir, manifest_path=manifest_path)
 
 
-def load_english_scaling_corpus(cache_dir: str | Path) -> str:
+def load_english_scaling_corpus(
+    cache_dir: str | Path, return_metadata: bool = False
+) -> str | tuple[str, dict]:
     """英語コーパスを取得してキャッシュする(009 スケーリング則の学習グリッド用)。
 
     ``load_wikipedia_corpus("en", cache_dir, manifest_path=...)`` の薄いラッパー。
@@ -369,12 +439,58 @@ def load_english_scaling_corpus(cache_dir: str | Path) -> str:
 
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
+        return_metadata: ``load_wikipedia_corpus``にそのまま渡す(``scripts/
+            fetch_and_upload_corpus_en_009.ipynb``で使用)。既定値``False``の場合、
+            009 の既存呼び出しの返り値は不変。
 
     Returns:
-        取得した記事本文を連結した 1 つの文字列。
+        ``load_wikipedia_corpus``と同じ(``return_metadata``の値に応じて文字列
+        またはタプル)。
     """
     manifest_path = _WIKIPEDIA_MANIFEST_DIR / "en_009_scaling.json"
-    return load_wikipedia_corpus("en", cache_dir, manifest_path=manifest_path)
+    return load_wikipedia_corpus(
+        "en", cache_dir, manifest_path=manifest_path, return_metadata=return_metadata
+    )
+
+
+_EN_009_CORPUS_REPO_ID = "kojikojiprg/ai-theories-corpus-en-009-scaling"
+
+
+def load_english_scaling_corpus_with_fallback(cache_dir: str | Path) -> str:
+    """英語コーパスを取得する(009 スケーリング則の学習グリッド用)。
+
+    まず``kojikojiprg/ai-theories-corpus-en-009-scaling``(Hugging Face Hub の
+    Dataset リポジトリ、``scripts/fetch_and_upload_corpus_en_009.ipynb``で
+    アップロードしたもの)から``corpus.json``を取得し、``"raw_text"``フィールドを
+    読む。取得に失敗した場合(リポジトリが未作成・ネットワーク障害など)のみ、
+    ``load_english_scaling_corpus()``による Wikipedia API からの直接取得に
+    フォールバックする。1000 記事の直接取得は Colab で数十〜100 分規模の時間を
+    要するため(009、5.4 節)、Hub のデータセットが存在すればそれを優先する。
+
+    Args:
+        cache_dir: 直接取得にフォールバックした場合のキャッシュ先ディレクトリ
+            (``load_english_scaling_corpus()``にそのまま渡す)。
+
+    Returns:
+        取得したコーパス全文。取得元(Hub / 直接取得のどちらだったか)は標準出力に
+        明記する。
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+
+        path = hf_hub_download(
+            repo_id=_EN_009_CORPUS_REPO_ID, filename="corpus.json", repo_type="dataset"
+        )
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        print(f"コーパス取得元: {_EN_009_CORPUS_REPO_ID}(Hugging Face Hub)")
+        return data["raw_text"]
+    except Exception as e:  # noqa: BLE001  # Hub 取得の失敗理由を問わずフォールバックする
+        print(
+            f"Hub からの取得に失敗した({e!r})。Wikipedia API からの直接取得にフォールバックする。"
+        )
+        text = load_english_scaling_corpus(cache_dir)
+        print("コーパス取得元: Wikipedia API(直接取得)")
+        return text
 
 
 def load_code_corpus(repo_root: str | Path = ".") -> str:
