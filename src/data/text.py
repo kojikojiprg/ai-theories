@@ -142,6 +142,40 @@ class CharacterLevelTokenizer:
             ids = ids.tolist()
         return "".join(self.id_to_char[i] for i in ids)
 
+    @classmethod
+    def from_char_to_id(cls, char_to_id: dict[str, int]) -> CharacterLevelTokenizer:
+        """文字 → ID の対応表から直接構築する(``load_character_level_tokenizer_json()``用)。
+
+        通常のコンストラクタ(``__init__``)は語彙構築用のテキストを受け取るが、
+        ここでは保存済みの対応表をそのまま復元する。
+        """
+        tokenizer = cls.__new__(cls)
+        tokenizer.char_to_id = dict(char_to_id)
+        tokenizer.id_to_char = {i: ch for ch, i in tokenizer.char_to_id.items()}
+        tokenizer.vocab_size = len(tokenizer.char_to_id)
+        return tokenizer
+
+
+def save_character_level_tokenizer_json(
+    tokenizer: CharacterLevelTokenizer, path: str | Path
+) -> None:
+    """``CharacterLevelTokenizer``を tokenizer.json 相当の形式でシリアライズして保存する
+    (``scripts/promote_canonical_tokenizers.ipynb``の依頼を参照)。
+
+    文字 → ID の対応表(``char_to_id``)のみを保存する(``id_to_char``は``char_to_id``
+    から一意に復元できるため冗長)。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"char_to_id": tokenizer.char_to_id}
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def load_character_level_tokenizer_json(path: str | Path) -> CharacterLevelTokenizer:
+    """``save_character_level_tokenizer_json()``が書き出した JSON を読み込む。"""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    return CharacterLevelTokenizer.from_char_to_id(data["char_to_id"])
+
 
 def load_tiny_shakespeare(cache_dir: str | Path) -> str:
     """Tiny Shakespeare データセットをダウンロードしてキャッシュする。

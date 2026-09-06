@@ -5,12 +5,17 @@ Model)の Viterbi 最尤分割をスクラッチ実装する。Unigram 言語モ
 (候補語彙からの EM ベースの反復的な縮小)は sentencepiece に委ねる
 (``theories/02_pretraining/005_tokenizer.ipynb`` の実装方針を参照)。
 
+``BPEIDTokenizer``・Hugging Face Hub からの取得 / アップロード関連の関数は、
+006・008・009 のノートブックにほぼ同一の内容で重複していたものを共通モジュール化した
+(009、``scripts/promote_canonical_tokenizers.ipynb`` の依頼を参照)。
+
 記号 / Notation:
     V : 語彙サイズ(vocabulary size)
 """
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
@@ -20,6 +25,7 @@ from pathlib import Path
 from typing import Literal
 
 import sentencepiece as spm
+from torch import Tensor
 
 ChunkSplitMode = Literal["whitespace", "none"]
 
@@ -398,6 +404,148 @@ def learn_bpe(
         byte_level=byte_level,
         chunk_split_mode=chunk_split_mode,
         max_chunk_bytes=max_chunk_bytes,
+    )
+
+
+class BPEIDTokenizer:
+    """``BPETokenizer``(部分語シンボル文字列を返す)を整数 ID 方式に適合させるラッパー。
+
+    ``symbol_to_id``(シンボル → 整数 ID の対応)は呼び出し側から明示的に受け取る
+    (009 の設計。tokenizer.json から読み込んだ対応をそのまま復元できる)。学習直後の
+    ``BPETokenizer`` をラップする場合は、``sorted(bpe_tokenizer.vocab)`` から通し番号を
+    振った辞書を渡せば 006・008 と同一の対応になる(``learn_bpe`` の
+    タイブレーク規則により ``vocab`` の内容が同じであれば常に同一の辞書になる)。
+    """
+
+    def __init__(self, bpe_tokenizer: BPETokenizer, symbol_to_id: dict[str, int]) -> None:
+        self.bpe_tokenizer = bpe_tokenizer
+        self.symbol_to_id = symbol_to_id
+        self.id_to_symbol = {i: s for s, i in symbol_to_id.items()}
+        self.vocab_size = len(symbol_to_id)
+
+    def encode(self, text: str) -> list[int]:
+        return [self.symbol_to_id[symbol] for symbol in self.bpe_tokenizer.encode(text)]
+
+    def decode(self, ids) -> str:
+        if isinstance(ids, Tensor):
+            ids = ids.tolist()
+        return self.bpe_tokenizer.decode([self.id_to_symbol[i] for i in ids])
+
+
+def save_bpe_id_tokenizer_json(tokenizer: BPEIDTokenizer, path: str | Path) -> None:
+    """``BPEIDTokenizer``を tokenizer.json 形式でシリアライズして保存する。
+
+    006・008 がアップロード処理内で直接書き出していたスキーマ(``merges``・``vocab``・
+    ``byte_level``・``chunk_split_mode``・``max_chunk_bytes``・``symbol_to_id``)を
+    そのまま踏襲する。
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    bpe = tokenizer.bpe_tokenizer
+    data = {
+        "merges": bpe.merges,
+        "vocab": sorted(bpe.vocab),
+        "byte_level": bpe.byte_level,
+        "chunk_split_mode": bpe.chunk_split_mode,
+        "max_chunk_bytes": bpe.max_chunk_bytes,
+        "symbol_to_id": tokenizer.symbol_to_id,
+    }
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def load_bpe_id_tokenizer_json(path: str | Path) -> BPEIDTokenizer:
+    """``save_bpe_id_tokenizer_json()``(または 006・008 のアップロード処理)が
+    書き出した tokenizer.json を読み込み、``BPEIDTokenizer``を再構築する。
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    bpe = BPETokenizer(
+        merges=[tuple(m) for m in data["merges"]],
+        vocab=set(data["vocab"]),
+        byte_level=data["byte_level"],
+        chunk_split_mode=data["chunk_split_mode"],
+        max_chunk_bytes=data["max_chunk_bytes"],
+    )
+    symbol_to_id = {symbol: int(i) for symbol, i in data["symbol_to_id"].items()}
+    return BPEIDTokenizer(bpe, symbol_to_id)
+
+
+def load_bpe_id_tokenizer_from_hub(
+    repo_id: str,
+    filename: str = "tokenizer.json",
+    fallback_train_text: str | None = None,
+    fallback_vocab_size: int | None = None,
+    fallback_max_chunk_bytes: int | None = None,
+) -> tuple[BPEIDTokenizer, bool]:
+    """Hugging Face Hub からトークナイザを取得する。取得に失敗し、かつ
+    ``fallback_train_text``が与えられている場合は同一設定で再学習する。
+
+    009 の``load_tokenizer_from_hub_or_retrain()``を一般化したもの(リポジトリ ID・
+    ファイル名をハードコードせず引数化し、複数のリポジトリから取得できるようにした)。
+
+    Args:
+        repo_id: 取得元の Hugging Face Hub リポジトリ ID
+            (例: ``"kojikojiprg/ai-theories-tokenizer-en"``)。
+        filename: リポジトリ内の tokenizer.json のファイル名。
+        fallback_train_text: Hub からの取得に失敗した場合に、同一設定で BPE を
+            再学習するための学習コーパス。``None``(既定値)の場合、フォールバック
+            せず例外をそのまま送出する。
+        fallback_vocab_size: フォールバック再学習時の目標語彙サイズ。
+        fallback_max_chunk_bytes: フォールバック再学習時の``max_chunk_bytes``
+            (``pretokenize`` 参照)。
+
+    Returns:
+        (tokenizer, loaded_from_hub) のタプル。
+    """
+    try:
+        from huggingface_hub import hf_hub_download
+
+        path = hf_hub_download(repo_id=repo_id, filename=filename)
+        return load_bpe_id_tokenizer_json(path), True
+    except Exception as e:  # noqa: BLE001  # Hub 取得の失敗理由を問わずフォールバックする
+        if fallback_train_text is None:
+            raise
+        print(f"Hub からの取得に失敗した({e!r})。同一設定で BPE を再学習する。")
+        bpe = learn_bpe(
+            fallback_train_text,
+            fallback_vocab_size,
+            byte_level=True,
+            max_chunk_bytes=fallback_max_chunk_bytes,
+        )
+        symbols = sorted(bpe.vocab)
+        symbol_to_id = {symbol: i for i, symbol in enumerate(symbols)}
+        return BPEIDTokenizer(bpe, symbol_to_id), False
+
+
+def upload_tokenizer_artifact_to_hub(
+    repo_id: str,
+    tokenizer_json_path: str | Path,
+    model_card_text: str,
+    token: str,
+) -> None:
+    """指定したリポジトリを作成し(存在しなければ)、tokenizer.json とモデルカードを
+    アップロードする。
+
+    ``tokenizer_json_path``の中身のスキーマは問わない(``save_bpe_id_tokenizer_json()``・
+    ``save_character_level_tokenizer_json()``(``src/data/text.py``)のいずれの出力も
+    そのままアップロードできる)。呼び出し側(``scripts/promote_canonical_tokenizers.ipynb``)
+    が``DRY_RUN``・``IN_COLAB``のガードを行った上でのみ呼び出すこと。トークンの取得・
+    環境変数への設定はここでは行わない(呼び出し側が用意して渡す)。
+    """
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True, private=False)
+    api.upload_file(
+        path_or_fileobj=str(tokenizer_json_path),
+        path_in_repo="tokenizer.json",
+        repo_id=repo_id,
+        repo_type="model",
+    )
+    api.upload_file(
+        path_or_fileobj=model_card_text.encode("utf-8"),
+        path_in_repo="README.md",
+        repo_id=repo_id,
+        repo_type="model",
     )
 
 
