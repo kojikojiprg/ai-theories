@@ -424,6 +424,38 @@ def load_japanese_corpus(cache_dir: str | Path) -> str:
     return load_wikipedia_corpus("ja", cache_dir, manifest_path=manifest_path)
 
 
+def load_japanese_wikipedia_corpus(
+    cache_dir: str | Path, return_metadata: bool = False
+) -> str | tuple[str, dict]:
+    """日本語版 Wikipedia の記事集合からコーパスを取得してキャッシュする(006 の
+    小型 GPT 事前学習用に選定したマニフェストを使う)。
+
+    ``load_wikipedia_corpus("ja", cache_dir, manifest_path=...)`` の薄いラッパー。
+    006 で使った 80 記事(``ja_006_pretraining.json``、UTF-8 で 20 MB 以上を目標に
+    選定)を対象とする。``load_japanese_corpus()``(005 のトークナイザ用、
+    ``ja_005_tokenizer_legacy.json``、44 記事)とは異なるマニフェストである点に注意。
+
+    006 自体は``manifest_path``省略時の既定値(``load_wikipedia_corpus``の docstring
+    参照)により本関数と同じマニフェストを直接呼び出しているため、本関数は既存の
+    呼び出し結果と同一のテキストを返す。現時点で本関数を直接呼び出す既存ノートブックは
+    ない(``scripts/promote_canonical_corpora.ipynb``が、英語の
+    ``load_english_wikipedia_corpus()``と対称にするために``loader``として使う)。
+
+    Args:
+        cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
+        return_metadata: ``load_wikipedia_corpus``にそのまま渡す(``scripts/
+            promote_canonical_corpora.ipynb``で使用)。
+
+    Returns:
+        ``load_wikipedia_corpus``と同じ(``return_metadata``の値に応じて文字列
+        またはタプル)。
+    """
+    manifest_path = _WIKIPEDIA_MANIFEST_DIR / "ja_006_pretraining.json"
+    return load_wikipedia_corpus(
+        "ja", cache_dir, manifest_path=manifest_path, return_metadata=return_metadata
+    )
+
+
 def load_english_wikipedia_corpus(
     cache_dir: str | Path, return_metadata: bool = False
 ) -> str | tuple[str, dict]:
