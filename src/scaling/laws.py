@@ -565,16 +565,26 @@ def fit_chinchilla_parametric(
                     best_params, best_cost, best_converged = params, cost, converged
 
     assert best_params is not None, "init_alpha_grid・init_beta_grid が空(呼び出し側の誤り)"
-    log_e, log_a, log_b, log_alpha, log_beta = best_params
-    log_alpha = float(np.clip(log_alpha, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX))
-    log_beta = float(np.clip(log_beta, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX))
+    log_e, log_a, log_b, log_alpha_raw, log_beta_raw = best_params
+    # alpha・beta がクリップ境界(0.02・2.5)に張り付いた場合、収束ではなく識別不能とみなす
+    # (009 第 3 ラウンド修正)。境界外では `_chinchilla_residual` 内の対数空間クリップにより
+    # 予測値が一定になり勾配が消えるため、最適化はコストを一切改善しないまま境界の外側へ
+    # 際限なく params を動かせてしまう。この状態を `converged=True` として返すと、実際には
+    # 指数が識別できていない(データが平坦・N や D の範囲が狭いなど)にもかかわらず、
+    # あたかも一意に定まったかのように見えてしまう。境界への張り付きは、クリップ後の値が
+    # 境界値と完全に一致するかどうかで判定する(`np.clip` は範囲外の入力を境界値に丸めるため、
+    # クリップ前の生の値がどれだけ境界を超えていたかによらず判定できる)。
+    log_alpha = float(np.clip(log_alpha_raw, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX))
+    log_beta = float(np.clip(log_beta_raw, _LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX))
+    _boundary_values = (_LOG_ALPHA_BETA_MIN, _LOG_ALPHA_BETA_MAX)
+    _at_boundary = log_alpha in _boundary_values or log_beta in _boundary_values
     return ChinchillaParametricFit(
         e=float(np.exp(log_e)),
         a_coef=float(np.exp(log_a)),
         b_coef=float(np.exp(log_b)),
         alpha=float(np.exp(log_alpha)),
         beta=float(np.exp(log_beta)),
-        converged=best_converged,
+        converged=best_converged and not _at_boundary,
         residuals=residual_fn(best_params),
     )
 

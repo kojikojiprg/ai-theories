@@ -160,7 +160,7 @@ def save_character_level_tokenizer_json(
     tokenizer: CharacterLevelTokenizer, path: str | Path
 ) -> None:
     """``CharacterLevelTokenizer``を tokenizer.json 相当の形式でシリアライズして保存する
-    (``scripts/promote_canonical_tokenizers.ipynb``の依頼を参照)。
+    (``scripts/promote_canonical_tokenizers.py``の依頼を参照)。
 
     文字 → ID の対応表(``char_to_id``)のみを保存する(``id_to_char``は``char_to_id``
     から一意に復元できるため冗長)。
@@ -317,14 +317,25 @@ def load_wikipedia_corpus(
     ファイル名にリビジョン ID を含めるため、manifest を更新した場合は自動的に
     再取得される)。Wikimedia API のレート制限(429)により取得が一部の記事で
     失敗しても、呼び出しを再試行すれば取得済みの記事はキャッシュから読み、
-    未取得の記事のみ再取得する。
+    未取得の記事のみ再取得する。取得の進捗は 100 記事ごとに標準出力へ記録する
+    (経過時間・推定残り時間を含む)。
+
+    連結済みコーパス全体のキャッシュファイル名には、言語に加えて **``manifest_path``の
+    ファイル名(拡張子除く)と記事数の両方を含める**(``cache_dir/wikipedia_<language>_
+    <manifest のファイル名>_<記事数>.txt``)。以前は言語のみをキーにしていたため、
+    同じ``cache_dir``に対して記事数を縮小したマニフェスト(スモークテスト用など)を
+    指定しても、既に存在する全量取得のキャッシュファイルがそのまま読まれ、意図した
+    縮小コーパスではなく全量コーパスが黙って返る不具合があった(この修正により解消)。
+    記事単位のキャッシュ(``articles_dir``)はリビジョン ID ベースでマニフェストを
+    またいで再利用できるため、このキーには含めない(異なるマニフェストで同じ記事の
+    再取得は発生しない)。
 
     **記事単位の取得失敗は全体を止めない**(009 の本番実行が`KeyError: 'parse'`で
     全体停止した不具合の修正)。``_fetch_wikipedia_revision_plaintext``が
     ``max_retries``回再試行してもなお失敗した記事はスキップし、取得できた記事数・
-    スキップした記事とその理由を``cache_dir/wikipedia_<language>_fetch_metadata.json``
-    に記録した上で、取得できた記事だけでコーパスを組み立てる(目標記事数を下回った
-    場合はその旨を標準出力に警告として出す)。
+    スキップした記事とその理由を``cache_dir/wikipedia_<language>_<manifest のファイル名>_
+    <記事数>_fetch_metadata.json``に記録した上で、取得できた記事だけでコーパスを
+    組み立てる(目標記事数を下回った場合はその旨を標準出力に警告として出す)。
 
     Args:
         language: Wikipedia の言語コード(``"ja"``・``"en"`` など)。
@@ -337,7 +348,7 @@ def load_wikipedia_corpus(
         return_metadata: True の場合、``(text, metadata)``のタプルを返す。
             ``metadata``は``{"manifest_article_count": int, "fetched_article_count":
             int, "skipped_articles": [{"title": str, "reason": str}, ...]}``を含む
-            (``scripts/promote_canonical_corpora.ipynb``で使用)。既定値``False``
+            (``scripts/promote_canonical_corpora.py``で使用)。既定値``False``
             の場合は従来通り``text``のみを返す(005・006・008・009 の既存呼び出しの
             返り値は不変)。
 
@@ -347,17 +358,27 @@ def load_wikipedia_corpus(
     """
     if manifest_path is None:
         manifest_path = _WIKIPEDIA_MANIFEST_DIR / f"{language}_006_pretraining.json"
-    manifest: dict[str, int] = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    manifest_path = Path(manifest_path)
+    manifest: dict[str, int] = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     cache_dir = Path(cache_dir)
     articles_dir = cache_dir / f"wikipedia_{language}_articles"
     articles_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"wikipedia_{language}.txt"
-    metadata_path = cache_dir / f"wikipedia_{language}_fetch_metadata.json"
+    # キャッシュファイル名にマニフェスト名・記事数を含める(マニフェストごとに衝突しない
+    # ようにするため。以前はキャッシュファイル名が言語のみに依存しており、例えば記事数を
+    # 縮小したマニフェスト(スモークテスト用)を指定しても、同じ cache_dir 内に既に存在する
+    # 全量取得のキャッシュファイルがそのまま読まれ、意図した縮小コーパスではなく全量
+    # コーパスが黙って返る不具合があった)。記事単位のキャッシュ(articles_dir)は
+    # revid ベースでマニフェストをまたいで再利用できるため、このキーには含めない。
+    cache_key = f"wikipedia_{language}_{manifest_path.stem}_{len(manifest)}"
+    cache_path = cache_dir / f"{cache_key}.txt"
+    metadata_path = cache_dir / f"{cache_key}_fetch_metadata.json"
 
     if not cache_path.exists():
         texts = []
         skipped_articles: list[dict[str, str]] = []
+        total = len(manifest)
+        start_time = time.time()
         for i, (title, revid) in enumerate(manifest.items()):
             article_path = articles_dir / f"{i:03d}_{revid}.txt"
             if not article_path.exists():
@@ -368,6 +389,16 @@ def load_wikipedia_corpus(
                     continue
                 article_path.write_text(plaintext, encoding="utf-8")
             texts.append(article_path.read_text(encoding="utf-8"))
+
+            done = i + 1
+            if done % 100 == 0 or done == total:
+                elapsed = time.time() - start_time
+                remaining = elapsed / done * (total - done)
+                print(
+                    f"[{language}] {done}/{total} 記事処理済み"
+                    f"(取得成功 {len(texts)} 件、スキップ {len(skipped_articles)} 件)、"
+                    f"経過時間 {elapsed / 60:.1f} 分、推定残り時間 {remaining / 60:.1f} 分"
+                )
         cache_path.write_text("\n".join(t for t in texts if t), encoding="utf-8")
 
         metadata = {
@@ -438,13 +469,13 @@ def load_japanese_wikipedia_corpus(
     006 自体は``manifest_path``省略時の既定値(``load_wikipedia_corpus``の docstring
     参照)により本関数と同じマニフェストを直接呼び出しているため、本関数は既存の
     呼び出し結果と同一のテキストを返す。現時点で本関数を直接呼び出す既存ノートブックは
-    ない(``scripts/promote_canonical_corpora.ipynb``が、英語の
+    ない(``scripts/promote_canonical_corpora.py``が、英語の
     ``load_english_wikipedia_corpus()``と対称にするために``loader``として使う)。
 
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
         return_metadata: ``load_wikipedia_corpus``にそのまま渡す(``scripts/
-            promote_canonical_corpora.ipynb``で使用)。
+            promote_canonical_corpora.py``で使用)。
 
     Returns:
         ``load_wikipedia_corpus``と同じ(``return_metadata``の値に応じて文字列
@@ -464,16 +495,17 @@ def load_english_wikipedia_corpus(
 
     ``load_wikipedia_corpus("en", cache_dir, manifest_path=...)`` の薄いラッパー。
     006 で使った 356 記事(``en_006_pretraining.json``)に、Wikipedia の
-    Special:LongPages(長大記事一覧)から追加で選定した 644 記事を加えた計 1000 記事
-    (``src/data/wikipedia_manifests/en_009_scaling.json``)を対象とする。006 の
-    マニフェストを部分集合として含む形で拡張しているため、006・008 で既に取得済みの
-    記事のキャッシュ(``wikipedia_en_articles/``)をそのまま再利用でき、追加で
-    取得が必要なのは新規記事分のみである。
+    Special:LongPages(長大記事一覧)から追加で選定した記事を加えた計 9826 記事
+    (``src/data/wikipedia_manifests/en_009_scaling.json``、内訳は同ディレクトリの
+    README を参照)を対象とする。006 のマニフェストを部分集合として含む形で
+    拡張しているため、006・008 で既に取得済みの記事のキャッシュ
+    (``wikipedia_en_articles/``)をそのまま再利用でき、追加で取得が必要なのは
+    新規記事分のみである。
 
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
         return_metadata: ``load_wikipedia_corpus``にそのまま渡す(``scripts/
-            promote_canonical_corpora.ipynb``で使用)。既定値``False``の場合、
+            promote_canonical_corpora.py``で使用)。既定値``False``の場合、
             009 の既存呼び出しの返り値は不変。
 
     Returns:
@@ -489,24 +521,37 @@ def load_english_wikipedia_corpus(
 _EN_WIKIPEDIA_CORPUS_REPO_ID = "kojikojiprg/ai-theories-corpus-en"
 
 
-def load_english_wikipedia_corpus_with_fallback(cache_dir: str | Path) -> str:
+def load_english_wikipedia_corpus_with_fallback(
+    cache_dir: str | Path, return_metadata: bool = False
+) -> str | tuple[str, dict]:
     """英語版 Wikipedia のコーパスを取得する。
 
     まず``kojikojiprg/ai-theories-corpus-en``(Hugging Face Hub の Dataset
-    リポジトリ、``scripts/promote_canonical_corpora.ipynb``でアップロードしたもの)
+    リポジトリ、``scripts/promote_canonical_corpora.py``でアップロードしたもの)
     から``corpus.json``を取得し、``"raw_text"``フィールドを読む。取得に失敗した場合
     (リポジトリが未作成・ネットワーク障害など)のみ、``load_english_wikipedia_corpus()``
-    による Wikipedia API からの直接取得にフォールバックする。1000 記事の直接取得は
-    Colab で数十〜100 分規模の時間を要するため(009、5.4 節)、Hub のデータセットが
+    による Wikipedia API からの直接取得にフォールバックする。9826 記事の直接取得は
+    Colab で数時間規模の時間を要するため(009、5.4 節)、Hub のデータセットが
     存在すればそれを優先する。
 
     Args:
         cache_dir: 直接取得にフォールバックした場合のキャッシュ先ディレクトリ
             (``load_english_wikipedia_corpus()``にそのまま渡す)。
+        return_metadata: True の場合、``(text, metadata)``のタプルを返す。
+            ``metadata``は``{"source": "hub" または "direct", "raw_bytes": int,
+            "manifest_article_count": int, "fetched_article_count": int,
+            "skipped_articles": [...]}``を含む。取得元が Hub の場合、
+            ``raw_bytes``・記事数はアップロード時に``corpus.json``へ記録された
+            値(009 側で独立に再取得できない)であり、``len(text.encode("utf-8"))``
+            と比較することで Hub からの取得が破損していないかを検証できる
+            (Hub 経由の取得は決定的であるため、一致しなければ取得の破損を意味する)。
+            既定値``False``の場合は従来通り``text``のみを返す(既存呼び出しの
+            返り値は不変)。
 
     Returns:
-        取得したコーパス全文。取得元(Hub / 直接取得のどちらだったか)は標準出力に
-        明記する。
+        ``return_metadata=False``(既定)の場合、取得したコーパス全文。
+        ``return_metadata=True``の場合は``(text, metadata)``のタプル。
+        取得元(Hub / 直接取得のどちらだったか)は標準出力にも明記する。
     """
     try:
         from huggingface_hub import hf_hub_download
@@ -516,14 +561,35 @@ def load_english_wikipedia_corpus_with_fallback(cache_dir: str | Path) -> str:
         )
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         print(f"コーパス取得元: {_EN_WIKIPEDIA_CORPUS_REPO_ID}(Hugging Face Hub)")
-        return data["raw_text"]
+        text = data["raw_text"]
+        if not return_metadata:
+            return text
+        metadata = {
+            "source": "hub",
+            "raw_bytes": data["raw_bytes"],
+            "manifest_article_count": data["manifest_article_count"],
+            "fetched_article_count": data["fetched_article_count"],
+            "skipped_articles": data["skipped_articles"],
+        }
+        return text, metadata
     except Exception as e:  # noqa: BLE001  # Hub 取得の失敗理由を問わずフォールバックする
         print(
             f"Hub からの取得に失敗した({e!r})。Wikipedia API からの直接取得にフォールバックする。"
         )
-        text = load_english_wikipedia_corpus(cache_dir)
+        if not return_metadata:
+            text = load_english_wikipedia_corpus(cache_dir)
+            print("コーパス取得元: Wikipedia API(直接取得)")
+            return text
+        text, fetch_metadata = load_english_wikipedia_corpus(cache_dir, return_metadata=True)
         print("コーパス取得元: Wikipedia API(直接取得)")
-        return text
+        metadata = {
+            "source": "direct",
+            "raw_bytes": len(text.encode("utf-8")),
+            "manifest_article_count": fetch_metadata["manifest_article_count"],
+            "fetched_article_count": fetch_metadata["fetched_article_count"],
+            "skipped_articles": fetch_metadata["skipped_articles"],
+        }
+        return text, metadata
 
 
 def upload_corpus_artifact_to_hub(
@@ -533,7 +599,7 @@ def upload_corpus_artifact_to_hub(
     token: str,
 ) -> None:
     """指定した Dataset リポジトリを作成し(存在しなければ)、corpus.json とデータセット
-    カードをアップロードする(``scripts/promote_canonical_corpora.ipynb``で使用)。
+    カードをアップロードする(``scripts/promote_canonical_corpora.py``で使用)。
 
     ``src/data/tokenizer.py``の``upload_tokenizer_artifact_to_hub()``と対になる関数
     (``repo_type="dataset"``である点、アップロードするファイル名(``corpus.json``)が

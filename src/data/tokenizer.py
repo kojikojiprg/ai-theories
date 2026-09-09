@@ -7,7 +7,7 @@ Model)の Viterbi 最尤分割をスクラッチ実装する。Unigram 言語モ
 
 ``BPEIDTokenizer``・Hugging Face Hub からの取得 / アップロード関連の関数は、
 006・008・009 のノートブックにほぼ同一の内容で重複していたものを共通モジュール化した
-(009、``scripts/promote_canonical_tokenizers.ipynb`` の依頼を参照)。
+(009、``scripts/promote_canonical_tokenizers.py`` の依頼を参照)。
 
 記号 / Notation:
     V : 語彙サイズ(vocabulary size)
@@ -527,7 +527,7 @@ def upload_tokenizer_artifact_to_hub(
 
     ``tokenizer_json_path``の中身のスキーマは問わない(``save_bpe_id_tokenizer_json()``・
     ``save_character_level_tokenizer_json()``(``src/data/text.py``)のいずれの出力も
-    そのままアップロードできる)。呼び出し側(``scripts/promote_canonical_tokenizers.ipynb``)
+    そのままアップロードできる)。呼び出し側(``scripts/promote_canonical_tokenizers.py``)
     が``DRY_RUN``・``IN_COLAB``のガードを行った上でのみ呼び出すこと。トークンの取得・
     環境変数への設定はここでは行わない(呼び出し側が用意して渡す)。
     """
