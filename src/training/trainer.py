@@ -128,7 +128,9 @@ def train_language_model(
 
     Args:
         model: 学習対象の言語モデル(``forward(token_ids) -> logits`` を持つ)。
-        train_token_ids: 訓練データの 1 次元 LongTensor(``encode_corpus`` の出力)。
+        train_token_ids: 訓練データの 1 次元 LongTensor(``encode_corpus`` の出力)、
+            または``numpy.memmap``(``encode_text_to_memmap`` の出力、009)。
+            ``get_random_batch``(``src/data/text.py``)がいずれの型にも対応する。
         evaluation_windows: 検証用の非重複窓(``make_evaluation_windows`` の出力)。
         evaluation_mask: ``evaluation_windows`` に対応するパディングマスク
             (``make_evaluation_windows`` の出力、``evaluate_bits_per_byte`` にそのまま渡す)。

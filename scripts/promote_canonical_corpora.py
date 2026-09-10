@@ -123,19 +123,28 @@ CORPUS_SPECS = [
         "cache_dir": _REPO_ROOT / ".cache" / "wikipedia_ja",
         "loader": load_japanese_wikipedia_corpus,
         "usage_note": "006(小型 GPT の事前学習)の日本語条件用",
-        # 009 第 3 ラウンド修正: 日本語コーパスは変更しないため、既にアップロード済みの
-        # アーティファクトを再取得・再アップロードしない。
-        "skip": True,
+        # corpus.json -> corpus.txt+metadata.json への形式移行(Colab の RAM 制約対応)に
+        # 伴い、日本語コーパスの内容自体は変更しないが形式を英語コーパスと揃えるため、
+        # 今回に限り一時的に skip=False とする(記事は既にキャッシュ済みのため再取得は
+        # 発生せず、数分で完了する見込み)。この移行の再アップロードが完了したら、
+        # 日本語コーパスは今後変更の予定がないため skip=True に戻してよい。
+        "skip": False,
     },
 ]
 
 
 def process_corpus(spec: dict) -> dict:
-    """1 つのコーパススペックについて、取得・分割・``corpus.json``の組み立てを行う。
+    """1 つのコーパススペックについて、取得・分割・``corpus.txt``+``metadata.json``の
+    組み立てを行う。
 
     ``loader``(記事数を縮小せず本番のマニフェスト全体で呼び出す)でコーパスを取得し、
     ``validation_ratio``で訓練・検証分割の決定性を確認したうえで、アップロード用の
-    ``corpus.json``を組み立てる。
+    ``corpus.txt``(コーパス全文のプレーンテキスト)と``metadata.json``
+    (由来・バイト数などのメタデータ)を書き出す。
+
+    ``corpus.txt``の書き出しは、``raw_text``をチャンクに区切って逐次``write()``する
+    (英語コーパスは 545 MB あり、``json.dumps``でエスケープ済み文字列を新たに
+    構築する旧実装(コーパス全文の二重持ちが発生していた)を避けるため)。
     """
     key = spec["key"]
     t0 = time.time()
@@ -182,13 +191,12 @@ def process_corpus(spec: dict) -> dict:
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, cwd=_REPO_ROOT
     ).stdout.strip()
 
-    corpus_payload = {
+    metadata_payload = {
         "language": spec["language"],
         "manifest": spec["manifest"],
         "manifest_article_count": fetch_metadata["manifest_article_count"],
         "fetched_article_count": fetch_metadata["fetched_article_count"],
         "skipped_articles": fetch_metadata["skipped_articles"],
-        "raw_text": raw_text,
         "validation_ratio": spec["validation_ratio"],
         "raw_bytes": raw_bytes,
         "source_commit": source_commit,
@@ -196,17 +204,29 @@ def process_corpus(spec: dict) -> dict:
 
     artifact_dir = OUTPUT_DIR / key
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    corpus_json_path = artifact_dir / "corpus.json"
-    corpus_json_path.write_text(json.dumps(corpus_payload, ensure_ascii=False), encoding="utf-8")
-    print(
-        f"corpus.json を書き出した: {corpus_json_path} ({corpus_json_path.stat().st_size:,} バイト)"
+
+    corpus_txt_path = artifact_dir / "corpus.txt"
+    _CHUNK_CHARS = 10_000_000  # raw_text をこの文字数ごとに区切って逐次書き込む
+    with open(corpus_txt_path, "w", encoding="utf-8") as f:
+        for i in range(0, len(raw_text), _CHUNK_CHARS):
+            f.write(raw_text[i : i + _CHUNK_CHARS])
+    print(f"corpus.txt を書き出した: {corpus_txt_path} ({corpus_txt_path.stat().st_size:,} バイト)")
+    assert corpus_txt_path.stat().st_size == raw_bytes, (
+        f"{key}: corpus.txt のバイト数が raw_bytes と一致しない"
     )
+
+    metadata_json_path = artifact_dir / "metadata.json"
+    metadata_json_path.write_text(
+        json.dumps(metadata_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"metadata.json を書き出した: {metadata_json_path}")
 
     return {
         "spec": spec,
-        "payload": corpus_payload,
+        "payload": metadata_payload,
         "artifact_dir": artifact_dir,
-        "corpus_json_path": corpus_json_path,
+        "corpus_txt_path": corpus_txt_path,
+        "metadata_json_path": metadata_json_path,
     }
 
 
@@ -272,12 +292,26 @@ tags:
 
 ## 構成
 
-`corpus.json` は以下のフィールドを含む。
+このリポジトリは`corpus.txt`と`metadata.json`の 2 ファイルからなる(以前は単一の
+`corpus.json`だったが、コーパス全文を JSON 文字列として保持すると二重にメモリを
+消費するため、Google Colab の RAM 制約(12 GB)に対応してプレーンテキストと
+メタデータに分離した)。**コーパス全文が必要な場合は`corpus.txt`を、由来や
+バイト数などのメタデータのみが必要な場合は`metadata.json`を読めばよい。**
 
-- `raw_text`: 取得できた記事本文を連結した全文
+`corpus.txt`は、取得できた記事本文を連結した全文をそのまま UTF-8 のプレーンテキスト
+として格納したファイルである。
+
+`metadata.json`は以下のフィールドを含む。
+
+- `language`: 言語コード(`{payload["language"]}`)
+- `manifest`: 記事タイトル・リビジョン ID の対応を記したマニフェストファイル名
+  (`{payload["manifest"]}`)
+- `manifest_article_count`: マニフェストに列挙された記事数
+- `fetched_article_count`: 実際に取得できた記事数
+- `skipped_articles`: 取得に失敗した記事(タイトル・理由)のリスト
 - `validation_ratio`: {payload["validation_ratio"]}(`src/data/text.py`の
   `split_train_val_text()`で使う訓練・検証分割の比率)
-- `raw_bytes`: `raw_text`の UTF-8 バイト数({payload["raw_bytes"]:,})
+- `raw_bytes`: `corpus.txt`の UTF-8 バイト数({payload["raw_bytes"]:,})
 - `source_commit`: 取得時点の`ai-theories`リポジトリのコミットハッシュ
   (`{payload["source_commit"]}`)
 """
@@ -335,7 +369,8 @@ def main() -> None:
             print(f"アップロード中: {key} -> {repo_id}")
             upload_corpus_artifact_to_hub(
                 repo_id=repo_id,
-                corpus_json_path=artifact["corpus_json_path"],
+                corpus_txt_path=artifact["corpus_txt_path"],
+                metadata_json_path=artifact["metadata_json_path"],
                 dataset_card_text=artifact["dataset_card_path"].read_text(encoding="utf-8"),
                 token=token,
             )

@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch import Tensor
 
@@ -528,11 +529,17 @@ def load_english_wikipedia_corpus_with_fallback(
 
     まず``kojikojiprg/ai-theories-corpus-en``(Hugging Face Hub の Dataset
     リポジトリ、``scripts/promote_canonical_corpora.py``でアップロードしたもの)
-    から``corpus.json``を取得し、``"raw_text"``フィールドを読む。取得に失敗した場合
+    から``corpus.txt``(コーパス全文のプレーンテキスト)と``metadata.json``
+    (由来・バイト数などのメタデータ)を取得する。取得に失敗した場合
     (リポジトリが未作成・ネットワーク障害など)のみ、``load_english_wikipedia_corpus()``
     による Wikipedia API からの直接取得にフォールバックする。9826 記事の直接取得は
     Colab で数時間規模の時間を要するため(009、5.4 節)、Hub のデータセットが
     存在すればそれを優先する。
+
+    **``corpus.json``(単一 JSON、``raw_text``フィールドにコーパス全文を格納)から
+    ``corpus.txt``+``metadata.json``の 2 ファイル構成に変更した(009、Colab の RAM
+    制約対応)。** JSON パースによる二重持ち(コーパス文字列とパース結果、約 1.1 GB)
+    を避けるため、コーパス全文はプレーンテキストとして別ファイルに分離している。
 
     Args:
         cache_dir: 直接取得にフォールバックした場合のキャッシュ先ディレクトリ
@@ -541,7 +548,7 @@ def load_english_wikipedia_corpus_with_fallback(
             ``metadata``は``{"source": "hub" または "direct", "raw_bytes": int,
             "manifest_article_count": int, "fetched_article_count": int,
             "skipped_articles": [...]}``を含む。取得元が Hub の場合、
-            ``raw_bytes``・記事数はアップロード時に``corpus.json``へ記録された
+            ``raw_bytes``・記事数はアップロード時に``metadata.json``へ記録された
             値(009 側で独立に再取得できない)であり、``len(text.encode("utf-8"))``
             と比較することで Hub からの取得が破損していないかを検証できる
             (Hub 経由の取得は決定的であるため、一致しなければ取得の破損を意味する)。
@@ -556,12 +563,15 @@ def load_english_wikipedia_corpus_with_fallback(
     try:
         from huggingface_hub import hf_hub_download
 
-        path = hf_hub_download(
-            repo_id=_EN_WIKIPEDIA_CORPUS_REPO_ID, filename="corpus.json", repo_type="dataset"
+        corpus_path = hf_hub_download(
+            repo_id=_EN_WIKIPEDIA_CORPUS_REPO_ID, filename="corpus.txt", repo_type="dataset"
         )
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        metadata_path = hf_hub_download(
+            repo_id=_EN_WIKIPEDIA_CORPUS_REPO_ID, filename="metadata.json", repo_type="dataset"
+        )
+        data = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
         print(f"コーパス取得元: {_EN_WIKIPEDIA_CORPUS_REPO_ID}(Hugging Face Hub)")
-        text = data["raw_text"]
+        text = Path(corpus_path).read_text(encoding="utf-8")
         if not return_metadata:
             return text
         metadata = {
@@ -594,25 +604,40 @@ def load_english_wikipedia_corpus_with_fallback(
 
 def upload_corpus_artifact_to_hub(
     repo_id: str,
-    corpus_json_path: str | Path,
+    corpus_txt_path: str | Path,
+    metadata_json_path: str | Path,
     dataset_card_text: str,
     token: str,
 ) -> None:
-    """指定した Dataset リポジトリを作成し(存在しなければ)、corpus.json とデータセット
-    カードをアップロードする(``scripts/promote_canonical_corpora.py``で使用)。
+    """指定した Dataset リポジトリを作成し(存在しなければ)、corpus.txt・metadata.json・
+    データセットカードをアップロードする(``scripts/promote_canonical_corpora.py``で使用)。
 
     ``src/data/tokenizer.py``の``upload_tokenizer_artifact_to_hub()``と対になる関数
-    (``repo_type="dataset"``である点、アップロードするファイル名(``corpus.json``)が
-    異なる)。呼び出し側が``DRY_RUN``・``IN_COLAB``のガードを行った上でのみ呼び出す
-    こと。トークンの取得・環境変数への設定はここでは行わない(呼び出し側が用意して渡す)。
+    (``repo_type="dataset"``である点、アップロードするファイル(``corpus.txt``+
+    ``metadata.json``)が異なる)。呼び出し側が``DRY_RUN``・``IN_COLAB``のガードを
+    行った上でのみ呼び出すこと。トークンの取得・環境変数への設定はここでは行わない
+    (呼び出し側が用意して渡す)。
+
+    以前の構成(単一の``corpus.json``)からの移行に伴い、アップロード後に古い
+    ``corpus.json``がリポジトリに残っていれば削除する(``upload_file``はファイル単位の
+    追加・上書きであり、構成を変えても明示的に削除しない限り古いファイルが残り続ける
+    ため。CLAUDE.md「共有アーティファクトの管理方針」)。リポジトリが元々
+    ``corpus.json``を含まない(初回アップロードなど)場合、削除は失敗するがこれは
+    正常な状態のため無視する。
     """
     from huggingface_hub import HfApi
 
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True, private=False)
     api.upload_file(
-        path_or_fileobj=str(corpus_json_path),
-        path_in_repo="corpus.json",
+        path_or_fileobj=str(corpus_txt_path),
+        path_in_repo="corpus.txt",
+        repo_id=repo_id,
+        repo_type="dataset",
+    )
+    api.upload_file(
+        path_or_fileobj=str(metadata_json_path),
+        path_in_repo="metadata.json",
         repo_id=repo_id,
         repo_type="dataset",
     )
@@ -622,6 +647,11 @@ def upload_corpus_artifact_to_hub(
         repo_id=repo_id,
         repo_type="dataset",
     )
+    try:
+        api.delete_file(path_in_repo="corpus.json", repo_id=repo_id, repo_type="dataset")
+        print(f"{repo_id}: 旧形式の corpus.json を削除した")
+    except Exception as e:  # noqa: BLE001  # 元々 corpus.json が無い場合を含め、削除失敗は無視する
+        print(f"{repo_id}: corpus.json の削除をスキップした({e!r}、元々存在しない場合を含む)")
 
 
 def load_code_corpus(repo_root: str | Path = ".") -> str:
@@ -662,7 +692,7 @@ def split_train_val(ids: list[int], val_ratio: float = 0.1) -> tuple[Tensor, Ten
 
 
 def get_random_batch(
-    data: Tensor,
+    data: Tensor | np.ndarray,
     batch_size: int,
     seq_len: int,
     generator: torch.Generator | None = None,
@@ -670,7 +700,11 @@ def get_random_batch(
     """連続する区間をランダムに切り出して、次トークン予測用のバッチを作る。
 
     Args:
-        data: 1 次元の LongTensor(``split_train_val`` の出力など)。
+        data: 1 次元の LongTensor(``split_train_val`` の出力など)、または
+            ``numpy.ndarray``・``numpy.memmap``(``encode_text_to_memmap`` の出力)。
+            後者の場合、切り出した区間だけをディスクから読み込む(``memmap`` の
+            場合、コーパス全体を RAM に展開しない、009)。``Tensor`` を渡した場合の
+            挙動は変更していない(後方互換性)。
         batch_size: バッチサイズ B。
         seq_len: 系列長 S。
         generator: 乱数生成に使う ``torch.Generator``(省略可、再現性のため)。
@@ -681,8 +715,19 @@ def get_random_batch(
     """
     max_start = len(data) - seq_len - 1
     starts = torch.randint(0, max_start, (batch_size,), generator=generator)
-    inputs = torch.stack([data[s : s + seq_len] for s in starts])
-    targets = torch.stack([data[s + 1 : s + seq_len + 1] for s in starts])
+    if isinstance(data, Tensor):
+        inputs = torch.stack([data[s : s + seq_len] for s in starts])
+        targets = torch.stack([data[s + 1 : s + seq_len + 1] for s in starts])
+    else:
+        starts_list = starts.tolist()
+        inputs = torch.from_numpy(
+            np.stack([np.asarray(data[s : s + seq_len], dtype=np.int64) for s in starts_list])
+        )
+        targets = torch.from_numpy(
+            np.stack(
+                [np.asarray(data[s + 1 : s + seq_len + 1], dtype=np.int64) for s in starts_list]
+            )
+        )
     return inputs, targets
 
 
@@ -733,8 +778,121 @@ def encode_corpus(tokenizer, text: str) -> Tensor:
     return torch.tensor(tokenizer.encode(text), dtype=torch.long)
 
 
+# 単語境界(非空白文字の直後に空白文字またはテキスト末尾が続く位置)にのみマッチする。
+# ``encode_text_to_memmap`` がテキストをチャンクに分割する際、この境界でのみ分割する
+# ことで、チャンクごとに符号化した結果を連結したものが、テキスト全体を一括で符号化した
+# 結果と一致することを保証する(``src/data/tokenizer.py`` の ``pretokenize``、
+# ``chunk_split_mode="whitespace"`` は、空白を単語の先頭に付与したうえで単語単位で
+# 独立に符号化し、単語をまたぐマージを行わないため)。文字単位のトークナイザ
+# (``CharacterLevelTokenizer``)では文字間の相互作用がそもそも無いため、この境界は
+# より保守的な制約になるだけで結果は変わらない。
+_WORD_BOUNDARY_RE = re.compile(r"\S\s")
+
+
+def encode_text_to_memmap(
+    tokenizer,
+    text: str,
+    memmap_path: str | Path,
+    chunk_chars: int = 2_000_000,
+    force: bool = False,
+) -> np.memmap:
+    """テキストを単語境界で分割しながら逐次符号化し、``uint16`` の``numpy.memmap``として
+    ディスクに書き出す(009、Google Colab の RAM 制約(12 GB)への対応)。
+
+    ``encode_corpus`` はトークン ID を Python の ``list[int]`` として保持してから
+    ``torch.tensor`` に変換するため、大規模コーパス(1 億トークン超)では整数
+    オブジェクトのオーバーヘッド(CPython では 1 個あたり約 28 バイト、256 を超える
+    整数は使い回されない)により数 GB の RAM を消費する。本関数はテキストを
+    ``chunk_chars`` 文字程度のチャンクに区切って順次 ``tokenizer.encode()`` を呼び出し、
+    結果を直接``uint16``(2 バイト)の生バイナリとしてディスクへ逐次書き込むことで、
+    ID 列全体を Python の ``list[int]`` として RAM に保持することを避ける。書き出した
+    ファイルは``uint16``の生バイナリそのものであり、そのまま``numpy.memmap``として
+    開ける。
+
+    **チャンク分割は単語境界(``_WORD_BOUNDARY_RE``)でのみ行う。** これにより、
+    チャンクごとに符号化した結果を連結したものは、テキスト全体を一括で
+    ``tokenizer.encode()`` した結果(``encode_corpus`` の出力)と完全に一致する
+    (根拠は``_WORD_BOUNDARY_RE``のコメントを参照)。
+
+    ``memmap_path``と、その隣の``<memmap_path>.meta.json``(トークン数と、
+    再利用可否を判定するためのフィンガープリント(テキスト長・先頭/末尾の一部・
+    語彙サイズ)を記録)が既に存在し、フィンガープリントが一致する場合は再符号化を
+    スキップする(セッション内でのキャッシュ再利用。フィンガープリントはテキスト
+    全体のハッシュではなく先頭/末尾の一部に基づく簡易な同一性チェックであり、
+    ``.cache/``が Colab のセッションをまたいで永続しないことを踏まえ、
+    セッション内での再利用ができれば十分という方針(CLAUDE.md)に基づく)。
+
+    Args:
+        tokenizer: ``encode(text) -> Sequence[int]``と``vocab_size: int``を持つ
+            トークナイザ(``encode_corpus``と同じ想定、``CharacterLevelTokenizer``・
+            ``BPEIDTokenizer``など)。
+        text: 符号化対象のテキスト全体。
+        memmap_path: 書き出し先のパス。
+        chunk_chars: 1 チャンクあたりの目安文字数。実際の分割位置は直近の単語境界に
+            丸められるため、正確にこの文字数にはならない。
+        force: True の場合、既存のキャッシュを無視して再符号化する。
+
+    Returns:
+        書き出した``uint16``配列を読み取り専用で開いた``numpy.memmap``
+        (形状``(トークン数,)``)。
+
+    Raises:
+        AssertionError: ``tokenizer.vocab_size``が``uint16``の表現範囲
+            (0〜65535)を超える場合、または符号化されたトークン ID がその範囲を
+            超える場合。
+    """
+    vocab_size = tokenizer.vocab_size
+    assert vocab_size <= 65536, (
+        f"vocab_size={vocab_size} は uint16(0〜65535)の範囲を超えている。"
+        "encode_text_to_memmap は uint16 での保持を前提としており、"
+        "この語彙サイズでは使えない。"
+    )
+
+    memmap_path = Path(memmap_path)
+    meta_path = memmap_path.with_name(memmap_path.name + ".meta.json")
+    fingerprint = f"{len(text)}:{text[:1000]}:{text[-1000:]}"
+
+    if not force and memmap_path.exists() and meta_path.exists():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("fingerprint") == fingerprint and meta.get("vocab_size") == vocab_size:
+            token_count = meta["token_count"]
+            print(
+                f"[キャッシュ] {memmap_path} を再利用する({token_count:,} トークン、再符号化しない)"
+            )
+            return np.memmap(memmap_path, dtype=np.uint16, mode="r", shape=(token_count,))
+
+    memmap_path.parent.mkdir(parents=True, exist_ok=True)
+    n = len(text)
+    total_tokens = 0
+    with open(memmap_path, "wb") as f:
+        pos = 0
+        while pos < n:
+            end = min(pos + chunk_chars, n)
+            if end < n:
+                m = _WORD_BOUNDARY_RE.search(text, end - 1)
+                end = m.start() + 1 if m else n
+            chunk_ids = tokenizer.encode(text[pos:end])
+            if chunk_ids:
+                arr = np.asarray(chunk_ids, dtype=np.int64)
+                assert int(arr.min()) >= 0 and int(arr.max()) < vocab_size, (
+                    "符号化されたトークン ID が語彙サイズの範囲外(uint16 化の前提が崩れている)"
+                )
+                f.write(arr.astype(np.uint16).tobytes())
+                total_tokens += arr.size
+            pos = end
+
+    meta_path.write_text(
+        json.dumps(
+            {"token_count": total_tokens, "fingerprint": fingerprint, "vocab_size": vocab_size}
+        ),
+        encoding="utf-8",
+    )
+    print(f"{memmap_path}: {total_tokens:,} トークンを uint16 memmap として書き出した")
+    return np.memmap(memmap_path, dtype=np.uint16, mode="r", shape=(total_tokens,))
+
+
 def make_evaluation_windows(
-    token_ids: Tensor,
+    token_ids: Tensor | np.ndarray,
     sequence_length: int,
 ) -> tuple[Tensor, Tensor]:
     """検証用の非重複窓(non-overlapping window)を作る(006)。
@@ -754,7 +912,12 @@ def make_evaluation_windows(
     ``len(text.encode("utf-8"))`` として求める(``evaluate_bits_per_byte`` に渡す)。
 
     Args:
-        token_ids: 1 次元の LongTensor(``encode_corpus`` の出力)。
+        token_ids: 1 次元の LongTensor(``encode_corpus`` の出力)、または
+            ``numpy.ndarray``・``numpy.memmap``(``encode_text_to_memmap`` の出力)。
+            ``Tensor`` 以外が渡された場合、内部で ``Tensor`` に変換する。評価窓は
+            検証データ全体を必要とするためそもそも全体を RAM に展開する前提であり、
+            ``memmap`` を渡しても RAM 使用量の削減にはならない
+            (検証データが巨大な場合は呼び出し側で分割を検討すること)。
         sequence_length: 窓の長さ S。
 
     Returns:
@@ -762,6 +925,8 @@ def make_evaluation_windows(
         ``windows`` は LongTensor(末尾窓のパディング位置は ``0``)、``mask`` は
         bool の Tensor(True が実トークン、False がパディング)。
     """
+    if not isinstance(token_ids, Tensor):
+        token_ids = torch.from_numpy(np.asarray(token_ids, dtype=np.int64))
     n = len(token_ids)
     num_windows = -(-n // sequence_length)  # 切り上げ除算
     padded_length = num_windows * sequence_length
