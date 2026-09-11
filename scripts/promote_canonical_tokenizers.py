@@ -103,10 +103,10 @@ EN_TARGET_REPO_ID = "kojikojiprg/ai-theories-tokenizer-en"
 JA_TARGET_REPO_ID = "kojikojiprg/ai-theories-tokenizer-ja"
 CODE_TARGET_REPO_ID = "kojikojiprg/ai-theories-tokenizer-code"
 
-# 006 と同じキャッシュディレクトリ(.cache/006_corpus)を指定し、既に取得済みの記事
-# キャッシュを再利用する(記事タイトル・リビジョン ID を固定しているため、再取得しても
-# 内容は変わらない)。
-JA_CACHE_DIR = _REPO_ROOT / ".cache" / "006_corpus"
+# 言語とデータ源(Wikipedia 日本語版)で決まるキャッシュディレクトリを指定し、既に
+# 取得済みの記事キャッシュ(.cache/wikipedia_ja、記事タイトル・リビジョン ID を固定
+# しているため内容は 006 取得時と変わらない)を再利用する。
+JA_CACHE_DIR = _REPO_ROOT / ".cache" / "wikipedia_ja"
 
 _EXPECTED_JA_VOCAB_SIZE = 4654  # 006 の本番実行結果(セル出力: `ja/character: vocab_size=4654`)
 
