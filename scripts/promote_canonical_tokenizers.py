@@ -8,8 +8,9 @@ Hugging Face Hub リポジトリへ切り出す、リポジトリ運用スクリ
 
 | 言語 / ドメイン | 種類 | 設定 | 由来 | 位置づけ |
 |---|---|---|---|---|
-| 英語(en) | バイトレベル BPE | 語彙サイズ 8192 | 008 のモデルリポジトリに同梱済みのものを
-  そのまま再利用(再学習しない) | 006 の本番実験で選定された条件 |
+| 英語(en) | バイトレベル BPE | 語彙サイズ 8192 | 008 が実際に使っている学習レシピ
+  (英語版 Wikipedia コーパス・訓練分割の先頭 8,000,000 文字・``max_chunk_bytes=64``)から
+  ローカルで再学習する | 006 の本番実験で選定された条件 |
 | 日本語(ja) | 文字レベル(Character-level) | ― | 006 の本番実験で日本語の勝者となった
   条件。006 が実際に使ったコーパスから、006 と完全に同一の手順で再構築する | 006 の
   本番実験で選定された条件 |
@@ -18,12 +19,23 @@ Hugging Face Hub リポジトリへ切り出す、リポジトリ運用スクリ
   (provisional)。006 はコードドメインで言語モデルの学習を行っておらず「正解」が
   存在しないため、英語と同じ設定を仮採用する |
 
-BPE の学習・文字レベル語彙の構築はいずれも GPU を必要としない処理であるため、本番
-スケールのまま(記事数・コーパス量を縮小せずに)ローカルで構築・検証する。
+3 つのアーティファクトはいずれも、他のトピックのモデルリポジトリ(``kojikojiprg/
+ai-theories-small-gpt-en``など)からアーティファクトをダウンロードする形では構築しない。
+学習レシピ自体から独立に再構築する(BPE の学習・文字レベル語彙の構築はいずれも GPU を
+必要としない処理であるため、本番スケールのまま、記事数・コーパス量を縮小せずにローカルで
+構築・検証できる)。
 
 **このスクリプトは既に Google Colab で実行済みであり、3 つのリポジトリは Hugging Face
 Hub 上に存在する。** ``.ipynb``から``.py``への移行は形式の変更のみであり、再アップロード
 は不要である。
+
+**英語(en)アーティファクトの構築方法についての注記**: 当初は 008 のモデルリポジトリに
+同梱されていた``tokenizer.json``をそのまま複製していたが、これはモデルリポジトリへの
+循環依存になる(共有トークナイザリポジトリを作り直す手段が、そのリポジトリの昇格元である
+モデルリポジトリに依存してしまい、モデルリポジトリを削除・再作成すると参照できなくなる)。
+008 の学習レシピが再現可能であることを検証済みのため、学習レシピからの再構築に変更した
+(``build_english_artifact()``参照)。構築結果は Hub 上の既存アーティファクトと
+完全一致することを検証する。
 
 実行例(リポジトリルートから):
 
@@ -39,7 +51,6 @@ Hub 上に存在する。** ``.ipynb``から``.py``への移行は形式の変�
 from __future__ import annotations
 
 import argparse
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -53,6 +64,7 @@ from src.data.text import (  # noqa: E402
     load_code_corpus,
     load_wikipedia_corpus,
     save_character_level_tokenizer_json,
+    split_train_val_text,
 )
 from src.data.tokenizer import (  # noqa: E402
     BPEIDTokenizer,
@@ -98,10 +110,22 @@ def _require_hf_token() -> str:
 
 CACHE_DIR = _REPO_ROOT / ".cache" / "promote_canonical_tokenizers"
 
-EN_SOURCE_REPO_ID = "kojikojiprg/ai-theories-small-gpt-en"  # 008 のモデルリポジトリ
 EN_TARGET_REPO_ID = "kojikojiprg/ai-theories-tokenizer-en"
 JA_TARGET_REPO_ID = "kojikojiprg/ai-theories-tokenizer-ja"
 CODE_TARGET_REPO_ID = "kojikojiprg/ai-theories-tokenizer-code"
+
+# 言語とデータ源(Wikipedia 英語版)で決まるキャッシュディレクトリを指定し、008 が
+# 取得済みのコーパスキャッシュ(.cache/wikipedia_en)を再利用する(記事タイトル・
+# リビジョン ID を固定しているため内容は変わらない)。
+EN_CACHE_DIR = _REPO_ROOT / ".cache" / "wikipedia_en"
+
+# 008 の実際の設定値(008 5.2 節・5.6 節、ノートブックを読んで確認済み。推測ではない)。
+# 英語アーティファクトはこの設定から再学習して構築するため、008 側でこれらの値が
+# 変わった場合はこの定数も追随させる必要がある。
+EN_VALIDATION_RATIO = 0.05  # 008 の VALIDATION_RATIO(訓練・検証分割の比率)
+EN_TOKENIZER_TRAIN_BYTES = 8_000_000  # 008 の TOKENIZER_TRAIN_BYTES(本番値)
+EN_VOCAB_SIZE = 8192  # 008 の VOCAB_SIZE
+EN_MAX_CHUNK_BYTES = 64  # 008 の MAX_CHUNK_BYTES
 
 # 言語とデータ源(Wikipedia 日本語版)で決まるキャッシュディレクトリを指定し、既に
 # 取得済みの記事キャッシュ(.cache/wikipedia_ja、記事タイトル・リビジョン ID を固定
@@ -111,38 +135,100 @@ JA_CACHE_DIR = _REPO_ROOT / ".cache" / "wikipedia_ja"
 _EXPECTED_JA_VOCAB_SIZE = 4654  # 006 の本番実行結果(セル出力: `ja/character: vocab_size=4654`)
 
 
-def build_english_artifact() -> Path:
-    """英語(en)アーティファクトを再パッケージする。
+def _describe_mismatch(name: str, built_value: object, hub_value: object) -> str:
+    """`built_value`と`hub_value`が異なる場合に、差分の内容を人間が読める形で返す。"""
+    if isinstance(built_value, list) and isinstance(hub_value, list):
+        if len(built_value) != len(hub_value):
+            return f"{name}: 要素数が異なる(構築={len(built_value)}, Hub={len(hub_value)})"
+        for i, (b, h) in enumerate(zip(built_value, hub_value, strict=True)):
+            if b != h:
+                return f"{name}: {i} 番目の要素から異なる(構築={b!r}, Hub={h!r})"
+        return f"{name}: 不一致箇所を特定できなかった"
+    if isinstance(built_value, set) and isinstance(hub_value, set):
+        only_built = sorted(built_value - hub_value)[:5]
+        only_hub = sorted(hub_value - built_value)[:5]
+        return f"{name}: 構築側のみに含まれる例={only_built}, Hub側のみに含まれる例={only_hub}"
+    if isinstance(built_value, dict) and isinstance(hub_value, dict):
+        diff_keys = [k for k in built_value if built_value.get(k) != hub_value.get(k)]
+        return f"{name}: 値が異なるキー数={len(diff_keys)}, 例={diff_keys[:5]}"
+    return f"{name}: 構築={built_value!r}, Hub={hub_value!r}"
 
-    **再学習は行わない。** 008 のモデルリポジトリ(``EN_SOURCE_REPO_ID``)から
-    ``tokenizer.json``を取得し、その内容をそのまま(バイト単位で)新しいリポジトリ用に
-    使う。
+
+def _verify_english_artifact_matches_hub(built_tokenizer: BPEIDTokenizer) -> None:
+    """構築したトークナイザが Hub 上の既存の``EN_TARGET_REPO_ID``と完全一致することを
+    検証する。一致しない場合は差分を報告したうえで例外を送出し、アップロードに
+    進ませない(呼び出し元の``build_english_artifact()``がこの関数より先にアップロード
+    用ファイルを書き出すことはない)。
     """
     from huggingface_hub import hf_hub_download
 
-    en_tokenizer_json_path = Path(
-        hf_hub_download(repo_id=EN_SOURCE_REPO_ID, filename="tokenizer.json")
+    hub_path = Path(hf_hub_download(repo_id=EN_TARGET_REPO_ID, filename="tokenizer.json"))
+    hub_tokenizer = load_bpe_id_tokenizer_json(hub_path)
+
+    built_bpe, hub_bpe = built_tokenizer.bpe_tokenizer, hub_tokenizer.bpe_tokenizer
+    checks = [
+        ("merges", built_bpe.merges, hub_bpe.merges),
+        ("vocab", built_bpe.vocab, hub_bpe.vocab),
+        ("symbol_to_id", built_tokenizer.symbol_to_id, hub_tokenizer.symbol_to_id),
+        ("byte_level", built_bpe.byte_level, hub_bpe.byte_level),
+        ("max_chunk_bytes", built_bpe.max_chunk_bytes, hub_bpe.max_chunk_bytes),
+        ("chunk_split_mode", built_bpe.chunk_split_mode, hub_bpe.chunk_split_mode),
+    ]
+    mismatches = [
+        _describe_mismatch(name, built_value, hub_value)
+        for name, built_value, hub_value in checks
+        if built_value != hub_value
+    ]
+    if mismatches:
+        detail = "\n".join(f"  - {m}" for m in mismatches)
+        raise RuntimeError(
+            f"構築したトークナイザが Hub 上の既存アーティファクト({EN_TARGET_REPO_ID})と"
+            f"一致しない。アップロードは行わない。差分:\n{detail}"
+        )
+    print(
+        f"[OK] 構築したトークナイザは Hub 上の既存アーティファクト"
+        f"({EN_TARGET_REPO_ID})と完全一致した"
     )
 
-    # パース可能であること・語彙サイズが期待通りであることを検証する(内容そのものの
-    # シリアライズ形式は変えないよう、アップロード用ファイルはこのオブジェクトから
-    # 再生成せず、ダウンロードしたファイルをそのままコピーする、下記参照)。
-    en_tokenizer = load_bpe_id_tokenizer_json(en_tokenizer_json_path)
-    print(f"英語トークナイザ取得元: {EN_SOURCE_REPO_ID}")
+
+def build_english_artifact() -> Path:
+    """英語(en)アーティファクトを構築する。
+
+    008 が実際に使っている学習レシピ(英語版 Wikipedia コーパス`en_006_pretraining.json`、
+    訓練・検証分割``EN_VALIDATION_RATIO``、訓練分割の先頭``EN_TOKENIZER_TRAIN_BYTES``文字、
+    ``EN_VOCAB_SIZE``、``byte_level=True``、``EN_MAX_CHUNK_BYTES``)から BPE を学習する。
+
+    以前は 008 のモデルリポジトリから``tokenizer.json``をそのまま複製していたが、これは
+    モデルリポジトリへの循環依存になるため(モジュールの docstring 参照)、学習レシピ
+    からの再構築に変更した。構築結果は Hub 上の既存アーティファクトと完全一致するかを
+    検証し、一致しない場合はアップロードせずに停止する(``_verify_english_artifact_matches_hub``)。
+    """
+    corpus_en = load_wikipedia_corpus("en", EN_CACHE_DIR)
+    print(f"corpus_en: {len(corpus_en):,} 文字 / {len(corpus_en.encode('utf-8')):,} バイト")
+
+    train_text_en, _val_text_en = split_train_val_text(corpus_en, EN_VALIDATION_RATIO)
+    en_bpe = learn_bpe(
+        train_text_en[:EN_TOKENIZER_TRAIN_BYTES],
+        EN_VOCAB_SIZE,
+        byte_level=True,
+        max_chunk_bytes=EN_MAX_CHUNK_BYTES,
+    )
+    en_symbols = sorted(en_bpe.vocab)
+    en_symbol_to_id = {s: i for i, s in enumerate(en_symbols)}
+    en_tokenizer = BPEIDTokenizer(en_bpe, en_symbol_to_id)
     print(f"vocab_size = {en_tokenizer.vocab_size}")
     assert en_tokenizer.vocab_size == 8192, "英語トークナイザの語彙サイズが 8192 と一致しない"
 
-    # ラウンドトリップ検証(短いサンプルテキストで確認する。取得したトークナイザを
-    # 再学習するわけではないため、008 の学習コーパス全体を再取得する必要はない)。
-    roundtrip_sample = "The quick brown fox jumps over the lazy dog. Hello, world! 12345."
+    roundtrip_sample = train_text_en[: min(len(train_text_en), 50_000)]
     assert en_tokenizer.decode(en_tokenizer.encode(roundtrip_sample)) == roundtrip_sample
-    print("[OK] 英語トークナイザのラウンドトリップ検証")
+    print(f"[OK] 英語トークナイザのラウンドトリップ検証(先頭 {len(roundtrip_sample):,} 文字)")
+
+    _verify_english_artifact_matches_hub(en_tokenizer)
 
     en_artifact_dir = CACHE_DIR / "en"
     en_artifact_dir.mkdir(parents=True, exist_ok=True)
-    en_artifact_path = en_artifact_dir / "tokenizer.json"
-    shutil.copy(en_tokenizer_json_path, en_artifact_path)
-    print(f"アップロード用ファイルを書き出した: {en_artifact_path}")
+    save_bpe_id_tokenizer_json(en_tokenizer, en_artifact_dir / "tokenizer.json")
+    print(f"アップロード用ファイルを書き出した: {en_artifact_dir / 'tokenizer.json'}")
     return en_artifact_dir
 
 
@@ -278,9 +364,11 @@ tags:
 [006. 小型 GPT の事前学習](https://github.com/kojikojiprg/ai-theories/blob/main/theories/02_pretraining/006_pretraining_small_gpt.ipynb)
 の本番実験で、英語について 5 つのトークナイザ条件(文字レベル・バイトレベル BPE ×
 4 語彙サイズ・Unigram 言語モデル)の中から選定された条件(バイトレベル BPE、語彙サイズ
-8192)である。学習済みの語彙・マージ規則自体は
+8192)である。
 [008. デコーディング戦略](https://github.com/kojikojiprg/ai-theories/blob/main/theories/02_pretraining/008_decoding_strategies.ipynb)
-の学習済みモデルに同梱されていたものをそのまま引き継いでおり、再学習は行っていない。
+が実際に使っている学習レシピ(英語版 Wikipedia コーパス、訓練分割の先頭 800 万文字)から
+再学習して構築しており、既存アーティファクトの語彙・マージ規則と完全一致することを
+検証済みである。
 
 ## 構成
 

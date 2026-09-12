@@ -39,7 +39,7 @@ Yugoslavia`、リビジョン ID `1370486518`)が`nosuchrevid`(指定したリ�
 
 将来同種の事態(取得時にスキップが発生する)が起きた場合の対処手順:
 
-1. `scripts/promote_canonical_corpora.ipynb`の取得ループ(またはコーパスを直接取得する
+1. `scripts/promote_canonical_corpora.py`の取得ループ(またはコーパスを直接取得する
    各ノートブックの該当セル)を実行し、`skipped_articles`(取得できなかった記事とその
    理由)を確認する。理由が`nosuchrevid`など永続的な失敗であることを確認する
    (一時的なネットワークエラー・429 は`_fetch_wikipedia_revision_plaintext`が
