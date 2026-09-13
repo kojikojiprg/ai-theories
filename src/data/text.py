@@ -539,6 +539,16 @@ def load_wikipedia_corpus_with_fallback(
     (リポジトリが未作成・ネットワーク障害など)のみ、``load_wikipedia_corpus()``に
     よる Wikipedia API からの直接取得にフォールバックする。
 
+    **``repo_id``と``manifest_path``の組み合わせが正しいことをアサートする。**
+    Hub からの取得が成功した場合、実際にはどのマニフェストで構築されたリポジトリでも
+    ``corpus.txt``・``metadata.json``さえあれば取得できてしまい、``manifest_path``は
+    使われない。呼び出し時に指定したマニフェスト(名前・記事数)と、Hub から取得した
+    ``metadata.json``の``manifest``・``manifest_article_count``が一致しない場合、
+    ``repo_id``と``manifest_path``の組み合わせを取り違えている可能性が高いため、
+    ``ValueError``で即座に停止する(直接取得へのフォールバックには落とさない。
+    フォールバックに落とすと、設定ミスが「取得が少し遅いだけ」に見えてしまい、
+    誤ったコーパスの取得に気づけないため)。
+
     Args:
         language: Wikipedia の言語コード(``"ja"``・``"en"`` など、
             ``load_wikipedia_corpus()``にそのまま渡す)。
@@ -564,6 +574,13 @@ def load_wikipedia_corpus_with_fallback(
         ``return_metadata=True``の場合は``(text, metadata)``のタプル。
         取得元(Hub / 直接取得のどちらだったか)は標準出力にも明記する。
     """
+    if manifest_path is None:
+        manifest_path = _WIKIPEDIA_MANIFEST_DIR / f"{language}_006_pretraining.json"
+    manifest_path = Path(manifest_path)
+    expected_manifest_name = manifest_path.name
+    expected_manifest_article_count = len(json.loads(manifest_path.read_text(encoding="utf-8")))
+
+    hub_error: Exception | None = None
     try:
         from huggingface_hub import hf_hub_download
 
@@ -572,8 +589,29 @@ def load_wikipedia_corpus_with_fallback(
             repo_id=repo_id, filename="metadata.json", repo_type="dataset"
         )
         data = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
-        print(f"コーパス取得元: {repo_id}(Hugging Face Hub)")
         text = Path(corpus_path).read_text(encoding="utf-8")
+    except Exception as e:  # noqa: BLE001  # Hub 取得の失敗理由を問わずフォールバックする
+        hub_error = e
+
+    if hub_error is None:
+        # repo_id と manifest_path の組み合わせを取り違えている場合、Hub からの取得自体は
+        # 成功してしまう(corpus.txt・metadata.json さえあれば取得できるため)。ここで
+        # 検出できないと、意図と異なるコーパスがエラーにならず静かに返ってしまう。
+        if (
+            data["manifest"] != expected_manifest_name
+            or data["manifest_article_count"] != expected_manifest_article_count
+        ):
+            raise ValueError(
+                f"Hub リポジトリ {repo_id!r} から取得したアーティファクトのマニフェストが、"
+                "呼び出し時に指定したマニフェストと一致しない。repo_id と manifest_path の"
+                "組み合わせが誤っている可能性があるため、直接取得へのフォールバックは行わず"
+                "停止する。 要求: "
+                f"manifest={expected_manifest_name!r}, "
+                f"article_count={expected_manifest_article_count}。 取得: "
+                f"manifest={data.get('manifest')!r}, "
+                f"article_count={data.get('manifest_article_count')}。"
+            )
+        print(f"コーパス取得元: {repo_id}(Hugging Face Hub)")
         if not return_metadata:
             return text
         metadata = {
@@ -584,26 +622,27 @@ def load_wikipedia_corpus_with_fallback(
             "skipped_articles": data["skipped_articles"],
         }
         return text, metadata
-    except Exception as e:  # noqa: BLE001  # Hub 取得の失敗理由を問わずフォールバックする
-        print(
-            f"Hub からの取得に失敗した({e!r})。Wikipedia API からの直接取得にフォールバックする。"
-        )
-        if not return_metadata:
-            text = load_wikipedia_corpus(language, cache_dir, manifest_path=manifest_path)
-            print("コーパス取得元: Wikipedia API(直接取得)")
-            return text
-        text, fetch_metadata = load_wikipedia_corpus(
-            language, cache_dir, manifest_path=manifest_path, return_metadata=True
-        )
+
+    print(
+        f"Hub からの取得に失敗した({hub_error!r})。"
+        "Wikipedia API からの直接取得にフォールバックする。"
+    )
+    if not return_metadata:
+        text = load_wikipedia_corpus(language, cache_dir, manifest_path=manifest_path)
         print("コーパス取得元: Wikipedia API(直接取得)")
-        metadata = {
-            "source": "direct",
-            "raw_bytes": len(text.encode("utf-8")),
-            "manifest_article_count": fetch_metadata["manifest_article_count"],
-            "fetched_article_count": fetch_metadata["fetched_article_count"],
-            "skipped_articles": fetch_metadata["skipped_articles"],
-        }
-        return text, metadata
+        return text
+    text, fetch_metadata = load_wikipedia_corpus(
+        language, cache_dir, manifest_path=manifest_path, return_metadata=True
+    )
+    print("コーパス取得元: Wikipedia API(直接取得)")
+    metadata = {
+        "source": "direct",
+        "raw_bytes": len(text.encode("utf-8")),
+        "manifest_article_count": fetch_metadata["manifest_article_count"],
+        "fetched_article_count": fetch_metadata["fetched_article_count"],
+        "skipped_articles": fetch_metadata["skipped_articles"],
+    }
+    return text, metadata
 
 
 def load_english_wikipedia_corpus_with_fallback(
