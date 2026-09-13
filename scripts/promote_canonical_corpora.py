@@ -4,14 +4,21 @@
 Hub の Dataset リポジトリへ切り出すための、リポジトリ運用スクリプトである(`theories/`の
 特定のトピックにも`apps/`の特定のアプリにも属さない)。
 
-現時点で扱うコーパスは以下の 2 つだが、``CORPUS_SPECS``にスペックを追加するだけで
+現時点で扱うコーパスは以下の 3 つだが、``CORPUS_SPECS``にスペックを追加するだけで
 別の言語・別のマニフェストのコーパスを追加できる構造にしている
 (``promote_canonical_tokenizers.py``の``ARTIFACTS``辞書と同じ考え方)。
 
 | キー | 言語 | マニフェスト | 記事数 | 用途 |
 |---|---|---|---|---|
 | en | 英語(en) | ``en_009_scaling.json`` | 9826 | 009(スケーリング則)の学習グリッド用 |
+| en_006 | 英語(en) | ``en_006_pretraining.json`` | 356 | 006(小型 GPT 事前学習)・008 の英語条件用 |
 | ja | 日本語(ja) | ``ja_006_pretraining.json`` | 80 | 006(小型 GPT の事前学習)の日本語条件用 |
+
+``en_006_pretraining``の記事集合は``en_009_scaling``の部分集合だが、``corpus.txt``は
+記事を連結済みのテキストであり、そこから 356 記事分を切り出すには記事の順序と連結方法が
+完全に一致している必要がある(訓練データが変わるリスクがある)。そのため
+``en_009_scaling``から部分文字列を切り出すのではなく、``en_006``を独立したスペックとして
+別リポジトリに昇格する。
 
 BPE の学習・言語モデルの学習を伴わない、純粋な取得・分割・アップロードの処理であり
 GPU を要しないため、本番スケールのままローカルで構築・検証する。記事の取得は Wikipedia
@@ -33,6 +40,8 @@ API を叩いて待つだけの処理であり、``load_wikipedia_corpus()``(``s
 from __future__ import annotations
 
 import argparse
+import functools
+import hashlib
 import json
 import subprocess
 import sys
@@ -46,6 +55,7 @@ if str(_REPO_ROOT) not in sys.path:
 from src.data.text import (  # noqa: E402
     load_english_wikipedia_corpus,
     load_japanese_wikipedia_corpus,
+    load_wikipedia_corpus,
     split_train_val_text,
     upload_corpus_artifact_to_hub,
 )
@@ -111,6 +121,50 @@ CORPUS_SPECS = [
         "skip": False,
     },
     {
+        "key": "en_006",
+        "language": "en",
+        # リポジトリ ID 案。既存の "ai-theories-corpus-en"(en_009_scaling、9826 記事)
+        # と区別するため、記事数の大小(-small 等)ではなくマニフェストの用途
+        # (`en_006_pretraining.json` の "_pretraining" 接尾辞)で命名した。用途は
+        # マニフェストを更新しても変わりにくく、記事数のような相対的な形容より安定した
+        # 識別子になる。完了報告でこの案の妥当性を確認すること。
+        "repo_id": "kojikojiprg/ai-theories-corpus-en-pretraining",
+        "manifest": "en_006_pretraining.json",
+        "manifest_article_count": 356,
+        "validation_ratio": 0.05,
+        # 記事単位キャッシュ(wikipedia_en_articles/)を en_009_scaling(9826 記事)の
+        # エントリと共有する。en_006_pretraining は en_009_scaling の部分集合であり、
+        # 記事単位キャッシュはリビジョン ID ベースでマニフェストをまたいで再利用できるため、
+        # 356 記事はすべて取得済みで再取得は発生しない。
+        "cache_dir": _REPO_ROOT / ".cache" / "wikipedia_en",
+        # load_wikipedia_corpus() の manifest_path 既定値
+        # (<language>_006_pretraining.json)がこのマニフェストと一致するため、
+        # 専用のラッパー関数を追加せず language="en" を固定した partial を使う。
+        "loader": functools.partial(load_wikipedia_corpus, "en"),
+        "usage_note": "006(小型 GPT の事前学習)・008 の英語条件用",
+        # まだ Hub 上に存在しないアーティファクトのため、既存アーティファクトとの照合が
+        # できない。代わりにローダの返り値をこのローカルキャッシュファイルとバイト単位で
+        # 照合する(process_corpus 内で使用)。
+        "verify_against_cache_file": _REPO_ROOT
+        / ".cache"
+        / "wikipedia_en"
+        / "wikipedia_en_en_006_pretraining_356.txt",
+        # データセットカードの「バージョン管理についての注記」に追記する説明
+        # (build_dataset_card で使用)。通常「同じ言語で異なるマニフェストが必要に
+        # なった場合は新しいリポジトリを作らずブランチで管理する」が方針だが、この
+        # コーパスは例外である理由を明記する。
+        "version_note_extra": (
+            "このコーパスは、上記の方針の例外である。`kojikojiprg/ai-theories-corpus-en`"
+            "(`en_009_scaling.json`、9826 記事)の記事集合は本リポジトリのマニフェスト"
+            "(`en_006_pretraining.json`、356 記事)を部分集合として含むが、"
+            "`corpus.txt`は記事を連結済みのプレーンテキストであるため、そこから 356 記事分を"
+            "正しく切り出すには記事の順序と連結方法が完全に一致している必要がある。"
+            "訓練データが意図せず変わるリスクを避けるため、`en_009_scaling`からの部分文字列の"
+            "切り出しではなく、独立したリポジトリとして別途アップロードした。"
+        ),
+        "skip": False,
+    },
+    {
         "key": "ja",
         "language": "ja",
         "repo_id": "kojikojiprg/ai-theories-corpus-ja",
@@ -131,6 +185,45 @@ CORPUS_SPECS = [
         "skip": False,
     },
 ]
+
+
+def _verify_against_local_cache(raw_text: str, cache_file_path: Path) -> None:
+    """``loader``の返り値(``raw_text``)が、指定したローカルキャッシュファイルと
+    バイト単位で一致することを検証する。
+
+    まだ Hub 上に存在しないアーティファクト(``en_006`` など)は既存アーティファクトとの
+    照合ができないため、代わりにこの検証を安全確認として使う。SHA-256 と総バイト数を
+    出力し、一致しない場合はアップロードに進ませず``AssertionError``で停止する。
+    """
+    if not cache_file_path.exists():
+        raise FileNotFoundError(
+            f"検証用のローカルキャッシュファイルが存在しない: {cache_file_path}"
+        )
+
+    cache_bytes = cache_file_path.read_bytes()
+    raw_bytes_data = raw_text.encode("utf-8")
+    cache_sha256 = hashlib.sha256(cache_bytes).hexdigest()
+    raw_sha256 = hashlib.sha256(raw_bytes_data).hexdigest()
+
+    print(f"[検証] ローカルキャッシュファイルとのバイト単位比較: {cache_file_path}")
+    print(f"  キャッシュファイル: {len(cache_bytes):,} バイト, SHA-256={cache_sha256}")
+    print(f"  ローダの返り値    : {len(raw_bytes_data):,} バイト, SHA-256={raw_sha256}")
+
+    if cache_bytes != raw_bytes_data:
+        mismatch_at = next(
+            (
+                i
+                for i, (a, b) in enumerate(zip(cache_bytes, raw_bytes_data, strict=False))
+                if a != b
+            ),
+            min(len(cache_bytes), len(raw_bytes_data)),
+        )
+        raise AssertionError(
+            "アップロード対象(ローダの返り値)がローカルキャッシュファイルと一致しない: "
+            f"バイト数の差={len(cache_bytes) - len(raw_bytes_data)}, "
+            f"先頭の不一致位置={mismatch_at}。アップロードは行わない。"
+        )
+    print("  [OK] バイト単位で完全に一致した")
 
 
 def process_corpus(spec: dict) -> dict:
@@ -164,6 +257,9 @@ def process_corpus(spec: dict) -> dict:
             print(f"  - {a['title']}: {a['reason']}")
     else:
         print("すべての記事を取得できた(スキップなし)")
+
+    if spec.get("verify_against_cache_file") is not None:
+        _verify_against_local_cache(raw_text, spec["verify_against_cache_file"])
 
     assert fetch_metadata["manifest_article_count"] == spec["manifest_article_count"], (
         f"{key}: マニフェスト記事数が期待({spec['manifest_article_count']})と一致しない: "
@@ -240,6 +336,8 @@ def build_dataset_card(payload: dict, spec: dict) -> str:
         if skipped
         else "なし(すべての記事を取得できた)"
     )
+    version_note_extra = spec.get("version_note_extra")
+    version_note_extra_section = f"\n{version_note_extra}\n" if version_note_extra else ""
     return f"""---
 language: {payload["language"]}
 license: cc-by-sa-4.0
@@ -286,7 +384,7 @@ tags:
 対象としているマニフェストは`{payload["manifest"]}`({payload["manifest_article_count"]}
 記事)であり、これは上記「由来」節と本カードの記載からのみ判別できる(リポジトリ名
 からは判別できない)。
-
+{version_note_extra_section}
 研究・教育目的で構築したものであり、品質保証は行っていない。商用・実運用での利用は
 想定しない。
 

@@ -522,38 +522,42 @@ def load_english_wikipedia_corpus(
 _EN_WIKIPEDIA_CORPUS_REPO_ID = "kojikojiprg/ai-theories-corpus-en"
 
 
-def load_english_wikipedia_corpus_with_fallback(
-    cache_dir: str | Path, return_metadata: bool = False
+def load_wikipedia_corpus_with_fallback(
+    language: str,
+    repo_id: str,
+    cache_dir: str | Path,
+    manifest_path: str | Path | None = None,
+    return_metadata: bool = False,
 ) -> str | tuple[str, dict]:
-    """英語版 Wikipedia のコーパスを取得する。
+    """指定言語版 Wikipedia のコーパスを、Hugging Face Hub の Dataset リポジトリを
+    優先して取得する(``load_english_wikipedia_corpus_with_fallback()``の一般形、
+    010 以降のトピックが Hub 上の任意のコーパスアーティファクトを取得するために使う)。
 
-    まず``kojikojiprg/ai-theories-corpus-en``(Hugging Face Hub の Dataset
-    リポジトリ、``scripts/promote_canonical_corpora.py``でアップロードしたもの)
-    から``corpus.txt``(コーパス全文のプレーンテキスト)と``metadata.json``
-    (由来・バイト数などのメタデータ)を取得する。取得に失敗した場合
-    (リポジトリが未作成・ネットワーク障害など)のみ、``load_english_wikipedia_corpus()``
-    による Wikipedia API からの直接取得にフォールバックする。9826 記事の直接取得は
-    Colab で数時間規模の時間を要するため(009、5.4 節)、Hub のデータセットが
-    存在すればそれを優先する。
-
-    **``corpus.json``(単一 JSON、``raw_text``フィールドにコーパス全文を格納)から
-    ``corpus.txt``+``metadata.json``の 2 ファイル構成に変更した(009、Colab の RAM
-    制約対応)。** JSON パースによる二重持ち(コーパス文字列とパース結果、約 1.1 GB)
-    を避けるため、コーパス全文はプレーンテキストとして別ファイルに分離している。
+    まず``repo_id``(``scripts/promote_canonical_corpora.py``でアップロードした
+    Dataset リポジトリ)から``corpus.txt``(コーパス全文のプレーンテキスト)と
+    ``metadata.json``(由来・バイト数などのメタデータ)を取得する。取得に失敗した場合
+    (リポジトリが未作成・ネットワーク障害など)のみ、``load_wikipedia_corpus()``に
+    よる Wikipedia API からの直接取得にフォールバックする。
 
     Args:
+        language: Wikipedia の言語コード(``"ja"``・``"en"`` など、
+            ``load_wikipedia_corpus()``にそのまま渡す)。
+        repo_id: Hub 上の Dataset リポジトリ ID(例:
+            ``"kojikojiprg/ai-theories-corpus-en"``)。
         cache_dir: 直接取得にフォールバックした場合のキャッシュ先ディレクトリ
-            (``load_english_wikipedia_corpus()``にそのまま渡す)。
+            (``load_wikipedia_corpus()``にそのまま渡す)。
+        manifest_path: ``load_wikipedia_corpus()``にそのまま渡すマニフェストへの
+            パス。``None``(既定値)の場合、``load_wikipedia_corpus()``の既定値
+            (``<language>_006_pretraining.json``)が使われる。
         return_metadata: True の場合、``(text, metadata)``のタプルを返す。
             ``metadata``は``{"source": "hub" または "direct", "raw_bytes": int,
             "manifest_article_count": int, "fetched_article_count": int,
             "skipped_articles": [...]}``を含む。取得元が Hub の場合、
             ``raw_bytes``・記事数はアップロード時に``metadata.json``へ記録された
-            値(009 側で独立に再取得できない)であり、``len(text.encode("utf-8"))``
-            と比較することで Hub からの取得が破損していないかを検証できる
-            (Hub 経由の取得は決定的であるため、一致しなければ取得の破損を意味する)。
-            既定値``False``の場合は従来通り``text``のみを返す(既存呼び出しの
-            返り値は不変)。
+            値であり、``len(text.encode("utf-8"))``と比較することで Hub からの
+            取得が破損していないかを検証できる(Hub 経由の取得は決定的であるため、
+            一致しなければ取得の破損を意味する)。既定値``False``の場合は
+            従来通り``text``のみを返す。
 
     Returns:
         ``return_metadata=False``(既定)の場合、取得したコーパス全文。
@@ -563,14 +567,12 @@ def load_english_wikipedia_corpus_with_fallback(
     try:
         from huggingface_hub import hf_hub_download
 
-        corpus_path = hf_hub_download(
-            repo_id=_EN_WIKIPEDIA_CORPUS_REPO_ID, filename="corpus.txt", repo_type="dataset"
-        )
+        corpus_path = hf_hub_download(repo_id=repo_id, filename="corpus.txt", repo_type="dataset")
         metadata_path = hf_hub_download(
-            repo_id=_EN_WIKIPEDIA_CORPUS_REPO_ID, filename="metadata.json", repo_type="dataset"
+            repo_id=repo_id, filename="metadata.json", repo_type="dataset"
         )
         data = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
-        print(f"コーパス取得元: {_EN_WIKIPEDIA_CORPUS_REPO_ID}(Hugging Face Hub)")
+        print(f"コーパス取得元: {repo_id}(Hugging Face Hub)")
         text = Path(corpus_path).read_text(encoding="utf-8")
         if not return_metadata:
             return text
@@ -587,10 +589,12 @@ def load_english_wikipedia_corpus_with_fallback(
             f"Hub からの取得に失敗した({e!r})。Wikipedia API からの直接取得にフォールバックする。"
         )
         if not return_metadata:
-            text = load_english_wikipedia_corpus(cache_dir)
+            text = load_wikipedia_corpus(language, cache_dir, manifest_path=manifest_path)
             print("コーパス取得元: Wikipedia API(直接取得)")
             return text
-        text, fetch_metadata = load_english_wikipedia_corpus(cache_dir, return_metadata=True)
+        text, fetch_metadata = load_wikipedia_corpus(
+            language, cache_dir, manifest_path=manifest_path, return_metadata=True
+        )
         print("コーパス取得元: Wikipedia API(直接取得)")
         metadata = {
             "source": "direct",
@@ -600,6 +604,36 @@ def load_english_wikipedia_corpus_with_fallback(
             "skipped_articles": fetch_metadata["skipped_articles"],
         }
         return text, metadata
+
+
+def load_english_wikipedia_corpus_with_fallback(
+    cache_dir: str | Path, return_metadata: bool = False
+) -> str | tuple[str, dict]:
+    """英語版 Wikipedia のコーパスを取得する(009 スケーリング則の学習グリッド用)。
+
+    ``load_wikipedia_corpus_with_fallback("en", _EN_WIKIPEDIA_CORPUS_REPO_ID, cache_dir,
+    manifest_path=en_009_scaling.json, ...)``の薄いラッパー。009 時点の既定の引数値・
+    返り値は変えていない(``load_wikipedia_corpus_with_fallback``への一般化に伴い、
+    009 の呼び出し結果が変わらないことを検証済み)。
+
+    Args:
+        cache_dir: 直接取得にフォールバックした場合のキャッシュ先ディレクトリ
+            (``load_english_wikipedia_corpus()``にそのまま渡す)。
+        return_metadata: True の場合、``(text, metadata)``のタプルを返す(既定値
+            ``False``の場合は従来通り``text``のみを返す。009 の既存呼び出しの
+            返り値は不変)。
+
+    Returns:
+        ``load_wikipedia_corpus_with_fallback``と同じ(``return_metadata``の値に
+        応じて文字列またはタプル)。
+    """
+    return load_wikipedia_corpus_with_fallback(
+        "en",
+        _EN_WIKIPEDIA_CORPUS_REPO_ID,
+        cache_dir,
+        manifest_path=_WIKIPEDIA_MANIFEST_DIR / "en_009_scaling.json",
+        return_metadata=return_metadata,
+    )
 
 
 def upload_corpus_artifact_to_hub(
