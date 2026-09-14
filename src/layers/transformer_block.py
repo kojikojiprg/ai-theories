@@ -30,12 +30,16 @@ Ba et al., 2016)を組み合わせたブロックを実装する。
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from torch import Tensor, nn
 
 from src.layers.attention import MultiHeadAttention
 from src.layers.feedforward import FeedForwardNetwork
 from src.layers.normalization import LayerNormalization
+
+if TYPE_CHECKING:
+    from src.generation.cache import KeyValueCache
 
 
 class EncoderBlock(nn.Module):
@@ -218,6 +222,8 @@ class DecoderBlock(nn.Module):
         tgt_mask: Tensor | None = None,
         memory_mask: Tensor | None = None,
         positions: Tensor | None = None,
+        kv_cache: KeyValueCache | None = None,
+        layer_idx: int | None = None,
     ) -> tuple[Tensor, Tensor, Tensor | None]:
         """Decoder Block の順伝播。
 
@@ -236,6 +242,12 @@ class DecoderBlock(nn.Module):
                 001〜004 と同一の挙動になる。KV キャッシュを用いた逐次推論
                 (トピック 010)で、生成の各ステップにおける絶対位置を外部から
                 指定できるようにするための引数。
+            kv_cache: KV キャッシュ(``KeyValueCache``、010 で追加)。自己注意
+                (``self_attn``)にそのまま透過する。``None``(既定値)のときは
+                001〜009 と完全に同一の計算になる。交差注意(``cross_attn``)には
+                透過しない(decoder-only 構成での自己回帰生成のみを対象とするため)。
+            layer_idx: ``kv_cache`` を指定する場合に必須の層番号(``self_attn`` に
+                そのまま透過する)。
 
         Returns:
             (output, self_attn_weights, cross_attn_weights) のタプル。
@@ -252,7 +264,7 @@ class DecoderBlock(nn.Module):
         if self.norm_first:
             normed = self.norm1(x)
             self_out, self_attn_weights = self.self_attn(
-                normed, normed, normed, tgt_mask, positions
+                normed, normed, normed, tgt_mask, positions, kv_cache=kv_cache, layer_idx=layer_idx
             )
             x = x + self.dropout1(self_out)
 
@@ -264,7 +276,9 @@ class DecoderBlock(nn.Module):
 
             x = x + self.dropout3(self.feed_forward(self.norm3(x)))
         else:
-            self_out, self_attn_weights = self.self_attn(x, x, x, tgt_mask, positions)
+            self_out, self_attn_weights = self.self_attn(
+                x, x, x, tgt_mask, positions, kv_cache=kv_cache, layer_idx=layer_idx
+            )
             x = self.norm1(x + self.dropout1(self_out))
 
             cross_attn_weights = None

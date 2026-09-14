@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import torch
 from torch import Tensor, nn
 
 from src.data.tokenizer import try_decode_byte_level_symbol
+from src.scaling.laws import fit_power_law
 
 
 def compute_mean_to_rms_ratio(hidden_states: Sequence[Tensor]) -> list[float]:
@@ -583,3 +585,128 @@ def count_non_embedding_parameters(model: nn.Module) -> int:
         if lm_head.bias is not None:
             excluded_param_ids.add(id(lm_head.bias))
     return sum(p.numel() for p in model.parameters() if id(p) not in excluded_param_ids)
+
+
+@dataclass
+class PowerLawExponentFit:
+    """``fit_power_law_exponent`` の結果。y = coefficient * x^exponent。"""
+
+    exponent: float
+    exponent_stderr: float
+    coefficient: float
+    r_squared: float
+
+
+def fit_power_law_exponent(x: Sequence[float], y: Sequence[float]) -> PowerLawExponentFit:
+    """べき乗則 y = a x^b をあてはめ、指数 b とその標準誤差を返す(010)。
+
+    ``src.scaling.laws.fit_power_law`` と同じ対数空間の線形最小二乗
+    (``log y = log a + b log x``)を使うが、実験の判定基準(条件間の指数の差
+    ``Δb`` を、各条件の指数の標準誤差から誤差伝播で合成する)に必要な
+    **回帰係数の標準誤差** も計算する点が異なる。単純線形回帰における
+    傾きの標準誤差の標準公式
+
+    .. math::
+
+        \\mathrm{SE}(b) = \\sqrt{
+            \\frac{\\hat{\\sigma}^2}{\\sum_i (\\log x_i - \\overline{\\log x})^2}
+        }, \\qquad
+        \\hat{\\sigma}^2 = \\frac{\\sum_i \\hat{\\varepsilon}_i^2}{n - 2}
+
+    を用いる(``\\hat{\\varepsilon}_i`` は対数空間の残差、``n`` はデータ点数)。
+
+    Args:
+        x: 正の実数値の系列(3 点以上、標準誤差の推定に自由度 ``n - 2 >= 1`` が必要)。
+        y: 正の実数値の系列(``x`` と同じ長さ)。
+
+    Returns:
+        PowerLawExponentFit(exponent=b、exponent_stderr=SE(b)、coefficient=a、
+        r_squared=決定係数(対数空間))。
+
+    Raises:
+        ValueError: データ点数が 3 未満の場合。
+    """
+    if len(x) < 3:
+        raise ValueError(f"標準誤差の推定には少なくとも 3 点が必要である: {len(x)} 点")
+
+    fit = fit_power_law(x, y)
+    log_x = np.log(np.asarray(x, dtype=float))
+    degrees_of_freedom = len(log_x) - 2
+    residual_variance = float(np.sum(fit.residuals**2)) / degrees_of_freedom
+    sum_sq_centered_log_x = float(np.sum((log_x - log_x.mean()) ** 2))
+    exponent_stderr = float(np.sqrt(residual_variance / sum_sq_centered_log_x))
+
+    return PowerLawExponentFit(
+        exponent=fit.exponent,
+        exponent_stderr=exponent_stderr,
+        coefficient=fit.coefficient,
+        r_squared=fit.r_squared,
+    )
+
+
+def compute_key_value_cache_memory_bytes(
+    batch_size: int,
+    num_layers: int,
+    sequence_length: int,
+    num_key_value_heads: int,
+    head_dim: int,
+    bytes_per_element: int = 4,
+) -> int:
+    """KV キャッシュのメモリ量の閉形式(010 理論セクション)。
+
+    .. math::
+
+        \\text{memory} = 2 \\cdot B \\cdot L \\cdot T \\cdot (g \\cdot d_k)
+            \\cdot \\text{bytes\\_per\\_element}
+
+    先頭の 2 は Key・Value の 2 つを保持することに、``g * d_k`` は Key / Value
+    ヘッド数 g とヘッドあたり次元 d_k の積(多頭注意機構では g = h であり
+    d_model に等しいが、Grouped-Query Attention / Multi-Query Attention では
+    g < h であるぶん比例して縮小する)に対応する。
+
+    Args:
+        batch_size: バッチサイズ B。
+        num_layers: 層数 L。
+        sequence_length: キャッシュする系列長 T。
+        num_key_value_heads: Key / Value ヘッド数 g。
+        head_dim: ヘッドあたりの次元 d_k。
+        bytes_per_element: 要素あたりのバイト数(fp32 なら 4、fp16/bf16 なら 2)。
+
+    Returns:
+        KV キャッシュのメモリ量(バイト)。
+    """
+    return (
+        2
+        * batch_size
+        * num_layers
+        * sequence_length
+        * num_key_value_heads
+        * head_dim
+        * bytes_per_element
+    )
+
+
+def compute_arithmetic_intensity(flops: float, bytes_moved: float) -> float:
+    """演算強度(arithmetic intensity、FLOPs / バイト)を計算する(010)。
+
+    roofline モデル(Williams et al., "Roofline: An Insightful Visual Performance
+    Model for Multicore Architectures", CACM 2009)における、ある演算が計算律速
+    (compute-bound)かメモリ帯域律速(memory-bound)かを判定する指標。GPU の
+    「1 バイトあたりの理論演算性能」(ハードウェアの演算強度、FLOPS / メモリ帯域)
+    と比較し、この値がそれを下回っていればメモリ帯域律速になる。
+
+    prefill(行列と行列の積、バッチ×系列長ぶんの演算を固定サイズの重み 1 回の
+    読み出しで賄える)は演算強度が系列長に比例して大きくなり計算律速に近づくのに対し、
+    decode(行列とベクトルの積、KV キャッシュを用いた逐次生成の 1 ステップ)は
+    演算強度が ``O(1)``(バッチサイズ程度)に留まりメモリ帯域律速になりやすい
+    (010 理論セクション 3 節)。
+
+    Args:
+        flops: 対象の演算の浮動小数点演算回数。
+        bytes_moved: 対象の演算がメモリから読み書きするバイト数の合計
+            (典型的には重み行列のバイト数 + 入出力活性化のバイト数)。
+
+    Returns:
+        演算強度(FLOPs / バイト)。
+    """
+    return flops / bytes_moved

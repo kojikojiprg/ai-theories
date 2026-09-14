@@ -637,6 +637,69 @@ def plot_optimal_frontier(
     return ax
 
 
+def plot_log_log_fit(
+    x: Sequence[float],
+    y: Sequence[float],
+    exponent: float | None = None,
+    coefficient: float | None = None,
+    label: str = "measured",
+    title: str = "",
+    xlabel: str = "x",
+    ylabel: str = "y",
+    ax: Axes | None = None,
+) -> Axes:
+    """両対数プロット(log-log plot)に、べき乗則あてはめ y = a x^b の直線を重畳する(010)。
+
+    ``src.scaling.laws.fit_power_law``・``src.utils.statistics.fit_power_law_exponent``
+    の結果(``exponent``・``coefficient``)をそのまま渡せる。べき乗則(``log y = log a
+    + b log x``)は両対数軸上で直線になるため、実測点があてはめ直線に沿っているかを
+    目視で確認できる。
+
+    Args:
+        x: 横軸の実測値の系列(正の実数値)。
+        y: 縦軸の実測値の系列(``x`` と同じ長さ、正の実数値)。
+        exponent: あてはめたべき指数 b。``None`` の場合、直線は描画しない
+            (実測点の散布図のみ)。
+        coefficient: あてはめた係数 a。``exponent`` を指定する場合はこちらも必要。
+        label: 実測点の凡例ラベル。
+        title: 図のタイトル。
+        xlabel: 横軸ラベル。
+        ylabel: 縦軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(6.0, 4.2))
+
+    x_arr = np.asarray(x, dtype=float)
+    y_arr = np.asarray(y, dtype=float)
+    ax.scatter(x_arr, y_arr, color="tab:blue", s=32, zorder=3, label=label)
+
+    if exponent is not None and coefficient is not None:
+        x_line = np.linspace(x_arr.min(), x_arr.max(), 100)
+        y_line = coefficient * x_line**exponent
+        ax.plot(
+            x_line,
+            y_line,
+            color="tab:red",
+            linewidth=1.6,
+            zorder=2,
+            label=f"fit (b={exponent:.3f})",
+        )
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3, which="both")
+    ax.legend(fontsize=8)
+    return ax
+
+
 def plot_dual_axis_curves(
     x: Sequence[float],
     left_curves: dict[str, Sequence[float]],

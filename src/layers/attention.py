@@ -16,6 +16,7 @@ Scaled Dot-Product Attention と Multi-Head Attention を PyTorch で実装す�
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
@@ -25,6 +26,9 @@ from src.layers.positional_encoding import (
     QueryKeyPositionalTransform,
     ShawRelativePositionBias,
 )
+
+if TYPE_CHECKING:
+    from src.generation.cache import KeyValueCache
 
 
 def scaled_dot_product_attention(
@@ -101,7 +105,7 @@ class MultiHeadAttention(nn.Module):
 
     Args:
         d_model: モデルの隠れ次元。``num_heads`` で割り切れる必要がある。
-        num_heads: ヘッド数 h。
+        num_heads: ヘッド数 h(Query 側)。
         dropout: Attention 重みに適用する dropout 率。
         bias: 線形射影にバイアス項を持たせるか(原論文は bias なし)。
         positional_transform: Query・Key を、内積を取る前に位置に応じて変換する
@@ -112,6 +116,14 @@ class MultiHeadAttention(nn.Module):
             (``AttentionScoreBias`` のサブクラス、例: ``T5RelativePositionBias``、
             ``ALiBiPositionBias``、``ShawRelativePositionBias``)。``None``
             (既定値)の場合は何も加算しない。
+        num_key_value_heads: Key / Value ヘッド数 g(010 で追加)。``h`` を ``g`` で
+            割り切れる必要がある。``None``(既定値)の場合 ``g = h``(通常の多頭注意機構、
+            001〜009 と完全に同一の計算になる)。``g < h`` のとき Grouped-Query
+            Attention(``1 < g < h``、Ainslie et al., EMNLP 2023)または
+            Multi-Query Attention(``g = 1``、Shazeer, 2019)になる。Query の
+            ヘッドを ``h / g`` 個ずつのグループに分け、各グループが同じ Key / Value
+            ヘッドを共有する(グループ ``i`` は Query ヘッド ``[i * h/g, (i+1) * h/g)``
+            に対応)。
     """
 
     def __init__(
@@ -122,6 +134,7 @@ class MultiHeadAttention(nn.Module):
         bias: bool = False,
         positional_transform: QueryKeyPositionalTransform | None = None,
         attention_score_bias: AttentionScoreBias | None = None,
+        num_key_value_heads: int | None = None,
     ) -> None:
         super().__init__()
         if d_model % num_heads != 0:
@@ -135,10 +148,23 @@ class MultiHeadAttention(nn.Module):
         self.positional_transform = positional_transform
         self.attention_score_bias = attention_score_bias
 
-        # W^Q, W^K, W^V(全ヘッド分をまとめたもの)と出力射影 W^O
+        self.num_key_value_heads = (
+            num_key_value_heads if num_key_value_heads is not None else num_heads
+        )
+        if num_heads % self.num_key_value_heads != 0:
+            raise ValueError(
+                f"num_heads ({num_heads}) は num_key_value_heads "
+                f"({self.num_key_value_heads}) で割り切れる必要がある"
+            )
+        self._group_size = num_heads // self.num_key_value_heads
+        kv_dim = self.num_key_value_heads * self.d_k
+
+        # W^Q, W^O は Query ヘッド数(h)分、W^K, W^V は Key / Value ヘッド数(g)分。
+        # num_key_value_heads=None(既定値)のとき kv_dim == d_model となり、
+        # 001〜009 と完全に同一の形状・初期化になる。
         self.w_q = nn.Linear(d_model, d_model, bias=bias)
-        self.w_k = nn.Linear(d_model, d_model, bias=bias)
-        self.w_v = nn.Linear(d_model, d_model, bias=bias)
+        self.w_k = nn.Linear(d_model, kv_dim, bias=bias)
+        self.w_v = nn.Linear(d_model, kv_dim, bias=bias)
         self.w_o = nn.Linear(d_model, d_model, bias=bias)
         self.dropout = nn.Dropout(dropout)
 
@@ -151,10 +177,10 @@ class MultiHeadAttention(nn.Module):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def _split_heads(self, x: Tensor) -> Tensor:
-        """(B, S, d_model) -> (B, h, S, d_k) へ分割する。"""
+    def _split_heads(self, x: Tensor, num_heads: int) -> Tensor:
+        """(B, S, num_heads * d_k) -> (B, num_heads, S, d_k) へ分割する。"""
         batch_size, seq_len, _ = x.shape
-        x = x.view(batch_size, seq_len, self.num_heads, self.d_k)
+        x = x.view(batch_size, seq_len, num_heads, self.d_k)
         return x.transpose(1, 2)
 
     def _merge_heads(self, x: Tensor) -> Tensor:
@@ -181,34 +207,68 @@ class MultiHeadAttention(nn.Module):
         value: Tensor,
         mask: Tensor | None = None,
         positions: Tensor | None = None,
+        kv_cache: KeyValueCache | None = None,
+        layer_idx: int | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Multi-Head Attention の順伝播。
 
         Args:
             query: 形状 ``(B, S_q, d_model)``。
-            key: 形状 ``(B, S_k, d_model)``。
-            value: 形状 ``(B, S_k, d_model)``。
+            key: 形状 ``(B, S_k, d_model)``。``kv_cache`` を指定する場合、これは
+                「今回新たに追加する分」の Key であり(通常 ``S_k = S_q``)、
+                過去の Key はキャッシュから取得される(下記 ``kv_cache`` 参照)。
+            value: 形状 ``(B, S_k, d_model)``。``key`` と同様、``kv_cache``
+                指定時は新規追加分のみを渡す。
                 自己注意(self-attention)では query = key = value を渡す。
             mask: True が「参加させる」を表す bool マスク。
-                形状は ``(S_q, S_k)`` / ``(B, S_q, S_k)`` / ``(B, h, S_q, S_k)``。
-            positions: Query 側の絶対位置インデックス(形状 ``(S_q,)``)。
-                ``positional_transform`` に渡される。``None`` のときは 0 から
-                S_q - 1 までの連番として扱う。KV キャッシュを用いた逐次推論
-                (トピック 010)では、生成の各ステップで Query の絶対位置が
-                キャッシュ長だけずれるため、これを外部から指定できるようにしている。
+                形状は ``(S_q, S_k)`` / ``(B, S_q, S_k)`` / ``(B, h, S_q, S_k)``
+                (``S_k`` は ``kv_cache`` 使用時、追記後のキャッシュ長)。
+            positions: Query(および ``key`` の新規追加分)の絶対位置インデックス
+                (形状 ``(S_q,)``)。``positional_transform`` に渡される。``None``
+                のときは 0 から S_q - 1 までの連番として扱う。KV キャッシュを
+                用いた逐次推論(トピック 010)では、生成の各ステップで Query の
+                絶対位置がキャッシュ長だけずれるため、これを外部から指定できる
+                ようにしている。
+            kv_cache: KV キャッシュ(``KeyValueCache``、010 で追加)。``None``
+                (既定値)の場合、001〜009 と完全に同一の計算になる(``key``・
+                ``value`` をそのまま Attention に使う)。指定する場合、``key``・
+                ``value`` から計算した(位置変換適用後の)新規分を ``layer_idx``
+                の層に追記し、追記後の全系列(過去 + 新規)を Attention の
+                Key / Value として使う。
+            layer_idx: ``kv_cache`` を指定する場合に必須の、このインスタンスが
+                対応する層番号(``KeyValueCache.update`` に渡される)。
 
         Returns:
             (output, attn_weights) のタプル。
             output は ``(B, S_q, d_model)``、attn_weights は ``(B, h, S_q, S_k)``。
         """
-        # 1. 線形射影(全ヘッド分をまとめて計算)
-        q = self._split_heads(self.w_q(query))  # (B, h, S_q, d_k)
-        k = self._split_heads(self.w_k(key))  # (B, h, S_k, d_k)
-        v = self._split_heads(self.w_v(value))  # (B, h, S_k, d_v)
+        # 1. 線形射影。Query は h ヘッド分、Key / Value は g(<= h)ヘッド分。
+        q = self._split_heads(self.w_q(query), self.num_heads)  # (B, h, S_q, d_k)
+        k_new = self._split_heads(self.w_k(key), self.num_key_value_heads)  # (B, g, S_k, d_k)
+        v_new = self._split_heads(self.w_v(value), self.num_key_value_heads)  # (B, g, S_k, d_v)
 
         # 1.5. Query・Key の位置変換(例: RoPE)。指定がなければ従来通り何もしない。
+        # kv_cache 使用時も、キャッシュへ追記する「前」の新規分にのみ適用する
+        # (RoPE は各トークンの絶対位置のみで決まるため、キャッシュ済みの過去の
+        # Key は既に正しく回転済みであり、再適用しない)。
         if self.positional_transform is not None:
-            q, k = self.positional_transform.apply(q, k, positions)
+            q, k_new = self.positional_transform.apply(q, k_new, positions)
+
+        # 1.6. KV キャッシュへの追記・取得(010)。kv_cache=None なら従来通り
+        # 新規分をそのまま使う(S_k = S_q の自己注意と同一の計算になる)。
+        if kv_cache is not None:
+            if layer_idx is None:
+                raise ValueError("kv_cache を指定する場合、layer_idx も指定する必要がある")
+            k, v = kv_cache.update(layer_idx, k_new, v_new)
+        else:
+            k, v = k_new, v_new
+
+        # 1.7. Grouped-Query Attention / Multi-Query Attention(010): Key / Value の
+        # g ヘッドを、各グループ内の Query ヘッド数(h / g)だけ複製して h ヘッドに揃える。
+        # g == h(既定値)のときは実質的な no-op(repeat_interleave(1, ...) は恒等写像)。
+        if self._group_size > 1:
+            k = k.repeat_interleave(self._group_size, dim=1)
+            v = v.repeat_interleave(self._group_size, dim=1)
 
         if mask is not None:
             mask = self._expand_mask(mask)
