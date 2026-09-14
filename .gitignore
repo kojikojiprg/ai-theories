@@ -54,6 +54,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Raw data pending promotion to Hugging Face Hub (see CLAUDE.md)
+.rawdata/
+
 # Translations
 *.mo
 *.pot
