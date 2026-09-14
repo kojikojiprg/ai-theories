@@ -428,6 +428,7 @@ def convert_attention_to_grouped_query(
         old_attn: MultiHeadAttention = block.self_attn
         num_heads = old_attn.num_heads
         d_k = old_attn.d_k
+        device = old_attn.w_q.weight.device
         new_attn = MultiHeadAttention(
             old_attn.d_model,
             num_heads,
@@ -436,7 +437,7 @@ def convert_attention_to_grouped_query(
             positional_transform=old_attn.positional_transform,
             attention_score_bias=old_attn.attention_score_bias,
             num_key_value_heads=num_key_value_heads,
-        )
+        ).to(device)
         new_attn.w_q.load_state_dict(old_attn.w_q.state_dict())
         new_attn.w_o.load_state_dict(old_attn.w_o.state_dict())
 
@@ -464,9 +465,16 @@ def convert_attention_to_grouped_query(
                         ).squeeze(-1)
                     )
         else:  # init == "random"
+            # Xavier 初期化は常に CPU 上の乱数生成器で行い、結果を目的の device へ
+            # コピーする(``torch.Generator``は CPU 版が CUDA/MPS のテンソルに直接
+            # 使えないため。乱数の消費経路を device によらず一定に保つ意味もある)。
             with torch.no_grad():
-                nn.init.xavier_uniform_(new_attn.w_k.weight, generator=generator)
-                nn.init.xavier_uniform_(new_attn.w_v.weight, generator=generator)
+                w_k_init = torch.empty_like(new_attn.w_k.weight, device="cpu")
+                w_v_init = torch.empty_like(new_attn.w_v.weight, device="cpu")
+                nn.init.xavier_uniform_(w_k_init, generator=generator)
+                nn.init.xavier_uniform_(w_v_init, generator=generator)
+                new_attn.w_k.weight.copy_(w_k_init)
+                new_attn.w_v.weight.copy_(w_v_init)
                 if old_attn.w_k.bias is not None:
                     nn.init.zeros_(new_attn.w_k.bias)
                     nn.init.zeros_(new_attn.w_v.bias)
