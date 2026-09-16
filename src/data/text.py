@@ -562,11 +562,15 @@ def load_wikipedia_corpus_with_fallback(
         return_metadata: True の場合、``(text, metadata)``のタプルを返す。
             ``metadata``は``{"source": "hub" または "direct", "raw_bytes": int,
             "manifest_article_count": int, "fetched_article_count": int,
-            "skipped_articles": [...]}``を含む。取得元が Hub の場合、
+            "skipped_articles": [...], "validation_ratio": float | None,
+            "source_commit": str | None}``を含む。取得元が Hub の場合、
             ``raw_bytes``・記事数はアップロード時に``metadata.json``へ記録された
             値であり、``len(text.encode("utf-8"))``と比較することで Hub からの
             取得が破損していないかを検証できる(Hub 経由の取得は決定的であるため、
-            一致しなければ取得の破損を意味する)。既定値``False``の場合は
+            一致しなければ取得の破損を意味する)。``validation_ratio``・
+            ``source_commit``は``metadata.json``にのみ記録されている値のため、
+            取得元が直接取得(``"direct"``)の場合は``None``になる(呼び出し側で
+            使う場合はこの``None``を考慮すること)。既定値``False``の場合は
             従来通り``text``のみを返す。
 
     Returns:
@@ -620,6 +624,8 @@ def load_wikipedia_corpus_with_fallback(
             "manifest_article_count": data["manifest_article_count"],
             "fetched_article_count": data["fetched_article_count"],
             "skipped_articles": data["skipped_articles"],
+            "validation_ratio": data.get("validation_ratio"),
+            "source_commit": data.get("source_commit"),
         }
         return text, metadata
 
@@ -641,6 +647,10 @@ def load_wikipedia_corpus_with_fallback(
         "manifest_article_count": fetch_metadata["manifest_article_count"],
         "fetched_article_count": fetch_metadata["fetched_article_count"],
         "skipped_articles": fetch_metadata["skipped_articles"],
+        # Wikipedia API からの直接取得には metadata.json に相当する記録がないため、
+        # Hub 側のみで検証可能な値は None にする(呼び出し側で考慮すること)。
+        "validation_ratio": None,
+        "source_commit": None,
     }
     return text, metadata
 
