@@ -13,10 +13,18 @@ Attention への変換という設定の違いはブランチ(``gqa``)で表現�
 トークナイザ・コーパスは同梱しない(CLAUDE.md「同梱の禁止」節)。モデルカードに、
 必要なトークナイザのリポジトリ(``kojikojiprg/ai-theories-tokenizer-en``)を明記する。
 
+``config.json`` は ``main`` ブランチの ``config.json`` を取得し、``num_key_value_heads``
+を加えたものをそのままアップロードする(``d_model``・``num_layers``・``num_heads``
+などを引数で受け取って手で再構築しない)。014・015 など将来のトピックがこのブランチの
+``config.json`` だけを読んで多頭注意機構を再構築できる必要があり、``main`` 側に将来
+フィールドが増えても本スクリプトを変更せずに追従できるようにするため。
+
 実行例(リポジトリルートから):
 
-    uv run python scripts/promote_gqa_uptrained_model.py --expected-sha256 <値>
-    uv run python scripts/promote_gqa_uptrained_model.py --expected-sha256 <値> --upload
+    uv run python scripts/promote_gqa_uptrained_model.py \
+        --num-key-value-heads 4 --expected-sha256 <値>
+    uv run python scripts/promote_gqa_uptrained_model.py \
+        --num-key-value-heads 4 --expected-sha256 <値> --upload
 
 既定ではアップロードを行わない(dry-run)。実際に Hugging Face Hub へアップロードする
 には``--upload``を明示的に指定し、リポジトリルートの``.env``に``HF_TOKEN``を設定して
@@ -114,36 +122,37 @@ def verify_checkpoint(checkpoint_path: Path, expected_sha256: str) -> None:
     print("[OK] SHA-256 がノートブックのセル出力の値と一致した")
 
 
-def build_config(
-    num_key_value_heads: int,
-    d_model: int,
-    num_layers: int,
-    num_heads: int,
-    d_ff: int,
-    sequence_length: int,
-    vocabulary_size: int,
-) -> dict:
-    """``config.json``の内容を作る(008 がアップロードした ``main`` ブランチの
-    ``config.json``に``num_key_value_heads``を加えた形式。008 の他フィールドは
-    変換の前後で変わらないため引き継ぐ)。
+def fetch_main_config() -> dict:
+    """``main``ブランチの``config.json``を取得する。
+
+    ``d_model``・``num_layers``・``num_heads``などのフィールドを引数で受け取って
+    手で再構築すると、``main``側にフィールドが増えたとき(``swiglu_d_ff``・
+    ``dropout``・``tie_embeddings``など)に本スクリプトの更新漏れで
+    ``gqa``ブランチの``config.json``だけが値を欠いたまま取り残される。
+    直接取得してそのままコピーすれば、この種の更新漏れが構造的に起きない。
     """
-    return {
-        "vocabulary_size": vocabulary_size,
-        "d_model": d_model,
-        "num_layers": num_layers,
-        "num_heads": num_heads,
-        "num_key_value_heads": num_key_value_heads,
-        "d_ff": d_ff,
-        "sequence_length": sequence_length,
-        "positional_encoding": "rope",
-        "normalization": "rmsnorm",
-        "feed_forward": "swiglu",
-        "norm_first": True,
-    }
+    from huggingface_hub import hf_hub_download
+
+    config_path = hf_hub_download(repo_id=TARGET_REPO_ID, filename="config.json", revision="main")
+    return json.loads(Path(config_path).read_text(encoding="utf-8"))
 
 
-def build_model_card(num_key_value_heads: int, num_heads: int, checkpoint_sha256: str) -> str:
+def build_config(num_key_value_heads: int) -> dict:
+    """``config.json``の内容を作る(``main``ブランチの``config.json``に
+    ``num_key_value_heads``を加えた形式)。
+
+    ``main``の既存キーはすべてそのまま引き継ぐ(``GPTLanguageModel``の
+    構築に必要な``swiglu_d_ff``・``dropout``・``tie_embeddings``を含む)。
+    """
+    config = fetch_main_config()
+    config["num_key_value_heads"] = num_key_value_heads
+    return config
+
+
+def build_model_card(config: dict, checkpoint_sha256: str) -> str:
     """モデルカード(日本語メイン・英語併記)を作る。"""
+    num_heads = config["num_heads"]
+    num_key_value_heads = config["num_key_value_heads"]
     return f"""---
 language: en
 license: mit
@@ -201,13 +210,12 @@ def main() -> None:
         help="ノートブックのセル出力に印字された SHA-256(この値と一致しない場合は"
         "アップロードしない)。",
     )
-    parser.add_argument("--num-key-value-heads", type=int, required=True)
-    parser.add_argument("--num-heads", type=int, required=True)
-    parser.add_argument("--d-model", type=int, required=True)
-    parser.add_argument("--num-layers", type=int, required=True)
-    parser.add_argument("--d-ff", type=int, required=True)
-    parser.add_argument("--sequence-length", type=int, required=True)
-    parser.add_argument("--vocabulary-size", type=int, required=True)
+    parser.add_argument(
+        "--num-key-value-heads",
+        type=int,
+        required=True,
+        help="Key / Value ヘッド数(GQA への変換後の値。例: 010 実験 D の gqa_mean_pool は 4)。",
+    )
     parser.add_argument(
         "--upload",
         action="store_true",
@@ -218,17 +226,13 @@ def main() -> None:
 
     verify_checkpoint(args.checkpoint_path, args.expected_sha256)
 
-    config = build_config(
-        num_key_value_heads=args.num_key_value_heads,
-        d_model=args.d_model,
-        num_layers=args.num_layers,
-        num_heads=args.num_heads,
-        d_ff=args.d_ff,
-        sequence_length=args.sequence_length,
-        vocabulary_size=args.vocabulary_size,
+    config = build_config(num_key_value_heads=args.num_key_value_heads)
+    assert config["num_key_value_heads"] < config["num_heads"], (
+        f"num_key_value_heads({config['num_key_value_heads']}) が num_heads"
+        f"({config['num_heads']})未満ではない。GQA への変換になっていない疑いがある。"
     )
-    card_text = build_model_card(args.num_key_value_heads, args.num_heads, args.expected_sha256)
-    print("config.json:")
+    card_text = build_model_card(config, args.expected_sha256)
+    print("config.json(main ブランチの内容 + num_key_value_heads):")
     print(json.dumps(config, indent=2, ensure_ascii=False))
 
     if not args.upload:
