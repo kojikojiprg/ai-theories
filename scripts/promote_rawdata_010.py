@@ -12,10 +12,21 @@ SHA-256 を再計算し、ノートブックのセル出力に印字された値
 指定する)と一致することを確認する。一致しない場合はアップロードを行わずに停止する
 (ノートブックの生成物と昇格対象が食い違ったまま Hub に上げてしまう事故を防ぐため)。
 
+``--filename``で Hub 上のファイル名を指定できる(既定は``010_rawdata.json``)。
+前提条件不成立などの理由で本番実行をやり直した場合、旧実行の生データを別名
+(例: ``010_rawdata_run1.json``)で昇格すれば、判定に使う最新の生データを上書きせずに
+両方を残せる。別名で昇格したファイルをデータセットカードに「判定には使わない」旨とともに
+記載したい場合は、本ファイル冒頭の``FILE_NOTES``にエントリを追加すること
+(``promote_canonical_corpora.py``の``CORPUS_SPECS``と同じ、静的レジストリによる管理。
+アップロードのたびに README.md を丸ごと再構築するため、レジストリに追加しておかないと
+過去の注記が新しい README.md で失われる)。
+
 実行例(リポジトリルートから):
 
     uv run python scripts/promote_rawdata_010.py --expected-sha256 <ノートブックの出力の値>
     uv run python scripts/promote_rawdata_010.py --expected-sha256 <値> --upload
+    uv run python scripts/promote_rawdata_010.py --expected-sha256 <値> \
+        --filename 010_rawdata_run1.json --upload
 
 既定ではアップロードを行わない(dry-run)。実際に Hugging Face Hub へアップロードする
 には``--upload``を明示的に指定し、リポジトリルートの``.env``に``HF_TOKEN``を設定して
@@ -36,6 +47,20 @@ if str(_REPO_ROOT) not in sys.path:
 
 TARGET_REPO_ID = "kojikojiprg/ai-theories-rawdata-010"
 DEFAULT_RAWDATA_PATH = _REPO_ROOT / ".rawdata" / "010_rawdata.json"
+DEFAULT_FILENAME = "010_rawdata.json"
+
+# Hub 上のファイル名 -> 判定に使わない理由の注記。判定に使う通常の生データ
+# (DEFAULT_FILENAME)は含めない。前提不成立などで本番実行をやり直した場合の
+# 旧実行データをここに追加すると、データセットカードに「判定には使わない」旨が
+# 反映される(スクリプトの docstring を参照)。
+FILE_NOTES: dict[str, str] = {
+    "010_rawdata_run1.json": (
+        "前提条件 P0(ウォームアップ後の反復間の変動係数が 0.1 以下)が実験 A・B・C の"
+        "いずれでも不成立だった 1 回目の本番実行(Google Colab T4 GPU)の生データ。"
+        "**判定には使用しない。** 前提不成立と判断した根拠・修正内容は、ノートブック "
+        "7.1 節の「旧実行の記録」を参照。"
+    ),
+}
 
 
 def _load_dotenv(path: Path = _REPO_ROOT / ".env") -> None:
@@ -129,8 +154,34 @@ def summarize_rawdata(data: dict) -> None:
             print(f"  - {key}: {value!r}")
 
 
-def build_dataset_card(rawdata_sha256: str, byte_count: int) -> str:
-    """Dataset リポジトリ用のデータセットカード(日本語メイン・英語併記)を作る。"""
+def build_dataset_card(filename: str, rawdata_sha256: str, byte_count: int) -> str:
+    """Dataset リポジトリ用のデータセットカード(日本語メイン・英語併記)を作る。
+
+    ``FILE_NOTES``に登録された全ファイル(このファイル自身がまだ未登録の場合は
+    それも含める)を列挙することで、今回のアップロードで README.md を丸ごと
+    上書きしても、過去に別名で昇格したファイル(前提不成立の旧実行データなど)の
+    注記が失われないようにする。
+    """
+    known_files = dict(FILE_NOTES)
+    known_files.setdefault(filename, None)
+
+    files_section_lines = []
+    for name in sorted(known_files, key=lambda n: (n != DEFAULT_FILENAME, n)):
+        note = known_files[name]
+        if note is None:
+            files_section_lines.append(f"- `{name}`: 判定に使用する生データ。")
+        else:
+            files_section_lines.append(f"- `{name}`: {note}")
+    files_section = "\n".join(files_section_lines)
+
+    this_file_note = known_files[filename]
+    verification_note = (
+        f"`{filename}` は判定に使用しない(上記参照)。"
+        if this_file_note is not None
+        else f"`{filename}` はノートブックのセル出力に印字された値と一致することを"
+        "確認済み(``promote_rawdata_010.py``が昇格前に再検証している)。"
+    )
+
     return f"""---
 language: en
 license: cc-by-nc-4.0
@@ -155,13 +206,16 @@ tags:
 - 実験 D: 条件(平均プール初期化 / ランダム初期化)x シードの学習曲線・
   bits-per-byte(初期化直後・追加学習後)。
 
-## 検証情報
+## ファイル一覧
+
+{files_section}
+
+## 検証情報(今回アップロードした`{filename}`について)
 
 - バイト数: {byte_count:,}
 - SHA-256: `{rawdata_sha256}`
 
-ノートブックのセル出力に印字された値と一致することを確認済み(``promote_rawdata_010.py``
-が昇格前に再検証している)。
+{verification_note}
 """
 
 
@@ -181,6 +235,14 @@ def main() -> None:
         "アップロードしない)。",
     )
     parser.add_argument(
+        "--filename",
+        type=str,
+        default=DEFAULT_FILENAME,
+        help=f"Hub 上でのファイル名(既定: {DEFAULT_FILENAME})。前提条件不成立などで"
+        "本番実行をやり直した場合、旧実行の生データを別名(例: 010_rawdata_run1.json)"
+        "で昇格すると、判定に使う最新の生データを上書きせずに両方を残せる。",
+    )
+    parser.add_argument(
         "--upload",
         action="store_true",
         help="Hugging Face Hub へ実際にアップロードする(既定は dry-run で行わない)。"
@@ -192,8 +254,15 @@ def main() -> None:
     print("生データの内訳:")
     summarize_rawdata(data)
 
+    if args.filename != DEFAULT_FILENAME and args.filename not in FILE_NOTES:
+        print(
+            f"[警告] --filename={args.filename!r} は FILE_NOTES に未登録。データセット"
+            "カードに「判定には使わない」旨を残したい場合は、本スクリプト冒頭の "
+            "FILE_NOTES にエントリを追加してから実行すること。"
+        )
+
     byte_count = args.rawdata_path.stat().st_size
-    card_text = build_dataset_card(args.expected_sha256, byte_count)
+    card_text = build_dataset_card(args.filename, args.expected_sha256, byte_count)
 
     if not args.upload:
         print("アップロードをスキップした(--upload が指定されていないため、既定は dry-run)。")
@@ -203,11 +272,11 @@ def main() -> None:
     from huggingface_hub import HfApi
 
     api = HfApi(token=token)
-    print(f"アップロード中: {TARGET_REPO_ID}")
+    print(f"アップロード中: {TARGET_REPO_ID} ({args.filename})")
     api.create_repo(repo_id=TARGET_REPO_ID, repo_type="dataset", exist_ok=True, private=False)
     api.upload_file(
         path_or_fileobj=str(args.rawdata_path),
-        path_in_repo="010_rawdata.json",
+        path_in_repo=args.filename,
         repo_id=TARGET_REPO_ID,
         repo_type="dataset",
     )
