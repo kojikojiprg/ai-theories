@@ -54,3 +54,33 @@ Yugoslavia`、リビジョン ID `1370486518`)が`nosuchrevid`(指定したリ�
    できる)。
 4. マニフェストを更新したコミットのメッセージに、削除したエントリ・理由
    (`nosuchrevid`など)・コーパス内容への影響(無操作であること)を明記する。
+
+## コーパスに含まれる追加面の文字(Supplementary Plane Characters)について
+
+`en_009_scaling.json`・`en_006_pretraining.json`・`ja_006_pretraining.json`で取得した
+コーパスには、コードポイントが U+10000 を超える文字(追加面 / Supplementary Plane の
+文字。astral 文字とも呼ばれる)が少数含まれる。`en_009_scaling`で 2,268 文字 / 605 種類
+(対象記事 9,826 件中 32 件、コーパス全体の 0.0004%)、`en_006_pretraining`で 614 文字 /
+406 種類(356 件中 2 件)、`ja_006_pretraining`で 19 文字 / 5 種類(80 件中 7 件)含まれる。
+
+内訳は楔形文字(Cuneiform)、数学用英数字記号(Mathematical Alphanumeric Symbols)、
+Brahmi・Phoenician・Kaithi などの歴史的文字体系である。**いずれも Unicode 上有効な正当な
+文字である。** 実測した最大のコードポイントは U+2C925 であり、Unicode の上限 U+10FFFF を
+大きく下回る。
+
+**`_wikitext_to_plaintext()`(`src/data/text.py`)の不具合ではない。** Wikimedia API から
+取得した変換前の wikitext の時点で、既にリテラルな文字として含まれていることを確認済みで
+ある。変換処理はそのまま素通ししているだけであり、該当記事(`Cuneiform`、
+`List of language names`、`Textual variants in the Gospel of Matthew`など)の性質から、
+編集者が意図して記述したものと判断できる。
+
+これらの文字が 1 文字でも含まれると、Python の`str`全体の内部表現が UCS4(1 文字 4 バイト)
+になる(PEP 393 のフレキシブル文字列表現)。コーパス全文を 1 つの`str`として保持する場合、
+これがメモリ使用量に影響する。
+
+**この文字を除去しない方針である。** 除去は不具合の修正ではなく、コーパスからの正当な
+コンテンツの削除であり、古代文字・数学記号を扱う記事の内容の正確性を損なう。除去しても、
+コーパス中には Latin-1(U+00FF 以下)に収まらない正当な非 ASCII 文字が別に 0.25% 程度
+残るため、内部表現は UCS2(1 文字 2 バイト)止まりであり、1 バイト / 文字にはならない。
+メモリ使用量が問題になる場合は、コーパスの内容を削るのではなく、コーパス全文を`str`として
+保持しない実装(`encode_text_to_memmap()`、`src/data/text.py`)で対処する。
