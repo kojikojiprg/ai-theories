@@ -9,8 +9,19 @@ ICLR 2019)・学習率スケジュール・gradient clipping・mixed precision �
 演算は引き続き fp32(単精度浮動小数点)のみで行う)。**これら 3 引数を渡さない場合、
 006 と完全に同一の挙動になる**(後方互換性を検証済み、007 5 節)。
 
+011(混合精度学習)で、``autocast_dtype``(``torch.autocast`` による演算ごとの
+精度割り当て)・``loss_scaler``(``src.training.precision`` の
+``StaticLossScaler`` / ``DynamicLossScaler``)引数を追加した。**これらに加えて
+007 までの引数のいずれも渡さない場合、006・007 と完全に同一の挙動になる**
+(後方互換性、011 で検証)。1 ステップの処理順序は「スケールした損失で逆伝播 ->
+unscale -> 非有限値の検出 -> unscale 後の勾配に gradient clipping -> 更新または
+スキップ -> スケール値の更新」であり、``loss_scaler`` が ``None`` の場合は
+非有限値が検出されることが無いため(``found_inf`` が常に ``False``)、007 までの
+処理順序に一致する。
+
 勾配ノルムは実験 H(006)・007 の主張 1〜4 で使うため、``gradient_clip_threshold``
-の指定の有無によらず、**クリッピング適用前の値を常に記録する**(007 2-3 節)。
+の指定の有無によらず、**クリッピング適用前(ただし loss scaling の unscale 後)の
+値を常に記録する**(007 2-3 節、011 でも同じ方針を踏襲)。
 
 記号 / Notation:
     B : 訓練バッチサイズ
@@ -118,6 +129,8 @@ def train_language_model(
     optimizer: OptimizerLike | None = None,
     learning_rate_schedule: Callable[[int], float] | None = None,
     gradient_clip_threshold: float | None = None,
+    autocast_dtype: torch.dtype | None = None,
+    loss_scaler: object | None = None,
 ) -> dict[str, list[float]]:
     """Adam・固定学習率・fp32 の学習ループ(007 で AdamW・学習率スケジュール・
     gradient clipping に対応、後方互換性あり)。
@@ -161,16 +174,25 @@ def train_language_model(
         gradient_clip_threshold: グローバルノルムでの gradient clipping の閾値。
             ``None``(既定値)の場合は無効(006 と同一の挙動、勾配ノルムの測定のみ
             行う)。指定された場合、``optimizer.step()`` の前に全パラメータの勾配を
-            ``min(1, gradient_clip_threshold / gradient_norm)`` でスケーリングする。
+            ``min(1, gradient_clip_threshold / gradient_norm)`` でスケーリングする
+            (``loss_scaler`` を併用する場合は unscale 後の勾配に適用する、011 6 節)。
+        autocast_dtype: ``torch.autocast`` に渡す演算ごとの精度(``torch.float16``
+            など)。``None``(既定値)の場合は ``torch.autocast`` を使わず、順伝播・
+            損失計算を fp32 のまま行う(006・007 と完全に同一の挙動、011 で追加)。
+        loss_scaler: 損失スケーリング(``src.training.precision`` の
+            ``StaticLossScaler`` / ``DynamicLossScaler``、``scale_loss()``・
+            ``unscale_gradients()``・``update()`` を持つ)。``None``(既定値)の
+            場合は損失スケーリングを行わない(011 で追加)。
 
     Returns:
         以下のキーを持つ履歴の辞書:
 
         - ``"step"``: 学習ステップ番号のリスト(1-indexed)。
-        - ``"train_loss"``: ステップごとの訓練損失(cross entropy、nats、バッチ平均)。
+        - ``"train_loss"``: ステップごとの訓練損失(cross entropy、nats、バッチ平均、
+          loss scaling 適用前の値)。
         - ``"gradient_norm"``: ステップごとの勾配ノルム(全パラメータの勾配を
-          連結した L2 ノルム、**gradient clipping 適用前の値**。clipping の有無に
-          関わらず常に記録する、007 2-3 節)。
+          連結した L2 ノルム、**gradient clipping 適用前(loss scaling の unscale
+          後)の値**。clipping の有無に関わらず常に記録する、007 2-3 節)。
         - ``"gradient_clip_triggered"``: ステップごとに gradient clipping が実際に
           発動したか(``gradient_norm > gradient_clip_threshold``)を示す bool の
           リスト。``gradient_clip_threshold`` が ``None`` の場合は常に ``False``。
@@ -181,8 +203,17 @@ def train_language_model(
           最大単一ステップ損失上昇幅(007 主張 3・4)の算出に使う。
         - ``"learning_rate"``: ステップごとに実際に使われた学習率
           (``learning_rate_schedule`` 指定時はその出力、それ以外は固定値)。
+          更新をスキップしたステップ(``step_skipped`` が ``True``)でも、学習率
+          スケジュールはステップ数どおりに進む(スキップは optimizer の更新の
+          みを止め、スケジュールの進行とは独立である、011 6 節)。
+        - ``"loss_scale"``: ステップごとに損失に乗じたスケール値。``loss_scaler``
+          が ``None`` の場合は常に ``1.0``。
+        - ``"step_skipped"``: ステップごとに、unscale 後の勾配に非有限値
+          (NaN または Inf)が検出され optimizer の更新をスキップしたかを示す bool。
+          ``loss_scaler`` が ``None`` の場合は常に ``False``。
         - ``"eval_step"``: 検証を行ったステップ番号のリスト。
-        - ``"eval_bits_per_byte"``: ``eval_step`` に対応する検証 bits-per-byte。
+        - ``"eval_bits_per_byte"``: ``eval_step`` に対応する検証 bits-per-byte
+          (評価は常に fp32 で行う、``autocast_dtype`` の指定によらない)。
     """
     torch.manual_seed(seed)
     generator = torch.Generator(device="cpu")
@@ -192,6 +223,8 @@ def train_language_model(
     if optimizer is None:
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
+    device_type = torch.device(device).type
+
     history: dict[str, list[float]] = {
         "step": [],
         "train_loss": [],
@@ -199,6 +232,8 @@ def train_language_model(
         "gradient_clip_triggered": [],
         "loss_step_delta": [],
         "learning_rate": [],
+        "loss_scale": [],
+        "step_skipped": [],
         "eval_step": [],
         "eval_bits_per_byte": [],
     }
@@ -216,14 +251,33 @@ def train_language_model(
         inputs, targets = get_random_batch(train_token_ids, batch_size, sequence_length, generator)
         inputs, targets = inputs.to(device), targets.to(device)
 
-        logits = model(inputs)
-        loss = functional.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+        if autocast_dtype is not None:
+            with torch.autocast(device_type=device_type, dtype=autocast_dtype):
+                logits = model(inputs)
+                loss = functional.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
+                )
+        else:
+            logits = model(inputs)
+            loss = functional.cross_entropy(
+                logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
+            )
+
+        # loss scaling: 連鎖律により、損失を S 倍すると全パラメータの勾配も S 倍になる
+        # (011 理論セクション 3 節)。loss_scaler が None の場合はスケーリングなし。
+        scaled_loss = loss_scaler.scale_loss(loss) if loss_scaler is not None else loss
 
         optimizer.zero_grad()
-        loss.backward()
+        scaled_loss.backward()
 
-        # クリッピング適用前の、全パラメータの勾配を連結した L2 ノルムを常に測定する
-        # (007 2-3 節、クリッピングの効果を測定するため適用前の値を残す)。
+        # unscale: loss_scaler が None の場合、found_inf は常に False になり、
+        # 以降の処理は 007 までと完全に同一の挙動になる。
+        found_inf = (
+            loss_scaler.unscale_gradients(model.parameters()) if loss_scaler is not None else False
+        )
+
+        # クリッピング適用前の、全パラメータの勾配(unscale 後)を連結した L2 ノルムを
+        # 常に測定する(007 2-3 節、クリッピングの効果を測定するため適用前の値を残す)。
         gradient_norm_sq = sum(
             p.grad.detach().pow(2).sum() for p in model.parameters() if p.grad is not None
         )
@@ -241,7 +295,14 @@ def train_language_model(
                 if p.grad is not None:
                     p.grad.detach().mul_(clip_scale)
 
-        optimizer.step()
+        # 非有限値を検出したステップは optimizer の更新をスキップする(011 6 節)。
+        # loss_scaler が None の場合、found_inf は常に False のため常に更新する
+        # (007 までと同一の挙動)。
+        if not found_inf:
+            optimizer.step()
+
+        if loss_scaler is not None:
+            loss_scaler.update(found_inf)
 
         loss_value = loss.item()
         loss_step_delta = 0.0 if previous_loss is None else loss_value - previous_loss
@@ -253,6 +314,8 @@ def train_language_model(
         history["gradient_clip_triggered"].append(clip_triggered)
         history["loss_step_delta"].append(loss_step_delta)
         history["learning_rate"].append(current_lr)
+        history["loss_scale"].append(loss_scaler.scale if loss_scaler is not None else 1.0)
+        history["step_skipped"].append(found_inf)
 
         if step % eval_interval == 0:
             bits_per_byte = evaluate_bits_per_byte(

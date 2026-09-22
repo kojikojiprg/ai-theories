@@ -686,6 +686,78 @@ def compute_key_value_cache_memory_bytes(
     )
 
 
+def compute_underflow_ratio(tensor: Tensor, dtype: torch.dtype) -> float:
+    """非ゼロ要素のうち、指定した形式へのキャストで 0 になる要素の比率を計算する(011)。
+
+    FP16(1・5・10)のように表現範囲(dynamic range)が狭い形式へキャストすると、
+    最小非正規数(subnormal)を下回る値が 0 に丸められる(アンダーフロー、underflow)。
+    元のテンソルで厳密に 0 だった要素は「新たにアンダーフローした」わけではないため、
+    分母から除外する(``compute_exact_zero_ratio`` と役割を分ける)。
+
+    Args:
+        tensor: 元のテンソル(任意の浮動小数点 dtype)。
+        dtype: キャスト先の浮動小数点 dtype(``torch.float16``・``torch.bfloat16`` など)。
+
+    Returns:
+        アンダーフロー率(0 以上 1 以下)。非ゼロ要素が 1 つも無い場合は 0.0。
+    """
+    nonzero = tensor[tensor != 0]
+    if nonzero.numel() == 0:
+        return 0.0
+    became_zero = nonzero.to(dtype) == 0
+    return became_zero.float().mean().item()
+
+
+def compute_relative_rounding_error(
+    tensor: Tensor, dtype: torch.dtype, eps: float = 1e-30
+) -> Tensor:
+    """指定した形式へのキャストのラウンドトリップによる相対誤差を要素ごとに計算する(011)。
+
+    ``tensor`` を ``dtype`` へキャストしたうえで元の dtype へキャストし直し
+    (ラウンドトリップ)、元の値との差の絶対値を元の値の絶対値で正規化する。
+
+    .. math::
+
+        e = \\frac{|\\mathrm{roundtrip}(x) - x|}{|x| + \\epsilon}
+
+    値が 0 に近いほど相対誤差の分母が不安定になるため、``eps`` を加えて 0 除算を防ぐ
+    (``eps`` は入力の典型的なスケールより十分小さい値を渡すこと)。戻り値は
+    ``tensor`` と同じ形状の要素ごとの相対誤差であり、値の大きさに対する相対丸め誤差の
+    曲線(実験 A)を作る際は、呼び出し側で値の大きさ別に平均するなど適宜集計する。
+
+    Args:
+        tensor: 元のテンソル(任意の浮動小数点 dtype)。
+        dtype: ラウンドトリップに使うキャスト先の浮動小数点 dtype。
+        eps: 0 除算を防ぐための微小定数。
+
+    Returns:
+        ``tensor`` と同じ形状の要素ごとの相対誤差(``tensor`` と同じ dtype)。
+    """
+    roundtrip = tensor.to(dtype).to(tensor.dtype)
+    absolute_error = (roundtrip - tensor).abs()
+    return absolute_error / (tensor.abs() + eps)
+
+
+def compute_exact_zero_ratio(tensor: Tensor) -> float:
+    """テンソル内の厳密な 0 の比率を計算する(011)。
+
+    ``compute_underflow_ratio`` が測る「非ゼロからキャストによって 0 になった比率」
+    とは異なり、元のテンソル自体に既に含まれる厳密な 0(例えば ReLU 通過後の値、
+    または既にアンダーフローした値)の比率を測る。実験 B の診断量として、FP16
+    キャスト後のテンソルに対して呼び出すことで「キャスト前から 0 だった要素」と
+    「キャストで新たに 0 になった要素」を合わせた全体の 0 の比率を確認する用途を想定する。
+
+    Args:
+        tensor: 対象のテンソル。
+
+    Returns:
+        厳密な 0 の比率(0 以上 1 以下)。``tensor`` が空の場合は 0.0。
+    """
+    if tensor.numel() == 0:
+        return 0.0
+    return (tensor == 0).float().mean().item()
+
+
 def compute_arithmetic_intensity(flops: float, bytes_moved: float) -> float:
     """演算強度(arithmetic intensity、FLOPs / バイト)を計算する(010)。
 
