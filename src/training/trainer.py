@@ -23,6 +23,12 @@ unscale -> 非有限値の検出 -> unscale 後の勾配に gradient clipping ->
 の指定の有無によらず、**クリッピング適用前(ただし loss scaling の unscale 後)の
 値を常に記録する**(007 2-3 節、011 でも同じ方針を踏襲)。
 
+``evaluate_at_final_step`` 引数は、008 の検証 bits-per-byte の記録で判明した問題への
+対処として追加した。``eval_interval`` が ``num_steps`` を割り切らない場合、途中の評価の
+最後は最終ステップと一致しない(008 では 2181 ステップの学習で評価の最後が 2000 ステップ
+だった)。``True`` を渡すと最終ステップでも評価し、``eval_bits_per_byte`` の末尾が必ず
+学習を終えた重みの値になる。既定値 ``False`` では 006〜013 と完全に同一の挙動になる。
+
 記号 / Notation:
     B : 訓練バッチサイズ
     S : 系列長(sequence length)
@@ -131,6 +137,7 @@ def train_language_model(
     gradient_clip_threshold: float | None = None,
     autocast_dtype: torch.dtype | None = None,
     loss_scaler: object | None = None,
+    evaluate_at_final_step: bool = False,
 ) -> dict[str, list[float]]:
     """Adam・固定学習率・fp32 の学習ループ(007 で AdamW・学習率スケジュール・
     gradient clipping に対応、後方互換性あり)。
@@ -183,6 +190,12 @@ def train_language_model(
             ``StaticLossScaler`` / ``DynamicLossScaler``、``scale_loss()``・
             ``unscale_gradients()``・``update()`` を持つ)。``None``(既定値)の
             場合は損失スケーリングを行わない(011 で追加)。
+        evaluate_at_final_step: ``True`` の場合、``step % eval_interval == 0`` の
+            ステップに加えて、最終ステップ(``step == num_steps``)でも検証する
+            (同じステップで 2 回評価することはない)。``False``(既定値)の場合は
+            ``step % eval_interval == 0`` のステップでのみ検証する(006〜013 と完全に
+            同一の挙動)。``eval_interval`` が ``num_steps`` を割り切らないとき、
+            ``False`` では ``eval_bits_per_byte`` の末尾が学習途中の値になる点に注意する。
 
     Returns:
         以下のキーを持つ履歴の辞書:
@@ -211,7 +224,8 @@ def train_language_model(
         - ``"step_skipped"``: ステップごとに、unscale 後の勾配に非有限値
           (NaN または Inf)が検出され optimizer の更新をスキップしたかを示す bool。
           ``loss_scaler`` が ``None`` の場合は常に ``False``。
-        - ``"eval_step"``: 検証を行ったステップ番号のリスト。
+        - ``"eval_step"``: 検証を行ったステップ番号のリスト(``evaluate_at_final_step``
+          が ``False`` の場合、末尾が ``num_steps`` とは限らない)。
         - ``"eval_bits_per_byte"``: ``eval_step`` に対応する検証 bits-per-byte
           (評価は常に fp32 で行う、``autocast_dtype`` の指定によらない)。
     """
@@ -317,7 +331,7 @@ def train_language_model(
         history["loss_scale"].append(loss_scaler.scale if loss_scaler is not None else 1.0)
         history["step_skipped"].append(found_inf)
 
-        if step % eval_interval == 0:
+        if step % eval_interval == 0 or (evaluate_at_final_step and step == num_steps):
             bits_per_byte = evaluate_bits_per_byte(
                 model, evaluation_windows, evaluation_mask, total_eval_bytes, device
             )
