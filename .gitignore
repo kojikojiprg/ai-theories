@@ -1,5 +1,7 @@
 .DS_Store
 logs/
+# 009 の本番実行が書き出す作業用の学習グリッドの生データ(判定の記録はセル出力にある)
+theories/02_pretraining/009_grid_results.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
