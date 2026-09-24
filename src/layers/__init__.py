@@ -8,6 +8,12 @@ from src.layers.attention import (
     scaled_dot_product_attention,
 )
 from src.layers.feedforward import FeedForwardNetwork, SwiGLUFeedForwardNetwork
+from src.layers.flash_attention import (
+    FlashAttentionFunction,
+    count_block_pairs,
+    flash_attention_backward,
+    flash_attention_forward,
+)
 from src.layers.lora import LoRALinear, apply_lora, compute_lora_parameter_count
 from src.layers.normalization import LayerNormalization, RMSNorm
 from src.layers.positional_encoding import (
@@ -28,6 +34,7 @@ __all__ = [
     "DecoderBlock",
     "EncoderBlock",
     "FeedForwardNetwork",
+    "FlashAttentionFunction",
     "LayerNormalization",
     "LearnedAbsolutePositionalEmbedding",
     "LoRALinear",
@@ -41,8 +48,11 @@ __all__ = [
     "T5RelativePositionBias",
     "apply_lora",
     "compute_lora_parameter_count",
+    "count_block_pairs",
     "create_causal_mask",
     "create_padding_mask",
+    "flash_attention_backward",
+    "flash_attention_forward",
     "gelu_exact",
     "gelu_tanh_approximation",
     "scaled_dot_product_attention",
