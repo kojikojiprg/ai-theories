@@ -35,6 +35,7 @@ ai-theories/
 │   ├── training/
 │   ├── generation/
 │   ├── scaling/
+│   ├── quantization/
 │   ├── data/
 │   └── utils/
 └── scripts/                 # 特定のトピック・アプリに紐付かないリポジトリ運用スクリプト

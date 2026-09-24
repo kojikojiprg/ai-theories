@@ -89,6 +89,11 @@ class LoRALinear(nn.Module):
             p.requires_grad_(False)
 
         reference = next(self.base_layer.parameters(), None)
+        if reference is None:
+            # ベース層がパラメータを持たない場合(013 の QuantizedLinear のように、凍結した
+            # 重みを buffer として保持する層)は、浮動小数点の buffer から device・dtype を
+            # 決める。パラメータを持つベース層(nn.Linear など)の挙動は 012 と同一。
+            reference = next((b for b in self.base_layer.buffers() if b.is_floating_point()), None)
         factory = {}
         if reference is not None and reference.is_floating_point():
             factory = {"device": reference.device, "dtype": reference.dtype}

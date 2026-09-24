@@ -782,3 +782,164 @@ def compute_arithmetic_intensity(flops: float, bytes_moved: float) -> float:
         演算強度(FLOPs / バイト)。
     """
     return flops / bytes_moved
+
+
+def compute_excess_kurtosis(values: Tensor | np.ndarray) -> float:
+    """尖度(excess kurtosis)m_4 / m_2^2 - 3 を返す(013)。
+
+    m_k は平均まわりの k 次の標本モーメント(母集団の定義、偏りの補正はしない)。正規分布では 0、
+    ラプラス分布では 3、一様分布では -1.2 になる。FP64 で計算する。
+    """
+    x = np.asarray(
+        values.detach().cpu().double().numpy() if isinstance(values, Tensor) else values,
+        dtype=np.float64,
+    ).ravel()
+    centered = x - x.mean()
+    second = float(np.mean(centered**2))
+    fourth = float(np.mean(centered**4))
+    return fourth / second**2 - 3.0
+
+
+def _average_ranks(values: np.ndarray) -> np.ndarray:
+    """同順位に平均順位を割り当てた順位(1 始まり)を返す。"""
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.empty(len(values), dtype=np.float64)
+    sorted_values = values[order]
+    start = 0
+    while start < len(values):
+        end = start
+        while end + 1 < len(values) and sorted_values[end + 1] == sorted_values[start]:
+            end += 1
+        ranks[order[start : end + 1]] = 0.5 * (start + end) + 1.0
+        start = end + 1
+    return ranks
+
+
+def compute_spearman_correlation(x: Sequence[float], y: Sequence[float]) -> float:
+    """Spearman の順位相関係数(同順位は平均順位、013)。
+
+    順位の分散が 0 の場合(全要素が同順位)は定義できないため ``nan`` を返す。
+    """
+    rank_x = _average_ranks(np.asarray(x, dtype=np.float64))
+    rank_y = _average_ranks(np.asarray(y, dtype=np.float64))
+    rank_x -= rank_x.mean()
+    rank_y -= rank_y.mean()
+    denominator = math.sqrt(float(np.sum(rank_x**2)) * float(np.sum(rank_y**2)))
+    if denominator == 0.0:
+        return float("nan")
+    return float(np.sum(rank_x * rank_y)) / denominator
+
+
+def compute_stratified_spearman_correlation(
+    x: Sequence[float],
+    y: Sequence[float],
+    groups: Sequence[object],
+    undefined_value: float | None = None,
+) -> float:
+    """層別 Spearman 相関: 群ごとの Spearman 相関を群の大きさで重み付けして平均する(013)。
+
+    交絡因子(013 実験 B では行列の形状)で群に分け、各群の内部でのみ順位相関を取ることで、
+    群の間の違いに由来する見かけの相関を除く。
+
+    Args:
+        x, y: 同じ長さの系列。
+        groups: 各要素の群のラベル。
+        undefined_value: 群の中で順位の分散が 0 になり相関が定義できない場合に使う値。
+            ``None`` の場合は ``nan`` を返す(平均も ``nan`` になる)。
+
+    Returns:
+        sum_g n_g rho_g / sum_g n_g(n_g は群 g の要素数、rho_g は群 g の Spearman 相関)。
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    labels = list(groups)
+    total, weight = 0.0, 0
+    for label in dict.fromkeys(labels):
+        mask = np.array([g == label for g in labels])
+        rho = compute_spearman_correlation(x[mask], y[mask])
+        if math.isnan(rho):
+            if undefined_value is None:
+                return float("nan")
+            rho = undefined_value
+        total += int(mask.sum()) * rho
+        weight += int(mask.sum())
+    return total / weight
+
+
+def bootstrap_stratified_spearman_correlation(
+    x: Sequence[float],
+    y: Sequence[float],
+    groups: Sequence[object],
+    num_resamples: int,
+    seed: int,
+    undefined_value: float = 0.0,
+) -> np.ndarray:
+    """層内で要素を復元抽出する(群の大きさは保つ)ブートストラップで、層別 Spearman 相関の
+    分布を返す(013)。
+
+    各反復で、群ごとに同じ群の要素から群の大きさと同数を復元抽出し、
+    ``compute_stratified_spearman_correlation`` を計算する。再標本で群内の順位の分散が 0 に
+    なった群は ``undefined_value``(既定 0、帰無仮説の側に寄せる保守的な扱い)を相関とする。
+
+    Returns:
+        形状 ``(num_resamples,)`` の配列。
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    labels = list(groups)
+    rng = np.random.default_rng(seed)
+    members = {
+        label: np.array([i for i, g in enumerate(labels) if g == label])
+        for label in dict.fromkeys(labels)
+    }
+    total_size = len(labels)
+    samples = np.empty(num_resamples, dtype=np.float64)
+    for r in range(num_resamples):
+        total = 0.0
+        for index in members.values():
+            drawn = rng.choice(index, size=len(index), replace=True)
+            rho = compute_spearman_correlation(x[drawn], y[drawn])
+            total += len(index) * (undefined_value if math.isnan(rho) else rho)
+        samples[r] = total / total_size
+    return samples
+
+
+def paired_bootstrap_ratio_of_sums(
+    numerators: np.ndarray,
+    denominators: np.ndarray,
+    num_resamples: int,
+    seed: int,
+    chunk_size: int = 500,
+) -> np.ndarray:
+    """単位(評価窓など)を復元抽出する対応付きブートストラップで、比 sum(numerator) /
+    sum(denominator) の分布を返す(013)。
+
+    全条件(``numerators`` の各行)に **同じ再標本** を使う(対応付き)。条件間の差を
+    反復ごとに取れば、共通の単位のばらつき(窓ごとの難しさ)が相殺された差の分布になる。
+    復元抽出は、各単位の抽出回数を多項分布 Multinomial(n, 1/n) から引くことで行う
+    (n 個の添字を一様に復元抽出するのと同じ分布)。
+
+    Args:
+        numerators: 形状 ``(k, n)``(k 条件 × n 単位)または ``(n,)``。
+        denominators: 形状 ``(n,)``(全条件で共通、例: 窓ごとの UTF-8 バイト数)。
+        num_resamples: 反復回数。
+        seed: 乱数シード。
+
+    Returns:
+        形状 ``(num_resamples, k)``(``numerators`` が 1 次元なら ``(num_resamples,)``)。
+    """
+    numerators = np.asarray(numerators, dtype=np.float64)
+    squeeze = numerators.ndim == 1
+    numerators = np.atleast_2d(numerators)
+    denominators = np.asarray(denominators, dtype=np.float64)
+    n = denominators.shape[0]
+    if numerators.shape[1] != n:
+        raise ValueError("numerators と denominators の単位数が一致しない")
+    rng = np.random.default_rng(seed)
+    probabilities = np.full(n, 1.0 / n)
+    out = np.empty((num_resamples, numerators.shape[0]), dtype=np.float64)
+    for start in range(0, num_resamples, chunk_size):
+        size = min(chunk_size, num_resamples - start)
+        counts = rng.multinomial(n, probabilities, size=size).astype(np.float64)  # (size, n)
+        out[start : start + size] = (counts @ numerators.T) / (counts @ denominators)[:, None]
+    return out[:, 0] if squeeze else out
