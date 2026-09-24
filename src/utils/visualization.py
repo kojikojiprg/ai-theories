@@ -483,6 +483,55 @@ def plot_grouped_bar(
     return ax
 
 
+def plot_stacked_bar(
+    categories: list[str],
+    values_by_segment: dict[str, list[float]],
+    title: str = "",
+    ylabel: str = "Value",
+    xlabel: str = "",
+    ax: Axes | None = None,
+) -> Axes:
+    """カテゴリ(x 軸)ごとに、複数のセグメントの値を積み上げた棒グラフを描画する。
+
+    メモリ使用量の内訳(dtype × 形状カテゴリなど)のように、1 本の棒の中を
+    さらに複数の部分に分けて示したい場合に使う(011 の実験 G、保存テンソルの
+    バイト数を dtype × 形状カテゴリで積み上げる)。`plot_grouped_bar`が系列を
+    横に並べるのに対し、本関数は系列(セグメント)を縦に積み上げる点が異なる。
+
+    Args:
+        categories: x 軸のカテゴリ名のリスト。
+        values_by_segment: ``{セグメント名: カテゴリごとの値のリスト}`` の辞書。
+            全セグメントでカテゴリの数(リストの長さ)が揃っている必要がある。
+            辞書の順序がそのまま積み上げの順序(下から上)になる。
+        title: 図のタイトル。
+        ylabel: 縦軸ラベル。
+        xlabel: 横軸ラベル。
+        ax: 描画先の Axes。None なら新規作成する。
+
+    Returns:
+        描画に使った Axes。
+    """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(7.0, 4.5))
+
+    x = np.arange(len(categories))
+    bottom = np.zeros(len(categories))
+    for name, values in values_by_segment.items():
+        values_arr = np.asarray(values, dtype=float)
+        ax.bar(x, values_arr, bottom=bottom, label=name, zorder=2)
+        bottom += values_arr
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, rotation=20, ha="right")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    if title:
+        ax.set_title(title)
+    ax.grid(alpha=0.3, axis="y")
+    ax.legend(fontsize=8)
+    return ax
+
+
 def plot_gradient_norm_trace(
     gradient_norms: Sequence[float],
     clip_threshold: float | None = None,
