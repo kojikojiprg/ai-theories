@@ -436,6 +436,50 @@ def load_wikipedia_corpus(
     return text, metadata
 
 
+def load_wikipedia_articles(
+    language: str,
+    cache_dir: str | Path,
+    indices: list[int],
+    manifest_path: str | Path | None = None,
+) -> list[str]:
+    """マニフェストの指定した番号の記事を 1 記事ずつ取得して返す(015)。
+
+    ``load_wikipedia_corpus()`` は記事を ``"\n"`` で連結した 1 つの文字列を返し、記事の中にも
+    改行があるため、連結後の文字列からは記事の境界を復元できない。本関数は記事の境界が
+    必要な場合(015 の、評価窓を 1 つの記事の中に収める実験など)に、記事を個別に取得する。
+
+    記事単位のキャッシュは ``load_wikipedia_corpus()`` と同じ場所・同じファイル名
+    (``cache_dir/wikipedia_<language>_articles/<番号 3 桁>_<リビジョン ID>.txt``)を使うので、
+    どちらの関数で取得した記事も相互に再利用される。取得に失敗した記事は例外をそのまま
+    送出する(呼び出し側が境界の復元に使うため、欠けた記事を黙って飛ばさない)。
+
+    Args:
+        language: Wikipedia の言語コード。
+        cache_dir: キャッシュ先ディレクトリ(``load_wikipedia_corpus()`` と同じもの)。
+        indices: マニフェストの中での記事の番号(0 始まり)のリスト。
+        manifest_path: マニフェストへのパス。``None`` の場合は
+            ``<language>_006_pretraining.json``。
+
+    Returns:
+        ``indices`` の順に並べた記事本文(平文)のリスト。
+    """
+    if manifest_path is None:
+        manifest_path = _WIKIPEDIA_MANIFEST_DIR / f"{language}_006_pretraining.json"
+    items = list(json.loads(Path(manifest_path).read_text(encoding="utf-8")).items())
+    articles_dir = Path(cache_dir) / f"wikipedia_{language}_articles"
+    articles_dir.mkdir(parents=True, exist_ok=True)
+    texts = []
+    for i in indices:
+        title, revid = items[i]
+        article_path = articles_dir / f"{i:03d}_{revid}.txt"
+        if not article_path.exists():
+            article_path.write_text(
+                _fetch_wikipedia_revision_plaintext(language, title, revid), encoding="utf-8"
+            )
+        texts.append(article_path.read_text(encoding="utf-8"))
+    return texts
+
+
 def load_japanese_corpus(cache_dir: str | Path) -> str:
     """日本語コーパスを取得してキャッシュする(005 トークナイザの日本語ドメイン用)。
 

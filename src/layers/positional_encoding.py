@@ -14,6 +14,10 @@ Transformer Block(Multi-Head Attention + Feed-Forward Network)は入力の並び
 - Attention スコアにバイアスを加える方式(``AttentionScoreBias`` のサブクラス):
   ``ShawRelativePositionBias``、``T5RelativePositionBias``、``ALiBiPositionBias``
   (いずれも 003 で追加)
+- RoPE の周波数の変換(長文脈拡張、015 で追加。``RotaryFrequencyScaling`` のサブクラス):
+  ``PositionInterpolation``、``NTKAwareScaling``、``NTKByPartsScaling``、``YaRNScaling``、
+  ``DynamicScaling``。``RotaryPositionEmbedding`` の ``frequency_scaling`` 引数に注入する
+  (詳細は`theories/03_efficient_training/015_long_context_extension.ipynb`を参照)
 
 記号 / Notation:
     pos, m, n : 系列中の位置(0-indexed)。m は Query 側、n は Key 側を表す。
@@ -181,6 +185,205 @@ class AttentionScoreBias(nn.Module, ABC):
         raise NotImplementedError
 
 
+def compute_rope_inverse_frequencies(d_k: int, base: float) -> Tensor:
+    """RoPE の各部分空間の角周波数 theta_i = base^(-2i / d_k)(i = 0, ..., d_k/2 - 1)を返す。
+
+    ``RotaryPositionEmbedding`` の既定の計算(003)と同じ式・同じ dtype(float32)で計算する
+    (015 で周波数の変換を注入するために関数として切り出した。既定の挙動は変わらない)。
+
+    Args:
+        d_k: ヘッドあたりの次元(偶数)。
+        base: 角周波数の基数 b。
+
+    Returns:
+        形状 ``(d_k / 2,)`` の float32 テンソル。
+    """
+    return base ** (-torch.arange(0, d_k, 2, dtype=torch.float32) / d_k)
+
+
+def compute_ntk_aware_base(base: float, scale: float, d_k: int) -> float:
+    """NTK-aware スケーリングの底 b' = b * s^(d_k / (d_k - 2))(Peng et al., ICLR 2024 の式 16)。
+
+    最も低い周波数の部分空間(i = d_k/2 - 1)の角周波数がちょうど 1/s 倍(位置補間と同じ)に
+    なり、最も高い周波数(i = 0、theta_0 = 1)は変わらないように底を選ぶ。
+    """
+    return base * scale ** (d_k / (d_k - 2))
+
+
+def compute_yarn_ramp(ratio: Tensor, alpha: float, beta: float) -> Tensor:
+    """NTK-by-parts のランプ関数 gamma(r)(Peng et al., ICLR 2024 の式 18)。
+
+    r < alpha で 0(完全に補間)、r > beta で 1(補間しない)、その間は線形に 0 から 1。
+    """
+    return ((ratio - alpha) / (beta - alpha)).clamp(0.0, 1.0)
+
+
+def compute_yarn_attention_factor(scale: float) -> float:
+    """YaRN の温度の補正 sqrt(1/t) = 0.1 ln(s) + 1(Peng et al., ICLR 2024 の式 22)。
+
+    cos・sin にこの値を掛けると Query・Key の両方がこの倍率になり、Attention の
+    logits は 1/t 倍になる。
+    """
+    return 0.1 * math.log(scale) + 1.0
+
+
+class RotaryFrequencyScaling(ABC):
+    """RoPE の角周波数の変換(長文脈拡張の手法、015)のインターフェース。
+
+    学習時の文脈長 L を超える系列に RoPE を適用するために、部分空間ごとの角周波数
+    theta_i を theta'_i に変え、必要なら cos・sin に倍率(Attention の温度の補正)を掛ける。
+    位置補間(位置 m を m/s にする)は、角周波数を theta_i / s にするのと同じ回転角を
+    与えるため、すべての手法を「周波数の変換」として同じ形で表せる。
+
+    記号 / Notation:
+        s : 拡張の倍率(scale factor)
+        L : 学習時の文脈長(original_max_position)
+        l : 現在の系列長(dynamic scaling で使う)
+    """
+
+    #: True のとき、周波数が現在の系列長 l に依存する(dynamic scaling)。
+    is_dynamic: bool = False
+
+    def is_identity(self, sequence_length: int) -> bool:
+        """系列長 l で変換が恒等写像になる(周波数も倍率も変えない)とき True を返す。
+
+        True のとき、``RotaryPositionEmbedding`` は変換を注入しない場合と同じ経路
+        (事前計算した cos / sin のキャッシュ)を使うので、出力はスケーリングなしと完全に一致する。
+        """
+        return False
+
+    @abstractmethod
+    def frequencies_and_factor(
+        self, inverse_frequencies: Tensor, d_k: int, base: float, sequence_length: int
+    ) -> tuple[Tensor, float]:
+        """変換後の角周波数と、cos・sin に掛ける倍率を返す。
+
+        Args:
+            inverse_frequencies: 変換前の角周波数 theta_i(形状 ``(d_k/2,)``)。
+            d_k: ヘッドあたりの次元。
+            base: 変換前の底 b。
+            sequence_length: 現在の系列長 l(``is_dynamic`` が True の手法のみが使う)。
+
+        Returns:
+            (theta', factor) のタプル。
+        """
+        raise NotImplementedError
+
+
+class PositionInterpolation(RotaryFrequencyScaling):
+    """位置補間(Position Interpolation、Chen et al., 2023)。
+
+    位置 m を m/s に縮める。回転角 (m/s) theta_i = m (theta_i / s) なので、全部分空間の
+    角周波数を一様に 1/s 倍にするのと同じである。
+    """
+
+    def __init__(self, scale: float) -> None:
+        self.scale = float(scale)
+
+    def frequencies_and_factor(self, inverse_frequencies, d_k, base, sequence_length):
+        return inverse_frequencies / self.scale, 1.0
+
+
+class NTKAwareScaling(RotaryFrequencyScaling):
+    """NTK-aware スケーリング(bloc97, 2023。定式化は Peng et al., ICLR 2024 の 3.1 節)。
+
+    底を b' = b s^(d_k/(d_k-2)) に変える(``compute_ntk_aware_base``)。高周波の部分空間は
+    ほぼ変えず、低周波の部分空間ほど強く補間する。底の調整(Adjusted Base Frequency、
+    Xiong et al., NAACL 2024)と同じ形の変換を、推論時に使うものである。
+    """
+
+    def __init__(self, scale: float) -> None:
+        self.scale = float(scale)
+
+    def frequencies_and_factor(self, inverse_frequencies, d_k, base, sequence_length):
+        new_base = compute_ntk_aware_base(base, self.scale, d_k)
+        return compute_rope_inverse_frequencies(d_k, new_base).to(inverse_frequencies.device), 1.0
+
+
+class NTKByPartsScaling(RotaryFrequencyScaling):
+    """NTK-by-parts(Peng et al., ICLR 2024 の 3.2 節、式 17〜20)。
+
+    部分空間 i の波長 lambda_i = 2 pi / theta_i と学習時の文脈長 L の比 r_i = L / lambda_i
+    から、theta'_i = (1 - gamma(r_i)) theta_i / s + gamma(r_i) theta_i とする
+    (``compute_yarn_ramp``)。波長が L より長い(r_i < alpha)部分空間は位置補間と同じく
+    1/s 倍にし、波長が十分短い(r_i > beta)部分空間は変えない。
+
+    Args:
+        scale: 拡張の倍率 s。
+        original_max_position: 学習時の文脈長 L。
+        alpha, beta: ランプ関数の境界(原論文が Llama 系で推奨する値 1・32 を既定値とする)。
+    """
+
+    def __init__(
+        self, scale: float, original_max_position: int, alpha: float = 1.0, beta: float = 32.0
+    ) -> None:
+        self.scale = float(scale)
+        self.original_max_position = original_max_position
+        self.alpha = alpha
+        self.beta = beta
+
+    def frequencies_and_factor(self, inverse_frequencies, d_k, base, sequence_length):
+        wavelengths = 2 * math.pi / inverse_frequencies
+        ratio = self.original_max_position / wavelengths
+        ramp = compute_yarn_ramp(ratio, self.alpha, self.beta)
+        return (1 - ramp) * inverse_frequencies / self.scale + ramp * inverse_frequencies, 1.0
+
+
+class YaRNScaling(NTKByPartsScaling):
+    """YaRN(Peng et al., ICLR 2024 の 3.4 節)= NTK-by-parts + Attention の温度の補正。
+
+    周波数は ``NTKByPartsScaling`` と同じで、cos・sin に sqrt(1/t) = 0.1 ln(s) + 1 を掛ける
+    (``compute_yarn_attention_factor``)。Query・Key の両方がこの倍率になるので、
+    Attention の logits は 1/t 倍になる(softmax(q^T k / (t sqrt(d_k))))。
+    """
+
+    def frequencies_and_factor(self, inverse_frequencies, d_k, base, sequence_length):
+        frequencies, _ = super().frequencies_and_factor(
+            inverse_frequencies, d_k, base, sequence_length
+        )
+        return frequencies, compute_yarn_attention_factor(self.scale)
+
+
+class DynamicScaling(RotaryFrequencyScaling):
+    """Dynamic scaling(Peng et al., ICLR 2024 の 3.3 節)。
+
+    順伝播のたびに、現在の系列長 l から s = max(1, l / L) を決め、``scaling_factory(s)``
+    で作った静的な手法を適用する。**s = 1(l <= L)のときは変換を一切行わず、変換前の
+    角周波数と倍率 1 をそのまま返す。** ``is_identity`` も True を返すので、
+    ``RotaryPositionEmbedding`` はスケーリングなしと同じ経路(cos・sin のキャッシュ)を通り、
+    出力はスケーリングなしと完全に一致する。
+
+    **KV キャッシュとは併用しない。** 系列長が伸びると s が変わり、すべての位置の回転角が
+    変わるが、キャッシュ済みの Key は古い s で回転済みのまま残るためである(原論文は、
+    RoPE を適用する前の Key をキャッシュすべきだと指摘している)。
+
+    Args:
+        scaling_factory: 倍率 s を受け取り、静的な ``RotaryFrequencyScaling`` を返す callable
+            (例: ``lambda s: YaRNScaling(s, L)``)。
+        original_max_position: 学習時の文脈長 L。
+    """
+
+    is_dynamic = True
+
+    def __init__(self, scaling_factory, original_max_position: int) -> None:
+        self.scaling_factory = scaling_factory
+        self.original_max_position = original_max_position
+
+    def scale_for_length(self, sequence_length: int) -> float:
+        return max(1.0, sequence_length / self.original_max_position)
+
+    def is_identity(self, sequence_length: int) -> bool:
+        return self.scale_for_length(sequence_length) == 1.0
+
+    def frequencies_and_factor(self, inverse_frequencies, d_k, base, sequence_length):
+        scale = self.scale_for_length(sequence_length)
+        if scale == 1.0:
+            return inverse_frequencies, 1.0
+        return self.scaling_factory(scale).frequencies_and_factor(
+            inverse_frequencies, d_k, base, sequence_length
+        )
+
+
 class RotaryPositionEmbedding(QueryKeyPositionalTransform):
     """RoPE(Rotary Position Embedding、Su et al., Neurocomputing 2024)。
 
@@ -205,19 +408,34 @@ class RotaryPositionEmbedding(QueryKeyPositionalTransform):
         d_k: ヘッドあたりの次元。偶数である必要がある。
         base: 角周波数の基数。原論文の既定値である 10000 を用いる。base を
             変更すると部分空間ごとの回転速度の分布が変わり、これは長文脈拡張
-            (トピック 014)のスケーリング手法群の出発点になる。
+            (トピック 015)のスケーリング手法群の出発点になる。
         max_position: cos / sin を事前計算しておく最大位置。これを超える位置が
             要求された場合は自動的に再計算して拡張する。
+        frequency_scaling: 角周波数の変換(``RotaryFrequencyScaling`` のサブクラス、
+            015 で追加)。``None``(既定値)の場合は変換を行わず、003〜014 と完全に同一の
+            計算になる(事前計算した cos / sin のキャッシュを使う)。指定した場合は、
+            ``apply`` のたびに現在の系列長 l = max(positions) + 1 から変換後の角周波数と
+            倍率を求め、要求された位置の cos / sin を直接計算する(dynamic scaling では
+            周波数が l に依存するため、キャッシュを使わない)。ただし、その系列長で変換が
+            恒等写像になる場合(``is_identity``、dynamic scaling の l <= L)は、``None`` と
+            同じ経路を通る。
     """
 
-    def __init__(self, d_k: int, base: float = 10000.0, max_position: int = 2048) -> None:
+    def __init__(
+        self,
+        d_k: int,
+        base: float = 10000.0,
+        max_position: int = 2048,
+        frequency_scaling: RotaryFrequencyScaling | None = None,
+    ) -> None:
         super().__init__()
         if d_k % 2 != 0:
             raise ValueError(f"d_k は偶数である必要がある: {d_k}")
         self.d_k = d_k
         self.base = base
+        self.frequency_scaling = frequency_scaling
 
-        inv_freq = base ** (-torch.arange(0, d_k, 2, dtype=torch.float32) / d_k)  # (d_k/2,)
+        inv_freq = compute_rope_inverse_frequencies(d_k, base)  # (d_k/2,)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.max_position = 0
         self._build_cache(max_position)
@@ -242,6 +460,23 @@ class RotaryPositionEmbedding(QueryKeyPositionalTransform):
         x1, x2 = x.chunk(2, dim=-1)
         return torch.cat([-x2, x1], dim=-1)
 
+    def rotation_frequencies(self, sequence_length: int) -> tuple[Tensor, float]:
+        """系列長 l のときに実際に使う角周波数と cos / sin の倍率を返す(015)。
+
+        ``frequency_scaling`` が ``None`` の場合は (theta_i, 1.0)。
+        """
+        if self.frequency_scaling is None:
+            return self.inv_freq, 1.0
+        return self.frequency_scaling.frequencies_and_factor(
+            self.inv_freq, self.d_k, self.base, sequence_length
+        )
+
+    def _scaled_cos_sin(self, positions: Tensor, sequence_length: int) -> tuple[Tensor, Tensor]:
+        inv_freq, factor = self.rotation_frequencies(sequence_length)
+        freqs = torch.outer(positions.to(torch.float32), inv_freq.to(positions.device))
+        emb = torch.cat([freqs, freqs], dim=-1)  # (S, d_k)
+        return emb.cos() * factor, emb.sin() * factor
+
     def apply(
         self, query: Tensor, key: Tensor, positions: Tensor | None = None
     ) -> tuple[Tensor, Tensor]:
@@ -250,6 +485,16 @@ class RotaryPositionEmbedding(QueryKeyPositionalTransform):
             positions = torch.arange(seq_len, device=query.device)
 
         max_pos = int(positions.max().item()) + 1
+        if self.frequency_scaling is not None and not self.frequency_scaling.is_identity(max_pos):
+            # 015: 周波数の変換を注入した場合。系列長 l = max(positions) + 1 から周波数を決め、
+            # 要求された位置の cos / sin を直接計算する(既定の経路のキャッシュは使わない)。
+            cos, sin = self._scaled_cos_sin(positions, max_pos)
+            cos = cos.to(dtype=query.dtype, device=query.device)
+            sin = sin.to(dtype=query.dtype, device=query.device)
+            q = query * cos + self._rotate_half(query) * sin
+            k = key * cos + self._rotate_half(key) * sin
+            return q, k
+
         if max_pos > self.max_position:
             self._build_cache(max_pos)
 
