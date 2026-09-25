@@ -122,3 +122,4 @@ The theories are organized by category, but I recommend **studying them in the n
 6. 実装
 7. 実験(Google Colab 無料枠 GPU)
 8. 結果・考察
+9. 付録 A. 判定の一次情報(判定を後から再計算するための記録。読み飛ばしてよい。016 以降のノートブックに置く)
