@@ -35,6 +35,19 @@ API を叩いて待つだけの処理であり、``load_wikipedia_corpus()``(``s
 既定ではアップロードを行わない(dry-run)。実際に Hugging Face Hub へアップロードする
 には``--upload``を明示的に指定し、リポジトリルートの``.env``に``HF_TOKEN``を設定して
 おくこと(``.env.example``を参照)。
+
+**記事のオフセットの追加(015)**: ``--article-offsets``を指定すると、``corpus.txt``は変えずに、
+既存の``metadata.json``に記事ごとの文字位置(``article_offsets``)を追加する処理だけを行う
+(対象は``supports_article_offsets``が真のスペック、現在は``en_006``のみ)。``corpus.txt``は
+記事を改行 1 つで連結したもので、記事の中にも改行があるため、``corpus.txt``だけからは記事の
+境界を復元できない。マニフェストの全記事を個別に取得し(記事単位のキャッシュを使うので、
+中断しても再実行時に取得済みの記事は再取得しない)、改行 1 つで連結した結果が Hub の
+``corpus.txt``と文字単位で完全に一致することを確かめてから、各記事の(マニフェストの番号、
+リビジョン ID、開始位置、終了位置)を書き込む。``--upload``を併用したときだけ``metadata.json``
+のみをアップロードし、アップロード後に Hub から取得し直して内容が一致することを確かめる。
+
+    uv run python scripts/promote_canonical_corpora.py --article-offsets --only en_006
+    uv run python scripts/promote_canonical_corpora.py --article-offsets --only en_006 --upload
 """
 
 from __future__ import annotations
@@ -53,11 +66,14 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.data.text import (  # noqa: E402
+    compute_wikipedia_article_offsets,
     load_english_wikipedia_corpus,
     load_japanese_wikipedia_corpus,
+    load_wikipedia_articles,
     load_wikipedia_corpus,
     split_train_val_text,
     upload_corpus_artifact_to_hub,
+    validate_wikipedia_article_offsets,
 )
 
 
@@ -142,6 +158,9 @@ CORPUS_SPECS = [
         # 専用のラッパー関数を追加せず language="en" を固定した partial を使う。
         "loader": functools.partial(load_wikipedia_corpus, "en"),
         "usage_note": "006(小型 GPT の事前学習)・008 の英語条件用",
+        # 015: metadata.json に記事ごとの文字位置(article_offsets)を追加する対象
+        # (--article-offsets)。015 は評価窓を 1 つの記事の中に収めるために記事の境界を使う。
+        "supports_article_offsets": True,
         # まだ Hub 上に存在しないアーティファクトのため、既存アーティファクトとの照合が
         # できない。代わりにローダの返り値をこのローカルキャッシュファイルとバイト単位で
         # 照合する(process_corpus 内で使用)。
@@ -328,6 +347,141 @@ def process_corpus(spec: dict) -> dict:
     }
 
 
+def _git_head() -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, cwd=_REPO_ROOT
+    ).stdout.strip()
+
+
+def add_article_offsets(spec: dict, upload: bool) -> Path:
+    """Hub の ``corpus.txt`` を変えずに、``metadata.json`` に記事ごとの文字位置を追加する(015)。
+
+    1. Hub から現在の ``corpus.txt`` と ``metadata.json`` を取得する(``metadata.json`` は
+       キャッシュを使わず取得し直す)。
+    2. マニフェストの全記事を ``load_wikipedia_articles()`` で個別に取得する(記事単位の
+       キャッシュを使うので中断・再開できる)。
+    3. ``compute_wikipedia_article_offsets()`` で、記事を改行 1 つで連結した結果が
+       ``corpus.txt`` と文字単位で完全に一致することを確かめながらオフセットを求め、
+       ``validate_wikipedia_article_offsets()`` で検証する。
+    4. 既存のキーを一切変えずに ``article_offsets``(と、それを計算したコミット
+       ``article_offsets_source_commit``)を加えた ``metadata.json`` をローカルに書き出す。
+    5. ``upload`` が真のときだけ ``metadata.json`` のみをアップロードし、Hub から取得し直した
+       内容がローカルに書き出した内容と一致することを確かめる。
+
+    Returns:
+        書き出した ``metadata.json`` のパス。
+    """
+    from huggingface_hub import hf_hub_download
+
+    repo_id = spec["repo_id"]
+    manifest_path = _REPO_ROOT / "src" / "data" / "wikipedia_manifests" / spec["manifest"]
+    corpus_path = hf_hub_download(repo_id=repo_id, filename="corpus.txt", repo_type="dataset")
+    corpus_text = Path(corpus_path).read_text(encoding="utf-8")
+    hub_metadata = json.loads(
+        Path(
+            hf_hub_download(
+                repo_id=repo_id, filename="metadata.json", repo_type="dataset", force_download=True
+            )
+        ).read_text(encoding="utf-8")
+    )
+    corpus_bytes = corpus_text.encode("utf-8")
+    print(
+        f"Hub の corpus.txt: {len(corpus_text):,} 文字 / {len(corpus_bytes):,} バイト、"
+        f"SHA-256={hashlib.sha256(corpus_bytes).hexdigest()}"
+    )
+    assert hub_metadata["raw_bytes"] == len(corpus_bytes), (
+        "corpus.txt のバイト数が metadata と異なる"
+    )
+    assert hub_metadata["manifest"] == spec["manifest"], "metadata.json のマニフェストが異なる"
+    if "article_offsets" in hub_metadata:
+        print(
+            "[注意] Hub の metadata.json には既に article_offsets がある。計算し直して上書きする。"
+        )
+
+    manifest_count = len(json.loads(manifest_path.read_text(encoding="utf-8")))
+    assert manifest_count == spec["manifest_article_count"]
+    t0 = time.time()
+    article_texts = []
+    for index in range(manifest_count):
+        article_texts.extend(
+            load_wikipedia_articles(spec["language"], spec["cache_dir"], [index], manifest_path)
+        )
+        if (index + 1) % 50 == 0 or index + 1 == manifest_count:
+            print(f"  記事の取得: {index + 1}/{manifest_count}({time.time() - t0:.1f}s)")
+
+    offsets = compute_wikipedia_article_offsets(corpus_text, article_texts, manifest_path)
+    validate_wikipedia_article_offsets(offsets, corpus_text, manifest_path)
+    joined = "\n".join(t for t in article_texts if t)
+    assert joined == corpus_text
+    print(
+        f"[OK] 記事 {len(offsets)} 件(マニフェスト {manifest_count} 件)を改行 1 つで連結した結果が "
+        "Hub の corpus.txt と文字単位で完全に一致した。オフセットは単調増加で重ならない"
+    )
+
+    new_metadata = {k: v for k, v in hub_metadata.items() if k not in ("article_offsets",)}
+    new_metadata["article_offsets"] = offsets
+    new_metadata["article_offsets_source_commit"] = _git_head()
+    for key, value in hub_metadata.items():
+        if key not in ("article_offsets", "article_offsets_source_commit"):
+            assert new_metadata[key] == value, f"既存のキー {key} が変わった"
+
+    artifact_dir = OUTPUT_DIR / spec["key"]
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = artifact_dir / "metadata_with_article_offsets.json"
+    metadata_path.write_text(
+        json.dumps(new_metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"metadata.json(article_offsets を追加)を書き出した: {metadata_path}")
+    print(
+        f"  既存のキー: {sorted(k for k in hub_metadata if k != 'article_offsets')}(値は変更なし)、"
+        f"追加したキー: article_offsets({len(offsets)} 件)、article_offsets_source_commit"
+    )
+
+    if not upload:
+        print(
+            "アップロードをスキップした(--upload が指定されていないため、既定は dry-run)。"
+            "metadata.json のみをアップロードするには --upload を指定し、"
+            ".env に HF_TOKEN を設定すること。"
+        )
+        return metadata_path
+
+    token = _require_hf_token()
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    commit = api.upload_file(
+        path_or_fileobj=str(metadata_path),
+        path_in_repo="metadata.json",
+        repo_id=repo_id,
+        repo_type="dataset",
+        commit_message="Add article_offsets to metadata.json (ai-theories 015)",
+    )
+    print(f"アップロードした(metadata.json のみ): {commit}")
+    # アップロード後の確認: キャッシュを使わず取得し直し、書き出した内容と一致すること
+    uploaded = json.loads(
+        Path(
+            hf_hub_download(
+                repo_id=repo_id, filename="metadata.json", repo_type="dataset", force_download=True
+            )
+        ).read_text(encoding="utf-8")
+    )
+    assert uploaded == new_metadata, (
+        "Hub から取得し直した metadata.json が書き出した内容と一致しない"
+    )
+    assert (
+        Path(
+            hf_hub_download(repo_id=repo_id, filename="corpus.txt", repo_type="dataset")
+        ).read_bytes()
+        == corpus_bytes
+    ), "corpus.txt が変わっている"
+    print(
+        "[OK] Hub から取得し直した metadata.json に article_offsets があり、"
+        "書き出した内容と完全に一致した"
+        "(corpus.txt は変わっていない)"
+    )
+    return metadata_path
+
+
 def build_dataset_card(payload: dict, spec: dict) -> str:
     """由来(マニフェスト名・記事数)・取得できなかった記事・ライセンス・バージョン管理の
     方針を含むデータセットカードを作成する。
@@ -414,6 +568,10 @@ tags:
 - `raw_bytes`: `corpus.txt`の UTF-8 バイト数({payload["raw_bytes"]:,})
 - `source_commit`: 取得時点の`ai-theories`リポジトリのコミットハッシュ
   (`{payload["source_commit"]}`)
+- `article_offsets`(一部のコーパスのみ、015 で追加): 記事ごとの
+  `{{"manifest_index", "revision_id", "start", "end"}}`。`corpus.txt[start:end]`がその記事の本文で
+  ある(記事は改行 1 つで連結されており、記事の中にも改行があるため、`corpus.txt`だけからは
+  境界を復元できない)。`article_offsets_source_commit`はそれを計算した時点のコミットハッシュ
 """
 
 
@@ -433,9 +591,30 @@ def main() -> None:
         "skip フラグと併用でき、--only で選んだキーでも skip=True なら取得・"
         "アップロードは行わない。",
     )
+    parser.add_argument(
+        "--article-offsets",
+        action="store_true",
+        help="corpus.txt を変えずに metadata.json に記事ごとの文字位置(article_offsets)を"
+        "追加する処理だけを行う(対象は supports_article_offsets が真のスペック)。"
+        "--upload を併用したときだけ metadata.json のみをアップロードする。",
+    )
     args = parser.parse_args()
 
     only_keys = set(args.only.split(",")) if args.only else None
+
+    if args.article_offsets:
+        targets = [
+            spec
+            for spec in CORPUS_SPECS
+            if spec.get("supports_article_offsets")
+            and (only_keys is None or spec["key"] in only_keys)
+        ]
+        if not targets:
+            raise SystemExit("--article-offsets の対象のスペックがない(--only を確認すること)")
+        for spec in targets:
+            print(f"=== {spec['key']}: article_offsets の追加 ===")
+            add_article_offsets(spec, upload=args.upload)
+        return
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

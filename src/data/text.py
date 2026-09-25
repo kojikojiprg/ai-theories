@@ -480,6 +480,173 @@ def load_wikipedia_articles(
     return texts
 
 
+def compute_wikipedia_article_offsets(
+    corpus_text: str, article_texts: list[str], manifest_path: str | Path
+) -> list[dict]:
+    """記事を個別に取得した本文から、連結済みコーパスの中での各記事の文字位置を求める(015)。
+
+    ``load_wikipedia_corpus()`` は本文が空でない記事を ``"\n"`` 1 つで連結する。本関数は
+    その連結を先頭から再現しながら、各記事が ``corpus_text`` の対応する位置の文字列と完全に
+    一致することを確かめ、最後に連結の全体が ``corpus_text`` と一致することを確かめる。
+    本文が空の記事は連結で飛ばされているので、オフセットにも含めない。
+
+    Args:
+        corpus_text: 連結済みのコーパス全文(Hub の ``corpus.txt``)。
+        article_texts: マニフェストの順に並べた全記事の本文(``load_wikipedia_articles()``)。
+        manifest_path: マニフェストへのパス(リビジョン ID の記録に使う)。
+
+    Returns:
+        ``{"manifest_index", "revision_id", "start", "end"}`` のリスト(コーパスの中の順)。
+        ``corpus_text[start:end]`` がその記事の本文である。
+
+    Raises:
+        ValueError: 記事の本文がコーパスの対応する位置と一致しない場合、または連結の全体が
+            コーパスと一致しない場合。
+    """
+    items = list(json.loads(Path(manifest_path).read_text(encoding="utf-8")).items())
+    if len(items) != len(article_texts):
+        raise ValueError("マニフェストの記事数と、取得した記事の数が一致しない")
+    offsets = []
+    position = 0
+    for index, (text, (_title, revid)) in enumerate(zip(article_texts, items, strict=True)):
+        if not text:
+            continue
+        start, end = position, position + len(text)
+        if corpus_text[start:end] != text:
+            raise ValueError(f"記事 {index} がコーパスの文字位置 {start} からの文字列と一致しない")
+        if end < len(corpus_text) and corpus_text[end] != "\n":
+            raise ValueError(f"記事 {index} の直後が区切りの改行ではない")
+        offsets.append(
+            {"manifest_index": index, "revision_id": int(revid), "start": start, "end": end}
+        )
+        position = end + 1
+    if not offsets or offsets[-1]["end"] != len(corpus_text):
+        raise ValueError("記事を改行 1 つで連結した結果がコーパス全文と一致しない")
+    return offsets
+
+
+def validate_wikipedia_article_offsets(
+    offsets: list[dict], corpus_text: str, manifest_path: str | Path
+) -> None:
+    """記事のオフセットの整合性を確かめる(015)。
+
+    - 記事数がマニフェストの記事数と一致し、マニフェストの番号が狭義単調増加で、リビジョン ID が
+      マニフェストと一致する。
+    - オフセットは単調増加で重ならず、隣り合う記事の間はちょうど 1 文字の区切りの改行である。
+      先頭の記事は位置 0 から始まり、最後の記事はコーパスの末尾で終わる。
+
+    Raises:
+        AssertionError: いずれかが成り立たない場合。
+    """
+    items = list(json.loads(Path(manifest_path).read_text(encoding="utf-8")).items())
+    assert len(offsets) == len(items), (
+        f"オフセットの記事数 {len(offsets)} がマニフェストの記事数 {len(items)} と一致しない"
+    )
+    assert offsets[0]["start"] == 0 and offsets[-1]["end"] == len(corpus_text)
+    previous_index, previous_end = -1, None
+    for entry in offsets:
+        index = entry["manifest_index"]
+        assert index > previous_index, "マニフェストの番号が単調増加でない"
+        assert int(items[index][1]) == entry["revision_id"], (
+            f"記事 {index} のリビジョン ID が異なる"
+        )
+        assert entry["start"] < entry["end"], f"記事 {index} の範囲が空"
+        if previous_end is not None:
+            assert entry["start"] == previous_end + 1, "オフセットが重なるか、区切りが 1 文字でない"
+            assert corpus_text[previous_end] == "\n", "記事の区切りが改行でない"
+        previous_index, previous_end = index, entry["end"]
+
+
+def locate_wikipedia_article_spans(
+    corpus_text: str,
+    language: str,
+    cache_dir: str | Path,
+    manifest_path: str | Path | None = None,
+    repo_id: str | None = None,
+    metadata_path: str | Path | None = None,
+    start_position: int = 0,
+) -> tuple[list[dict], str]:
+    """連結済みコーパスの中で、文字位置 ``start_position`` 以降にかかる記事の範囲を返す(015)。
+
+    コーパスのアーティファクトの ``metadata.json`` に ``article_offsets``
+    (``scripts/promote_canonical_corpora.py`` が書き込む記事ごとの文字位置)があれば、それを
+    使う(ネットワークへの依存は Hub のみ)。``metadata.json`` は ``metadata_path`` が与えられれば
+    そのファイルを、なければ ``repo_id`` の Dataset リポジトリから取得したものを使う。オフセットは
+    ``validate_wikipedia_article_offsets()`` で検証する。
+
+    オフセットがない場合(取得できない場合を含む)は、マニフェストの末尾の記事から 1 つずつ
+    ``load_wikipedia_articles()`` で取得し(Wikipedia API、記事単位のキャッシュを使う)、各記事が
+    コーパスの対応する位置の文字列と完全に一致することを確かめながら、``start_position`` に
+    達するまで遡る。
+
+    Args:
+        corpus_text: 連結済みのコーパス全文。
+        language: Wikipedia の言語コード。
+        cache_dir: 記事単位のキャッシュの置き場所(``load_wikipedia_articles()`` と同じ)。
+        manifest_path: マニフェストへのパス。``None`` の場合は ``<language>_006_pretraining.json``。
+        repo_id: ``metadata.json`` を取得する Hub の Dataset リポジトリ。``None`` かつ
+            ``metadata_path`` も ``None`` の場合は、Wikipedia API から取得する。
+        metadata_path: ローカルの ``metadata.json``(``repo_id`` より優先する)。
+        start_position: この文字位置より後ろで終わる記事だけを返す。
+
+    Returns:
+        (spans, source) のタプル。``spans`` は ``{"manifest_index", "revision_id", "start", "end"}``
+        のリスト(コーパスの中の順)、``source`` は ``"metadata"`` または ``"wikipedia_api"``。
+    """
+    if manifest_path is None:
+        manifest_path = _WIKIPEDIA_MANIFEST_DIR / f"{language}_006_pretraining.json"
+    manifest_path = Path(manifest_path)
+
+    metadata = None
+    if metadata_path is not None:
+        metadata = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+    elif repo_id is not None:
+        try:
+            from huggingface_hub import hf_hub_download
+
+            path = hf_hub_download(repo_id=repo_id, filename="metadata.json", repo_type="dataset")
+            metadata = json.loads(Path(path).read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001  # 取得できなければ Wikipedia API に切り替える
+            print(f"metadata.json を取得できなかった({e!r})。Wikipedia API から記事を取得する。")
+
+    if metadata is not None and "article_offsets" in metadata:
+        if metadata.get("manifest") != manifest_path.name:
+            raise ValueError(
+                f"metadata.json のマニフェスト {metadata.get('manifest')!r} が "
+                f"{manifest_path.name!r} と異なる"
+            )
+        offsets = metadata["article_offsets"]
+        validate_wikipedia_article_offsets(offsets, corpus_text, manifest_path)
+        return [dict(o) for o in offsets if o["end"] > start_position], "metadata"
+
+    items = list(json.loads(manifest_path.read_text(encoding="utf-8")).items())
+    spans = []
+    end, index = len(corpus_text), len(items) - 1
+    while True:
+        (article,) = load_wikipedia_articles(language, cache_dir, [index], manifest_path)
+        if not article:  # 本文が空の記事は連結の際に飛ばされている
+            index -= 1
+            continue
+        start = end - len(article)
+        if corpus_text[start:end] != article:
+            raise ValueError(f"記事 {index} がコーパスの対応する位置と一致しない")
+        if start > 0 and corpus_text[start - 1] != "\n":
+            raise ValueError(f"記事 {index} の直前が区切りの改行ではない")
+        spans.append(
+            {
+                "manifest_index": index,
+                "revision_id": int(items[index][1]),
+                "start": start,
+                "end": end,
+            }
+        )
+        if start <= start_position or start == 0:
+            break
+        end, index = start - 1, index - 1
+    spans.reverse()
+    return spans, "wikipedia_api"
+
+
 def load_japanese_corpus(cache_dir: str | Path) -> str:
     """日本語コーパスを取得してキャッシュする(005 トークナイザの日本語ドメイン用)。
 

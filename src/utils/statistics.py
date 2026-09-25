@@ -943,3 +943,54 @@ def paired_bootstrap_ratio_of_sums(
         counts = rng.multinomial(n, probabilities, size=size).astype(np.float64)  # (size, n)
         out[start : start + size] = (counts @ numerators.T) / (counts @ denominators)[:, None]
     return out[:, 0] if squeeze else out
+
+
+def paired_cluster_bootstrap_ratio_of_sums(
+    numerators: np.ndarray,
+    denominators: np.ndarray,
+    clusters: Sequence,
+    num_resamples: int,
+    seed: int,
+    chunk_size: int = 500,
+) -> np.ndarray:
+    """クラスタ(記事など)を復元抽出する対応付きブートストラップで、比 sum(numerator) /
+    sum(denominator) の分布を返す(015)。
+
+    ``paired_bootstrap_ratio_of_sums()`` の単位(評価窓など)を、互いに独立でない単位の
+    まとまり(同じ記事から切り出した評価窓など)ごとに復元抽出する版である。反復ごとに
+    クラスタを C 個(C はクラスタの数)復元抽出し、選ばれたクラスタに属する全単位を、
+    選ばれた回数だけ重複させて使う。全条件(``numerators`` の各行)に同じ再標本を使う
+    (対応付き)。同じクラスタの単位どうしが相関するとき、単位を独立に復元抽出すると
+    比のばらつきを過小に見積もる(擬似反復)ため、独立な単位であるクラスタを復元抽出する。
+
+    Args:
+        numerators: 形状 ``(k, n)``(k 条件 × n 単位)または ``(n,)``。
+        denominators: 形状 ``(n,)``(全条件で共通)。
+        clusters: 長さ n の、各単位が属するクラスタの識別子(ハッシュ可能な任意の値)。
+        num_resamples: 反復回数。
+        seed: 乱数シード。
+
+    Returns:
+        形状 ``(num_resamples, k)``(``numerators`` が 1 次元なら ``(num_resamples,)``)。
+    """
+    numerators = np.asarray(numerators, dtype=np.float64)
+    squeeze = numerators.ndim == 1
+    numerators = np.atleast_2d(numerators)
+    denominators = np.asarray(denominators, dtype=np.float64)
+    n = denominators.shape[0]
+    if numerators.shape[1] != n or len(clusters) != n:
+        raise ValueError("numerators・denominators・clusters の単位数が一致しない")
+    labels = {c: i for i, c in enumerate(dict.fromkeys(clusters))}
+    cluster_index = np.array([labels[c] for c in clusters])
+    num_clusters = len(labels)
+    rng = np.random.default_rng(seed)
+    probabilities = np.full(num_clusters, 1.0 / num_clusters)
+    out = np.empty((num_resamples, numerators.shape[0]), dtype=np.float64)
+    for start in range(0, num_resamples, chunk_size):
+        size = min(chunk_size, num_resamples - start)
+        cluster_counts = rng.multinomial(num_clusters, probabilities, size=size).astype(np.float64)
+        counts = cluster_counts[
+            :, cluster_index
+        ]  # (size, n): 各単位の重み = そのクラスタの抽出回数
+        out[start : start + size] = (counts @ numerators.T) / (counts @ denominators)[:, None]
+    return out[:, 0] if squeeze else out
