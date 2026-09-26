@@ -1,4 +1,4 @@
-"""判定の一次情報をセル出力に全件印字するための整形(013)。
+"""数値の配列を含むオブジェクトを、セル出力で読みやすいコンパクトな JSON に整形する(013)。
 
 ``json.dumps(obj, indent=2)`` は数値の配列を 1 値 1 行に展開するため、長い配列(評価窓ごとの
 負の対数尤度など)を含むと出力が縦に長くなりすぎ、GitHub のノートブックプレビューで読めなくなる。
@@ -17,9 +17,9 @@
 
     from src.utils.reporting import dumps_compact_json
 
-    text = dumps_compact_json(primary_data)
+    text = dumps_compact_json(data)
     print(text)
-    assert json.loads(text) == primary_data
+    assert json.loads(text) == data
 """
 
 from __future__ import annotations
