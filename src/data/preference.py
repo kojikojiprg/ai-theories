@@ -170,3 +170,107 @@ def collate_scored_sequences(
         token_ids[row, : len(sequence)] = torch.tensor(list(sequence), dtype=torch.long)
     last_indices = torch.tensor([len(s) - 1 for s in sequences], dtype=torch.long)
     return token_ids, last_indices
+
+
+# --- 018(DPO)で追加: 重複させたラベル・決定的なラベル・組の類似度 ---
+
+
+def sample_preference_label_matrix(
+    first_rewards: Sequence[float],
+    second_rewards: Sequence[float],
+    kappa: float,
+    num_draws: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """組ごとに ``num_draws`` 回、独立に Bradley-Terry モデルからラベルを抽選する(018)。
+
+    同じ組 ``(x, y_1, y_2)`` を K 回観測したことに相当する。経験的な選好確率
+    ``p_hat = (y_1 が選ばれた回数) / K`` は、K 回の抽選が一致しないときに限り (0, 1) の値をとる。
+
+    Returns:
+        形状 ``(N, K)`` の bool の配列。``[i, k]`` が True なら、組 i の k 回目の観測で
+        y_1 が選ばれた。
+    """
+    if num_draws < 1:
+        raise ValueError(f"num_draws は 1 以上である必要がある: {num_draws}")
+    probabilities = compute_bradley_terry_probability(
+        np.asarray(first_rewards, dtype=np.float64) - np.asarray(second_rewards, dtype=np.float64),
+        kappa,
+    )
+    return rng.random((probabilities.shape[0], num_draws)) < probabilities[:, None]
+
+
+def deterministic_preference_label_matrix(
+    first_rewards: Sequence[float], second_rewards: Sequence[float], num_draws: int
+) -> np.ndarray:
+    """真の報酬の高い方を選好とする決定的なラベルを ``num_draws`` 回重複させる(018)。
+
+    ``sample_preference_label_matrix()`` で kappa -> 無限大とした極限に相当する。事例数を確率的な
+    ラベルの条件と揃えるため、同じラベルを K 回重複させる。
+
+    Raises:
+        ValueError: 真の報酬が等しい組(Delta r* = 0)がある場合(決定的なラベルが定まらない)。
+    """
+    if num_draws < 1:
+        raise ValueError(f"num_draws は 1 以上である必要がある: {num_draws}")
+    difference = np.asarray(first_rewards, dtype=np.float64) - np.asarray(
+        second_rewards, dtype=np.float64
+    )
+    if np.any(difference == 0):
+        raise ValueError("真の報酬が等しい組がある(決定的なラベルが定まらない)")
+    return np.repeat((difference > 0)[:, None], num_draws, axis=1)
+
+
+def flatten_preference_labels(label_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(N, K)`` のラベルを、組の順・同じ組の中では観測の順の事例の列に展開する(018)。
+
+    Returns:
+        ``(pair_indices, first_chosen)``。長さ ``N K`` の配列で、事例 j は組 ``pair_indices[j]``、
+        ``first_chosen[j]`` が True なら y_w = y_1, y_l = y_2。
+    """
+    label_matrix = np.asarray(label_matrix, dtype=bool)
+    num_pairs, num_draws = label_matrix.shape
+    return np.repeat(np.arange(num_pairs), num_draws), label_matrix.reshape(-1).copy()
+
+
+def normalized_edit_distance(a: str, b: str) -> float:
+    """文字単位の編集距離を長い方の文字数で割った値(018)。両方が空なら 0。値は [0, 1]。"""
+    longest = max(len(a), len(b))
+    return 0.0 if longest == 0 else levenshtein_distance(a, b) / longest
+
+
+def select_similarity_stratified_pairs(
+    strata_labels: Sequence[object],
+    distances: Sequence[float],
+    fraction: float,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """層ごとに、類似度の近い組・遠い組を同数ずつ選ぶ(018)。
+
+    各層(``strata_labels`` が等しい組の集合、018 では課題 x ``|Delta r*|`` の区間)の中で、組を
+    ``distances``(正規化編集距離)の昇順に並べ(同じ値は元の添字の順)、先頭の ``q`` 個を近い組、
+    末尾の ``q`` 個を遠い組とする。``q = floor(n_layer x fraction)``(``n_layer`` は層の大きさ)。
+    ``fraction <= 0.5`` なので近い組と遠い組は重ならない。2 つの集合で層ごとの件数が一致するので、
+    層を決める量(課題と真の報酬の差)の分布が揃う。
+
+    Returns:
+        ``(near_indices, far_indices, counts)``。添字は昇順。``counts`` は層ごとの
+        ``{"near": q, "far": q, "size": n_layer}``。
+    """
+    if not 0.0 < fraction <= 0.5:
+        raise ValueError(f"fraction は (0, 0.5] の値である必要がある: {fraction}")
+    distances = np.asarray(distances, dtype=np.float64)
+    if len(strata_labels) != distances.shape[0]:
+        raise ValueError("strata_labels と distances の長さが一致しない")
+    members: dict[object, list[int]] = {}
+    for index, label in enumerate(strata_labels):
+        members.setdefault(label, []).append(index)
+    near: list[int] = []
+    far: list[int] = []
+    counts: dict = {}
+    for label, indices in members.items():
+        ordered = sorted(indices, key=lambda i: (distances[i], i))
+        q = int(len(ordered) * fraction)
+        near.extend(ordered[:q])
+        far.extend(ordered[len(ordered) - q :] if q > 0 else [])
+        counts[label] = {"near": q, "far": q, "size": len(ordered)}
+    return np.array(sorted(near), dtype=np.int64), np.array(sorted(far), dtype=np.int64), counts
