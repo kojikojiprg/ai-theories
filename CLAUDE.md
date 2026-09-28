@@ -230,9 +230,9 @@ ai-theories/
 - `apps/`のデモ公開は **Hugging Face Spaces** を基本のデプロイ先とし、**Gradio** を標準 UI フレームワークとする。
 - 依存関係の管理は **uv が唯一の正** (`pyproject.toml` + `uv.lock`)。`requirements.txt`は uv からの **エクスポート成果物** であり、手で編集しない(詳細は「開発環境・ツール」)。
 - `theories/`の学習・推論はノートブック上で行う。`.py`ファイル単体の直接実行は想定しない(`src/`は import される前提)。
-- `theories/`配下のノートブックは、Colab セットアップセルで`%cd ai-theories`した後、**リポジトリルートをカレントディレクトリとして実行される前提** とする。
+- `theories/`配下のノートブックは、Colab セットアップセルで`%cd /content/ai-theories`した後、**リポジトリルート(Colab では`/content/ai-theories`)をカレントディレクトリとして実行される前提** とする。ローカルでは、リポジトリルートで Jupyter を起動して同じ前提を満たす。
 - `src/`からの import は`from src.layers import ...`のように **リポジトリルートからの絶対パスで統一** する。ノートブックの配置場所(`theories/xx_category/`配下)に関わらずこの前提が崩れないよう、セットアップセルの`%cd`を必ず先頭に置く。
-- `theories/`のノートブックは、セットアップセル(`%cd ai-theories`と依存関係のインストールの後)で`src/utils/environment.py`の`print_execution_environment()`を呼び、**実行環境をセル出力に残す**。
+- `theories/`のノートブックは、セットアップセル(`%cd /content/ai-theories`と依存関係のインストールの後)で`src/utils/environment.py`の`print_execution_environment()`を呼び、**実行環境をセル出力に残す**。
   - 印字する項目は、GPU 名・compute capability・GPU の総メモリ、Python・torch・torch のビルド時の CUDA・cuDNN のバージョン、使用するデバイスの種類、リポジトリのコミットのハッシュと未コミットの変更の有無、実行日時(UTC)である。セットアップの途中で torch が入れ替わる場合もあるため、依存関係のインストールの **後** に呼ぶ。
   - 結果・考察の本文で実行環境(GPU の種類、ライブラリのバージョン、どのコミットのコードで実行したかなど)を記述するときは、**この印字を出典とする**。実行者の記録に頼らない。
   - この規則は 014 以降に適用し、013 までの既存ノートブックには遡及適用しない(適用には再実行が必要になるため)。
