@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import datetime
 import importlib.metadata
+import os
 import platform
 import re
 import subprocess
@@ -299,6 +300,7 @@ def check_preloaded_package_versions(
     module_distributions: Mapping[str, list[str]] | None = None,
     installed_version: Callable[[str], str | None] | None = None,
     required: tuple[str, ...] = REQUIRED_VERSION_CHECK_DISTRIBUTIONS,
+    on_mismatch: str = "raise",
 ) -> list[str]:
     """``requirements.txt`` の配布物のうち読み込み済みのものの、版の食い違いがないことを確かめる。
 
@@ -330,13 +332,23 @@ def check_preloaded_package_versions(
         installed_version: 配布物の名前からインストール済みの版を返す関数(既定は
             ``importlib.metadata.version``。取得できなければ None)。
         required: ``requirements.txt`` に載っていて読み込み済みなら必ず検査する配布物。
+        on_mismatch: 食い違いがあったときの動作。``"raise"``(既定)は ``RuntimeError`` を送出する。
+            ``"restart"`` は食い違いと「再接続後、もう一度『すべてのセルを実行』すること」を印字し、
+            標準出力を flush してから ``os.kill(os.getpid(), 9)`` でカーネル(このプロセス)を終了する
+            (Google Colab ではカーネルが自動で起動し直し、古い版がメモリから消える。017 の本番で、
+            手動の「セッションを再起動」では安定して解消できなかったため)。既定を ``"raise"`` に
+            するのは、ローカルで意図せずプロセスを終了させないためである。
 
     Returns:
         検査した配布物の ``"名前==版"`` の一覧(食い違いがない場合)。1 行で印字もする。
 
     Raises:
-        RuntimeError: 1 つでも食い違いがある場合。食い違った配布物と両方の版、対処を示す。
+        RuntimeError: 1 つでも食い違いがある場合(``on_mismatch="raise"``)。食い違った配布物と
+            両方の版、対処を示す。
+        ValueError: ``on_mismatch`` が ``"raise"``・``"restart"`` のいずれでもない場合。
     """
+    if on_mismatch not in ("raise", "restart"):
+        raise ValueError(f"on_mismatch は 'raise' または 'restart': {on_mismatch!r}")
     modules = sys.modules if modules is None else modules
     if module_distributions is None:
         module_distributions = importlib.metadata.packages_distributions()
@@ -408,14 +420,18 @@ def check_preloaded_package_versions(
         if versions and not problems:
             checked.append(f"{distribution}=={installed}")
     if mismatches:
-        raise RuntimeError(
+        summary = (
             "読み込み済みのパッケージの版が、インストール済みの版と食い違っている"
             "(カーネルの起動時に読み込まれた版が、"
-            "セットアップセルのインストールで入れ替わった):\n  "
-            + "\n  ".join(mismatches)
-            + "\n対処: "
-            + _RESTART_INSTRUCTIONS
+            "セットアップセルのインストールで入れ替わった):\n  " + "\n  ".join(mismatches)
         )
+        if on_mismatch == "restart":
+            print(summary)
+            print("カーネルを終了する。再接続後、もう一度「すべてのセルを実行」すること。")
+            sys.stdout.flush()
+            os.kill(os.getpid(), 9)
+            # os.kill が戻った場合(確認のために差し替えたときなど)は、下の例外で止める
+        raise RuntimeError(summary + "\n対処: " + _RESTART_INSTRUCTIONS)
     listed = ", ".join(checked) if checked else "なし"
     not_loaded = len(targets) - len(loaded) - len(excluded)
     print(

@@ -281,20 +281,27 @@ uv export --format requirements-txt --no-hash --no-emit-project > requirements.t
 
 ```python
 # 環境セットアップ(Google Colab)
-!git clone https://github.com/kojikojiprg/ai-theories.git
-%cd ai-theories
-!pip install uv -q
-!uv pip install --system -r requirements.txt
+import os
+import sys
 
-# インストールで版が入れ替わったパッケージの古い版がメモリに残っていないかを、torch などを import する前に確かめる
+IN_COLAB = "google.colab" in sys.modules
+if IN_COLAB:
+    if not os.path.isdir("/content/ai-theories"):  # 2 回目の実行では clone し直さない
+        !git clone https://github.com/kojikojiprg/ai-theories.git /content/ai-theories
+    %cd /content/ai-theories
+    !pip install uv -q
+    !uv pip install --system -r requirements.txt
+
+# インストールで版が入れ替わったパッケージの古い版がメモリに残っていないかを、torch などを import する前に確かめる。
+# Colab では食い違いがあればカーネルを終了する(再接続後、もう一度「すべてのセルを実行」する)
 from src.utils.environment import check_preloaded_package_versions  # noqa: E402
 
-check_preloaded_package_versions()
+check_preloaded_package_versions(on_mismatch="restart" if IN_COLAB else "raise")
 
 import torch  # noqa: E402
 ```
 
-- `check_preloaded_package_versions()`は、`uv pip install`の直後・`import torch`の前に呼ぶ。Colab のカーネルは起動時に numpy などを読み込んでおり、インストールがディスク上の版を入れ替えると、メモリ上の古い版と後から読み込まれる新しい版が混在して、例外や黙った誤動作の原因になるためである。検査の対象は、`requirements.txt`に記載された配布物のうち読み込み済みのものに限る(版が入れ替わりうるのはこのインストールが入れたものだけであり、それ以外のパッケージは`__version__`の表記の違いによる誤検出の原因にしかならないため)。食い違いがあれば「ランタイム」→「セッションを再起動」→「すべてのセルを実行」の対処を示して停止する。この規則は 018 以降に適用し、017 までの実行済みのノートブックのセットアップセルには遡及適用しない(コードセルを変えると再実行が必要になるため)。
+- `check_preloaded_package_versions()`は、`uv pip install`の直後・`import torch`の前に呼ぶ。Colab のカーネルは起動時に numpy などを読み込んでおり、インストールがディスク上の版を入れ替えると、メモリ上の古い版と後から読み込まれる新しい版が混在して、例外や黙った誤動作の原因になるためである。検査の対象は、`requirements.txt`に記載された配布物のうち読み込み済みのものに限る(版が入れ替わりうるのはこのインストールが入れたものだけであり、それ以外のパッケージは`__version__`の表記の違いによる誤検出の原因にしかならないため)。Colab では`on_mismatch="restart"`で呼び、食い違いがあれば、その内容と「再接続後、もう一度『すべてのセルを実行』すること」を印字してカーネルを自ら終了させる。017 の本番で、手動の「セッションを再起動」では食い違いが安定して解消できなかったためである。カーネルが起動し直した後の 2 回目の「すべてのセルを実行」では、`/content/ai-theories`が既にあるので`git clone`は行われず、インストールも必要な版が既に入っていることを確かめるだけになるので、版が入れ替わらず食い違いなしで進む。ローカルでは既定の`on_mismatch="raise"`で呼び、食い違いがあれば対処を示して`RuntimeError`で停止する(プロセスを意図せず終了させないため)。この規則は 018 以降に適用し、017 までの実行済みのノートブックのセットアップセルには遡及適用しない(コードセルを変えると再実行が必要になるため。017 は Colab 上で同等の処理に差し替えて本番を実行した)。
 - 依存関係を追加したら`uv add` → `uv export`で`requirements.txt`を再生成し、両方をコミットする。
 - Colab のセットアップ手順をローカルで再現・検証する場合は、**`uv pip install --system`を使わない**。インストール先を`--python`で、クローンの外に作った使い捨ての仮想環境に明示する(例: `uv pip install --python <仮想環境>/bin/python -r requirements.txt`)。`--system`は PATH 上の仮想環境の Python を system interpreter ではないとして飛ばし、利用者のグローバルな Python(pyenv など)にインストールしてしまうことがあるためである。
 
