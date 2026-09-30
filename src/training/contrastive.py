@@ -20,6 +20,21 @@ warmup + cosine の学習率、gradient clipping(クリッピング前の全パ�
 unscale と非有限値の検出を 1 回の同期で行う ``unscale_gradients_and_compute_norm()``。
 encoder の順伝播のみを autocast の中で行い、埋め込みの正規化・類似度・損失は FP32 で計算する。
 
+**1 ステップの固定費の削減**(020 の本番の停止への対応): 本トピックのモデルは小さく、
+1 ステップの時間の大半は計算ではなく、演算の起動(Python からの呼び出しと GPU のカーネルの
+起動)と、ホストとデバイスの同期が占める。そこで次のようにする。
+
+1. 学習全体のバッチの添字と、テキスト encoder に入れるキャプションの番号を学習の前に作って
+   デバイスに置き、各ステップでは切り出すだけにする(``prepare_batch_indices()``)。
+2. NegCLIP の困難な負例を固定長(2N)にする。使わない負例は埋め草(その行の正例の
+   キャプション)に置き換え、マスクで分母から除く。
+3. FP32 では 1 ステップの中に同期がない(FP16 の動的損失スケーリングの非有限値の検査だけが
+   同期する)。
+4. ``use_cuda_graph=True``(CUDA・FP32 のときのみ)では、順伝播・逆伝播・gradient clipping を
+   CUDA graph に記録し、各ステップでは再生する。optimizer の更新は記録せず、従来どおり
+   ``AdamW`` をその都度呼ぶ(学習率・バイアス補正の Python の数値をそのまま使い、更新式を
+   変えないため)。
+
 **データの順序**: バッチの添字は ``DistinctCaptionBatchSampler``(``src/data/synthetic_scenes.py``)
 で、``data_seed`` で初期化した CPU の生成器から引く。損失の種類に依存しないので、同じ
 ``data_seed``・同じバッチサイズの学習どうしは、損失によらず同じ順序で同じシーンを見る
@@ -79,6 +94,7 @@ def negclip_loss(
     logit_scale: Tensor,
     positive_caption_ids: Tensor,
     hard_negative_caption_ids: Tensor,
+    hard_negative_mask: Tensor | None = None,
 ) -> Tensor:
     """NegCLIP の損失。画像 -> テキスト方向の分母に困難な負例のキャプションを加える。
 
@@ -93,6 +109,8 @@ def negclip_loss(
         logit_scale: log(1/τ)。
         positive_caption_ids: 形状 ``(N,)``。バッチ内で互いに異なる。
         hard_negative_caption_ids: 形状 ``(M,)``。
+        hard_negative_mask: 形状 ``(M,)`` の bool(省略可)。False の列(埋め草の列)は、
+            全行の分母から除く。除いた列の logits は -inf になるので、損失にも勾配にも寄与しない。
     """
     n = image_embeddings.size(0)
     scale = logit_scale.exp()
@@ -101,6 +119,8 @@ def negclip_loss(
     column_ids = torch.cat([positive_caption_ids, hard_negative_caption_ids])
     false_negative = column_ids[None, :] == positive_caption_ids[:, None]
     false_negative[:, :n] &= ~torch.eye(n, dtype=torch.bool, device=false_negative.device)
+    if hard_negative_mask is not None:
+        false_negative[:, n:] |= ~hard_negative_mask[None, :]
     logits_image_to_text = logits_image_to_text.masked_fill(false_negative, float("-inf"))
     logits_text_to_image = scale * text_embeddings @ image_embeddings.t()
     targets = torch.arange(n, device=image_embeddings.device)
@@ -119,6 +139,70 @@ def in_batch_margin(image_embeddings: Tensor, text_embeddings: Tensor) -> Tensor
         torch.eye(n, dtype=torch.bool, device=similarity.device), float("-inf")
     )
     return (positive - hardest.max(dim=1).values).mean()
+
+
+def prepare_batch_indices(
+    scene_caption_ids: np.ndarray,
+    copies: int,
+    batch_size: int,
+    num_steps: int,
+    data_seed: int,
+    hard_negative_ids: dict[str, np.ndarray] | None = None,
+    hard_negative_allowed: np.ndarray | None = None,
+) -> dict:
+    """学習全体のバッチの添字と、テキスト encoder に入れるキャプションの番号を学習の前に作る。
+
+    ``DistinctCaptionBatchSampler`` を ``num_steps`` 回呼ぶ順序と乱数の消費は、ステップごとに
+    呼んでいた 020 の最初の実装と同じなので、バッチの添字の列とそのハッシュも同じになる。
+
+    Returns:
+        ``"positions"``(形状 ``(num_steps, N)``、シーンの添字)、
+        ``"captions"``(形状 ``(num_steps, N)``、正例のキャプションの番号)、
+        ``"text_ids"``(形状 ``(num_steps, N)``、NegCLIP では ``(num_steps, 3N)``。テキスト
+        encoder に入れるキャプションの番号。使わない困難な負例は、その行の正例のキャプションで
+        埋める)、``"hard_mask"``(NegCLIP のみ、形状 ``(num_steps, 2N)`` の bool。True が分母に
+        加える負例)、``"data_stream_hash"``、``"distinct"``、``"examples_seen"``、
+        ``"hard_negatives_used"``・``"hard_negatives_generated"``(NegCLIP のみ)。
+    """
+    scene_caption_ids = np.asarray(scene_caption_ids)
+    generator = torch.Generator()
+    generator.manual_seed(data_seed)
+    sampler = DistinctCaptionBatchSampler(scene_caption_ids, copies, batch_size, generator)
+    digest = hashlib.sha256()
+    positions = np.empty((num_steps, batch_size), dtype=np.int64)
+    for step in range(num_steps):
+        batch = sampler.next_batch()
+        digest.update(batch.numpy().tobytes())
+        positions[step] = batch.numpy()
+    digest.update(generator.get_state().numpy().tobytes())
+    captions = scene_caption_ids[positions]
+    caption_slots = np.sort(positions // copies, axis=1)  # バッチ内のキャプションが互いに異なること
+    result = {
+        "positions": positions,
+        "captions": captions,
+        "text_ids": captions,
+        "data_stream_hash": digest.hexdigest(),
+        "distinct": bool((np.diff(caption_slots, axis=1) != 0).all()),
+        "examples_seen": sampler.examples_drawn,
+    }
+    if hard_negative_ids is not None:
+        if hard_negative_allowed is None:
+            num_captions = len(next(iter(hard_negative_ids.values())))
+            hard_negative_allowed = np.ones(num_captions, dtype=bool)
+        hard, masks = [], []
+        result["hard_negatives_used"], result["hard_negatives_generated"] = {}, {}
+        for name, rule in hard_negative_ids.items():
+            candidates = rule[captions]  # (num_steps, N)
+            keep = hard_negative_allowed[candidates]
+            hard.append(
+                np.where(keep, candidates, captions)
+            )  # 使わない負例は正例のキャプションで埋める
+            masks.append(keep)
+            result["hard_negatives_used"][name] = int(keep.sum())
+            result["hard_negatives_generated"][name] = int(keep.size)
+        result["text_ids"] = np.concatenate([captions, *hard], axis=1)
+        result["hard_mask"] = np.concatenate(masks, axis=1)
+    return result
 
 
 def train_contrastive_model(
@@ -140,6 +224,7 @@ def train_contrastive_model(
     hard_negative_allowed: np.ndarray | None = None,
     logit_scale_max: float | None = math.log(100.0),
     use_fp16_autocast: bool = False,
+    use_cuda_graph: bool = False,
     init_loss_scale: float = 2.0**16,
     loss_scale_growth_interval: int = 2000,
     evaluation_steps: tuple[int, ...] = (),
@@ -167,12 +252,14 @@ def train_contrastive_model(
             キャプションの番号。
         hard_negative_allowed: 形状 ``(num_captions,)`` の bool。困難な負例として使ってよい
             キャプション(020 では、除外した (色, 形) の組を含まないキャプション)。False の
-            キャプションは、テキスト encoder に入れず、分母にも加えない(添字の選択は CPU で行うので
-            GPU との同期は起きない)。``None`` ならすべて使う。
+            キャプションはテキスト encoder に入れず(その行の正例のキャプションで埋める)、
+            マスクで分母から除く。``None`` ならすべて使う。
         logit_scale_max: 各ステップの更新の後に ``logit_scale`` をこの値以下に切り詰める
             (CLIP の実装。``None`` なら切り詰めない)。
         use_fp16_autocast: True なら encoder の順伝播を FP16 の autocast で行い、
             動的損失スケーリングを使う(CUDA のみ)。
+        use_cuda_graph: True なら順伝播・逆伝播・gradient clipping を CUDA graph に記録して
+            再生する(CUDA・FP32 のみ)。optimizer の更新は記録しない。
         init_loss_scale: 動的損失スケーリングの初期スケール値。
         loss_scale_growth_interval: スケール値を growth するまでの連続成功ステップ数。
         evaluation_steps: 学習の途中で ``evaluation_fn`` を呼ぶステップ(そのステップの更新の後)。
@@ -195,16 +282,26 @@ def train_contrastive_model(
     device = images.device
     if use_fp16_autocast and device.type != "cuda":
         raise ValueError("use_fp16_autocast は CUDA のときのみ有効にする")
-    generator = torch.Generator()
-    generator.manual_seed(data_seed)
-    sampler = DistinctCaptionBatchSampler(scene_caption_ids, copies, batch_size, generator)
-    scene_caption_ids = np.asarray(scene_caption_ids)
-    num_captions = caption_token_ids.size(0)
-    if hard_negative_allowed is None:
-        hard_negative_allowed = np.ones(num_captions, dtype=bool)
-    text_caption_seen = np.zeros(num_captions, dtype=bool)  # テキスト encoder に入れたキャプション
-    hard_negatives_used = {name: 0 for name in (hard_negative_ids or {})}
-    hard_negatives_generated = {name: 0 for name in (hard_negative_ids or {})}
+    if use_cuda_graph and (device.type != "cuda" or use_fp16_autocast):
+        raise ValueError("use_cuda_graph は CUDA・FP32 のときのみ有効にする")
+
+    train_seconds = 0.0
+    start = time.time()
+    plan = prepare_batch_indices(
+        scene_caption_ids,
+        copies,
+        batch_size,
+        num_steps,
+        data_seed,
+        hard_negative_ids if loss_type == "negclip" else None,
+        hard_negative_allowed,
+    )
+    positions_all = torch.as_tensor(plan["positions"], device=device)
+    captions_all = torch.as_tensor(plan["captions"], device=device)
+    text_ids_all = torch.as_tensor(plan["text_ids"], device=device)
+    hard_mask_all = (
+        torch.as_tensor(plan["hard_mask"], device=device) if loss_type == "negclip" else None
+    )
 
     decay, no_decay = split_weight_decay_parameters(model)
     optimizers = [
@@ -217,55 +314,18 @@ def train_contrastive_model(
         if use_fp16_autocast
         else None
     )
-
-    def record() -> Tensor:
-        return torch.empty(num_steps, device=device)
-
-    losses, gradient_norms, margins, scales, biases = (
-        record(),
-        record(),
-        record(),
-        record(),
-        record(),
-    )
-    history: dict = {"learning_rate": [], "loss_scale": [], "step_skipped": [], "evaluations": {}}
-    digest = hashlib.sha256()
-    evaluation_steps = tuple(sorted(set(evaluation_steps)))
     threshold = torch.tensor(gradient_clip_threshold, device=device)
-    distinct = True
 
-    train_seconds = 0.0
-    start = time.time()
-    for step in range(1, num_steps + 1):
-        model.train()
-        learning_rate = compute_warmup_cosine_learning_rate(
-            step, warmup_steps, num_steps, peak_learning_rate, min_learning_rate
-        )
-        for optimizer in optimizers:
-            optimizer.set_learning_rate(learning_rate)
+    # 1 ステップの入力(CUDA graph では固定のバッファに書き込み、それ以外では切り出したビューを使う)
+    buffers = {"positions": positions_all[0], "text_ids": text_ids_all[0]}
+    if loss_type == "negclip":
+        buffers["captions"] = captions_all[0]
+        buffers["hard_mask"] = hard_mask_all[0]
 
-        positions = sampler.next_batch()
-        digest.update(positions.numpy().tobytes())
-        batch_scenes = positions.to(device, non_blocking=True)
-        captions_cpu = scene_caption_ids[positions.numpy()]
-        text_ids_cpu = captions_cpu
-        if loss_type == "negclip":
-            # 困難な負例の添字は CPU で作り、使ってはいけないキャプションをここで除く
-            parts = []
-            for name, rule in hard_negative_ids.items():
-                candidates = rule[captions_cpu]
-                keep = candidates[hard_negative_allowed[candidates]]
-                hard_negatives_generated[name] += len(candidates)
-                hard_negatives_used[name] += len(keep)
-                parts.append(keep)
-            hard_ids_cpu = np.concatenate(parts)
-            text_ids_cpu = np.concatenate([captions_cpu, hard_ids_cpu])
-            hard_ids = torch.as_tensor(hard_ids_cpu, device=device)
-        text_caption_seen[text_ids_cpu] = True
-        batch_captions = torch.as_tensor(captions_cpu, device=device)
-        inputs = normalize_scene_images(images[batch_scenes])
-        tokens = caption_token_ids[torch.as_tensor(text_ids_cpu, device=device)]
-
+    def compute_step(scale: float | None) -> tuple[Tensor, Tensor, Tensor]:
+        # 順伝播・逆伝播・gradient clipping(optimizer の更新の直前まで)。同期を含まない
+        inputs = normalize_scene_images(images[buffers["positions"]])
+        tokens = caption_token_ids[buffers["text_ids"]]
         with torch.autocast(
             device_type=device.type, dtype=torch.float16, enabled=use_fp16_autocast
         ):
@@ -286,24 +346,83 @@ def train_contrastive_model(
                 positive_text,
                 text_embeddings[batch_size:],
                 model.logit_scale,
-                batch_captions,
-                hard_ids,
+                buffers["captions"],
+                buffers["text_ids"][batch_size:],
+                hard_negative_mask=buffers["hard_mask"],
             )
-
-        for optimizer in optimizers:
-            optimizer.zero_grad()
-        (loss_scaler.scale_loss(loss) if loss_scaler is not None else loss).backward()
-
-        gradient_norm = unscale_gradients_and_compute_norm(
-            parameters, loss_scaler.scale if loss_scaler is not None else None
-        )
+        (loss * scale if scale is not None else loss).backward()
+        gradient_norm = unscale_gradients_and_compute_norm(parameters, scale)
+        # 007 と同じ定義: ノルムが閾値を超えたら threshold / norm 倍する(CPU に読み出さずに行う)
         clip_coefficient = torch.where(
             gradient_norm > threshold, threshold / gradient_norm, torch.ones_like(gradient_norm)
         )
         torch._foreach_mul_([p.grad for p in parameters if p.grad is not None], clip_coefficient)
+        with torch.no_grad():
+            margin = in_batch_margin(image_embeddings, positive_text)
+        return loss.detach(), gradient_norm.detach(), margin
+
+    graph = None
+    if use_cuda_graph:
+        # 固定のバッファに 1 ステップ目の入力を置き、別のストリームで準備運転してから記録する。
+        # 準備運転は勾配を計算するだけでパラメータを更新しないので、学習の結果に影響しない
+        buffers = {k: v.clone() for k, v in buffers.items()}
+        side_stream = torch.cuda.Stream()
+        side_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side_stream):
+            for _ in range(3):
+                for optimizer in optimizers:
+                    optimizer.zero_grad()
+                compute_step(None)
+        torch.cuda.current_stream().wait_stream(side_stream)
+        for optimizer in optimizers:
+            optimizer.zero_grad()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_outputs = compute_step(None)
+
+    def record() -> Tensor:
+        return torch.empty(num_steps, device=device)
+
+    losses, gradient_norms, margins, scales, biases = (
+        record(),
+        record(),
+        record(),
+        record(),
+        record(),
+    )
+    history: dict = {"learning_rate": [], "loss_scale": [], "step_skipped": [], "evaluations": {}}
+    evaluation_steps = tuple(sorted(set(evaluation_steps)))
+
+    for step in range(1, num_steps + 1):
+        model.train()
+        learning_rate = compute_warmup_cosine_learning_rate(
+            step, warmup_steps, num_steps, peak_learning_rate, min_learning_rate
+        )
+        for optimizer in optimizers:
+            optimizer.set_learning_rate(learning_rate)
+
+        if graph is not None:
+            buffers["positions"].copy_(positions_all[step - 1])
+            buffers["text_ids"].copy_(text_ids_all[step - 1])
+            if loss_type == "negclip":
+                buffers["captions"].copy_(captions_all[step - 1])
+                buffers["hard_mask"].copy_(hard_mask_all[step - 1])
+            graph.replay()  # 勾配は記録したときのバッファに上書きされる(zero_grad を呼ばない)
+            loss, gradient_norm, margin = graph_outputs
+        else:
+            buffers["positions"] = positions_all[step - 1]
+            buffers["text_ids"] = text_ids_all[step - 1]
+            if loss_type == "negclip":
+                buffers["captions"] = captions_all[step - 1]
+                buffers["hard_mask"] = hard_mask_all[step - 1]
+            for optimizer in optimizers:
+                optimizer.zero_grad()
+            loss, gradient_norm, margin = compute_step(
+                loss_scaler.scale if loss_scaler is not None else None
+            )
 
         found_inf = False
-        if loss_scaler is not None:  # ここで 1 回だけ CPU と同期する
+        if loss_scaler is not None:  # FP16 のときのみ、ここで 1 回だけ CPU と同期する
             found_inf = not bool(torch.isfinite(gradient_norm))
         if not found_inf:
             for optimizer in optimizers:
@@ -318,16 +437,13 @@ def train_contrastive_model(
             history["loss_scale"].append(1.0)
 
         with torch.no_grad():
-            losses[step - 1] = loss.detach()
-            gradient_norms[step - 1] = gradient_norm.detach()
-            margins[step - 1] = in_batch_margin(image_embeddings, positive_text)
+            losses[step - 1] = loss
+            gradient_norms[step - 1] = gradient_norm
+            margins[step - 1] = margin
             scales[step - 1] = model.logit_scale.detach()
             biases[step - 1] = model.logit_bias.detach()
         history["learning_rate"].append(learning_rate)
         history["step_skipped"].append(found_inf)
-        # バッチ内のキャプションが互いに異なることを、全ステップで CPU の添字から確かめる
-        # (GPU との同期は起きない)
-        distinct &= int(torch.unique(positions // copies).numel()) == batch_size
 
         if evaluation_fn is not None and step in evaluation_steps:
             _synchronize(device)
@@ -336,21 +452,21 @@ def train_contrastive_model(
             start = time.time()
     _synchronize(device)
     train_seconds += time.time() - start
+    del graph
 
-    digest.update(generator.get_state().numpy().tobytes())
     history["loss"] = losses.cpu().tolist()
     history["gradient_norm"] = gradient_norms.cpu().tolist()
     history["in_batch_margin"] = margins.cpu().tolist()
     history["logit_scale"] = scales.cpu().tolist()
     history["logit_bias"] = biases.cpu().tolist()
-    history["examples_seen"] = sampler.examples_drawn
-    history["data_stream_hash"] = digest.hexdigest()
-    history["distinct_captions_in_every_batch"] = distinct
+    history["examples_seen"] = plan["examples_seen"]
+    history["data_stream_hash"] = plan["data_stream_hash"]
+    history["distinct_captions_in_every_batch"] = plan["distinct"]
     history["train_seconds"] = train_seconds
-    history["text_caption_ids"] = np.flatnonzero(text_caption_seen)
+    history["text_caption_ids"] = np.unique(plan["text_ids"])
     if loss_type == "negclip":
-        history["hard_negatives_used"] = hard_negatives_used
-        history["hard_negatives_generated"] = hard_negatives_generated
+        history["hard_negatives_used"] = plan["hard_negatives_used"]
+        history["hard_negatives_generated"] = plan["hard_negatives_generated"]
     return history
 
 
