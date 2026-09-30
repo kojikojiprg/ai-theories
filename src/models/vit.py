@@ -136,6 +136,33 @@ class VisionTransformer(nn.Module):
             tokens = tokens + self.position_embedding
         return tokens
 
+    def forward_features(
+        self, images: Tensor, return_attention_weights: bool = False
+    ) -> Tensor | tuple[Tensor, list[Tensor]]:
+        """式 1〜4 の画像の表現 y = LN(z_L^0)(分類ヘッドの直前)を返す(020 で追加)。
+
+        CLIP の画像 encoder(020)は、この表現を線形射影して埋め込みにする。``forward()`` は
+        この関数の出力に分類ヘッドを掛けるだけであり、019 までと同じ計算になる。
+
+        Args:
+            images: 形状 ``(B, C, H, W)``。
+            return_attention_weights: True の場合、各層の注意の重みもあわせて返す。
+
+        Returns:
+            y(形状 ``(B, D)``)。``return_attention_weights=True`` の場合は
+            ``(y, attention_weights)``。
+        """
+        x = self.embed(images)
+        attention_weights: list[Tensor] = []
+        for block in self.blocks:
+            x, weights = block(x)
+            if return_attention_weights:
+                attention_weights.append(weights)
+        class_representation = self.final_norm(x)[:, 0]  # 式 4: y = LN(z_L^0)
+        if return_attention_weights:
+            return class_representation, attention_weights
+        return class_representation
+
     def forward(
         self, images: Tensor, return_attention_weights: bool = False
     ) -> Tensor | tuple[Tensor, list[Tensor]]:
@@ -150,17 +177,10 @@ class VisionTransformer(nn.Module):
             logits(形状 ``(B, num_classes)``)。``return_attention_weights=True`` の場合は
             ``(logits, attention_weights)``。
         """
-        x = self.embed(images)
-        attention_weights: list[Tensor] = []
-        for block in self.blocks:
-            x, weights = block(x)
-            if return_attention_weights:
-                attention_weights.append(weights)
-        class_representation = self.final_norm(x)[:, 0]  # 式 4: y = LN(z_L^0)
-        logits = self.head(class_representation)
         if return_attention_weights:
-            return logits, attention_weights
-        return logits
+            class_representation, attention_weights = self.forward_features(images, True)
+            return self.head(class_representation), attention_weights
+        return self.head(self.forward_features(images))
 
     def no_weight_decay_parameter_names(self) -> set[str]:
         """重み減衰を掛けない行列形のパラメータの名前([CLS] トークンと学習可能な位置埋め込み)。"""

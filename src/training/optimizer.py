@@ -66,6 +66,11 @@ class AdamW:
         betas: モーメント推定の減衰率 (β1, β2)。
         eps: 数値安定化のための微小定数 ε。
         weight_decay: 重み減衰係数 λ。
+        foreach: True なら、同じ更新式を ``torch._foreach_*`` で全パラメータにまとめて適用する
+            (020 で追加)。パラメータの数だけ小さな演算を起動する既定の経路は、小さなモデルでは
+            起動の待ち時間が支配的になるためである。演算の種類と順序は既定の経路と同じで、
+            CPU では結果が bit 単位で一致することを 020 で確かめる。既定値 False では 019 までと
+            同じ経路を通る。
     """
 
     def __init__(
@@ -75,12 +80,14 @@ class AdamW:
         betas: tuple[float, float] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0.0,
+        foreach: bool = False,
     ) -> None:
         self.params: list[torch.nn.Parameter] = list(params)
         self.lr = lr
         self.beta1, self.beta2 = betas
         self.eps = eps
         self.weight_decay = weight_decay
+        self.foreach = foreach
         self.step_count = 0
         self._m: dict[int, Tensor] = {}
         self._v: dict[int, Tensor] = {}
@@ -97,6 +104,10 @@ class AdamW:
         t = self.step_count
         bias_correction1 = 1.0 - self.beta1**t
         bias_correction2 = 1.0 - self.beta2**t
+
+        if self.foreach:
+            self._foreach_step(bias_correction1, bias_correction2)
+            return
 
         for p in self.params:
             if p.grad is None:
@@ -123,6 +134,35 @@ class AdamW:
             if self.weight_decay != 0.0:
                 p.mul_(1.0 - self.lr * self.weight_decay)
             p.add_(m_hat / (v_hat.sqrt() + self.eps), alpha=-self.lr)
+
+    def _foreach_step(self, bias_correction1: float, bias_correction2: float) -> None:
+        """``step()`` の更新式を ``torch._foreach_*`` でまとめて適用する(``foreach=True``)。"""
+        params = [p for p in self.params if p.grad is not None]
+        if not params:
+            return
+        for p in params:
+            if id(p) not in self._m:
+                self._m[id(p)] = torch.zeros_like(p)
+                self._v[id(p)] = torch.zeros_like(p)
+        grads = [p.grad for p in params]
+        ms = [self._m[id(p)] for p in params]
+        vs = [self._v[id(p)] for p in params]
+
+        torch._foreach_mul_(ms, self.beta1)
+        torch._foreach_add_(ms, grads, alpha=1.0 - self.beta1)
+        torch._foreach_mul_(vs, self.beta2)
+        torch._foreach_addcmul_(vs, grads, grads, value=1.0 - self.beta2)
+
+        m_hats = torch._foreach_div(ms, bias_correction1)
+        v_hats = torch._foreach_div(vs, bias_correction2)
+        denominators = torch._foreach_sqrt(v_hats)
+        torch._foreach_add_(denominators, self.eps)
+        updates = torch._foreach_div(m_hats, denominators)
+
+        # 重み減衰の適用の順序は既定の経路と同じ(θ_{t-1} に乗法的に掛けてから更新を加える)
+        if self.weight_decay != 0.0:
+            torch._foreach_mul_(params, 1.0 - self.lr * self.weight_decay)
+        torch._foreach_add_(params, updates, alpha=-self.lr)
 
     def set_learning_rate(self, lr: float) -> None:
         """学習率を外部から更新する(warmup + cosine スケジュールとの併用のため)。"""
