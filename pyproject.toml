@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=1.26",
     "sentencepiece>=0.2.2",
     "torch>=2.2",
+    "torchvision>=0.28.0",
 ]
 
 [tool.uv]
