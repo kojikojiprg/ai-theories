@@ -107,6 +107,17 @@ ai-theories/
    - 想定と異なる結果に対して、結果を見た後に立てた解釈を述べる場合は、
      **事前宣言した判定基準による結論とは節または段落を分け、
      事後的な解釈であることを明示する**。事後的な解釈を検証済みの結論として扱わない。
+   - 最終判定が **支持以外**(反証・判定不能・前提不成立)になった実験では、結果・考察の事後的な
+     解釈の節で、**「なぜそうなったか」の考察を必ず書く**。考察には次の 4 つを含める。
+     1. **原因の候補**: 設計(条件・水準・較正の格子・学習量など)と、実際に起きた現象の両面から挙げる。
+     2. **根拠**: セル出力の診断量のうち、その候補を支持または否定するもの。根拠となる数値がない候補は、
+        その旨を明記する。
+     3. **確かめる方法**: その候補が正しいかを検証するには、どういう追加の実験が要るか。実行はしない。
+     4. **教訓**: 次のトピックの設計に持ち越せる一般的な事項があれば書く。
+   - 前提不成立の実験では、「なぜ前提が崩れたか」と「判定関数の参考値がなぜその向きになったか」を
+     **別々の問いとして扱う**。参考値を結論として書かないことは変わらない。
+   - これらの考察はすべて事後的な解釈であり、検証済みの結論として扱わない(直前の項目のとおり)。
+     この規則は 019 から適用し、018 までの実行済みのノートブックには遡及適用しない。
    - シード数が少なく、観測された差がシード間のばらつきに由来する可能性を排除できない
      実験では、判定を **支持 / 反証 / 判定不能** の 3 値で事前宣言する。差がノイズ床
      (noise floor)の 2 倍以内に収まった場合は判定不能として報告し、支持とも反証とも
@@ -277,8 +288,10 @@ Colab の kernel は`uv sync`が作る`.venv`を参照しないため、**`uv ex
 - リポジトリルートに、uv から生成した`requirements.txt`をコミットしておく:
 
 ```bash
-uv export --format requirements-txt --no-hashes --no-emit-project > requirements.txt
+uv export --format requirements-txt --no-hashes --no-dev --no-emit-project > requirements.txt
 ```
+
+- `--no-dev`は、ruff などの開発用の依存(`pyproject.toml`の`dev`グループ)を Colab の環境に入れないために付ける。
 
 - 各ノートブックの **冒頭セル** に、以下に相当するセットアップセルを置く:
 
@@ -313,8 +326,10 @@ import torch  # noqa: E402
 Spaces のビルドは uv を前提としないため、**各アプリディレクトリに`requirements.txt`を配置** してビルドに使わせる。
 
 ```bash
-uv export --format requirements-txt --no-hashes --no-emit-project > apps/001_simple_chat_app/requirements.txt
+uv export --format requirements-txt --no-hashes --no-dev --no-emit-project > apps/001_simple_chat_app/requirements.txt
 ```
+
+- `--no-dev`は、ruff などの開発用の依存(`pyproject.toml`の`dev`グループ)を Spaces のビルドに入れないために付ける。
 
 - この`requirements.txt`も uv からのエクスポート成果物。アプリ固有の依存を追加した場合は`uv add`後に再エクスポートする。
 - アプリの依存が全体と大きく異なる場合は、アプリディレクトリを独立した uv プロジェクト(そのディレクトリの`pyproject.toml` + `uv.lock`)にしてから同様にエクスポートしてよい。
