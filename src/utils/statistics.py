@@ -994,3 +994,58 @@ def paired_cluster_bootstrap_ratio_of_sums(
         ]  # (size, n): 各単位の重み = そのクラスタの抽出回数
         out[start : start + size] = (counts @ numerators.T) / (counts @ denominators)[:, None]
     return out[:, 0] if squeeze else out
+
+
+def compute_normalized_entropy(fractions: Sequence[float]) -> float:
+    """割合の分布のエントロピーを、一様分布のエントロピー log(n) で割った値を返す(022)。
+
+    H(f) / log(n)、H(f) = -sum_i f_i log f_i(f_i = 0 の項は 0 とする)。一様なら 1、1 つの
+    要素に集中していれば 0 になる。MoE(Mixture of Experts)のエキスパートへの負荷の偏りの
+    指標に使う。
+
+    Args:
+        fractions: 長さ n の非負の値(和が 1 でなければ、和で割って正規化する)。n = 1 の
+            場合は、分布が常に一様なので 1.0 を返す。
+
+    Returns:
+        正規化エントロピー(0 以上 1 以下)。
+    """
+    values = np.asarray(fractions, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0 or (values < 0).any() or values.sum() <= 0:
+        raise ValueError("fractions は和が正の、非負の 1 次元の列である必要がある")
+    if values.size == 1:
+        return 1.0
+    values = values / values.sum()
+    positive = values[values > 0]
+    return float(-(positive * np.log(positive)).sum() / math.log(values.size))
+
+
+def compute_normalized_mutual_information(contingency: np.ndarray) -> float:
+    """分割表(行: 変数 X の値、列: 変数 Y の値、要素: 個数)から、相互情報量 I(X; Y) を
+    min(H(X), H(Y)) で割った値を返す(022)。
+
+    X と Y が独立なら 0、一方が他方の関数であれば 1 になる。H(X)・H(Y) のどちらかが 0
+    (どちらかの変数が 1 つの値しか取らない)の場合は 0.0 を返す。
+
+    Args:
+        contingency: 形状 ``(n_x, n_y)`` の非負の個数。
+
+    Returns:
+        正規化した相互情報量(0 以上 1 以下)。
+    """
+    table = np.asarray(contingency, dtype=np.float64)
+    if table.ndim != 2 or (table < 0).any() or table.sum() <= 0:
+        raise ValueError("contingency は和が正の、非負の 2 次元の配列である必要がある")
+    joint = table / table.sum()
+    p_x, p_y = joint.sum(axis=1), joint.sum(axis=0)
+
+    def entropy(p: np.ndarray) -> float:
+        positive = p[p > 0]
+        return float(-(positive * np.log(positive)).sum())
+
+    h_x, h_y = entropy(p_x), entropy(p_y)
+    if min(h_x, h_y) <= 0.0:
+        return 0.0
+    mask = joint > 0
+    mutual_information = float((joint[mask] * np.log(joint[mask] / np.outer(p_x, p_y)[mask])).sum())
+    return min(1.0, max(0.0, mutual_information / min(h_x, h_y)))

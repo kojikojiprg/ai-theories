@@ -256,6 +256,30 @@ class GPTLanguageModel(nn.Module):
         hidden = self.final_norm(hidden)
         return self.lm_head(hidden)
 
+    def auxiliary_losses(self) -> dict[str, Tensor]:
+        """直近の ``forward()`` で各層の順伝播ネットワークが記録した補助損失を、層について
+        合計して返す(022 で追加)。
+
+        順伝播ネットワークが ``auxiliary_losses`` 属性(名前から、係数を掛ける前のスカラーの
+        損失への辞書)を持つ層だけを対象にする(``src/layers/moe.py`` の
+        ``MixtureOfExpertsFeedForward``)。Fedus et al.(Switch Transformer)は負荷分散損失を
+        「Switch 層ごとに全体の損失に加える」としており、ここでも層について平均ではなく合計を
+        とる。該当する層がない(通常の密なモデル)場合は空の辞書を返す。``forward()`` 自体は
+        変更していないので、このメソッドを呼ばない限り 021 までと完全に同一の挙動になる。
+
+        Returns:
+            補助損失の名前から、層について合計したスカラーの Tensor(計算グラフにつながった
+            もの)への辞書。
+        """
+        totals: dict[str, Tensor] = {}
+        for block in self.blocks:
+            losses = getattr(block.feed_forward, "auxiliary_losses", None)
+            if not losses:
+                continue
+            for name, value in losses.items():
+                totals[name] = totals[name] + value if name in totals else value
+        return totals
+
     @torch.no_grad()
     def generate(
         self,

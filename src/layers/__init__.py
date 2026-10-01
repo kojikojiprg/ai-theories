@@ -15,6 +15,13 @@ from src.layers.flash_attention import (
     flash_attention_forward,
 )
 from src.layers.lora import LoRALinear, apply_lora, compute_lora_parameter_count
+from src.layers.moe import (
+    MixtureOfExpertsFeedForward,
+    compute_dispatch_slots,
+    compute_expert_capacity,
+    find_moe_layers,
+    set_statistics_tracking,
+)
 from src.layers.normalization import LayerNormalization, RMSNorm
 from src.layers.positional_encoding import (
     ALiBiPositionBias,
@@ -49,6 +56,7 @@ __all__ = [
     "LayerNormalization",
     "LearnedAbsolutePositionalEmbedding",
     "LoRALinear",
+    "MixtureOfExpertsFeedForward",
     "MultiHeadAttention",
     "NTKAwareScaling",
     "NTKByPartsScaling",
@@ -63,6 +71,8 @@ __all__ = [
     "T5RelativePositionBias",
     "YaRNScaling",
     "apply_lora",
+    "compute_dispatch_slots",
+    "compute_expert_capacity",
     "compute_lora_parameter_count",
     "compute_ntk_aware_base",
     "compute_rope_inverse_frequencies",
@@ -71,10 +81,12 @@ __all__ = [
     "count_block_pairs",
     "create_causal_mask",
     "create_padding_mask",
+    "find_moe_layers",
     "flash_attention_backward",
     "flash_attention_forward",
     "gelu_exact",
     "gelu_tanh_approximation",
     "scaled_dot_product_attention",
+    "set_statistics_tracking",
     "swish",
 ]

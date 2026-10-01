@@ -29,6 +29,13 @@ unscale -> 非有限値の検出 -> unscale 後の勾配に gradient clipping ->
 だった)。``True`` を渡すと最終ステップでも評価し、``eval_bits_per_byte`` の末尾が必ず
 学習を終えた重みの値になる。既定値 ``False`` では 006〜013 と完全に同一の挙動になる。
 
+022(Mixture of Experts)で、``auxiliary_loss_coefficients``(モデルの
+``auxiliary_losses()`` が返す補助損失に係数を掛けて損失に加える)・``eval_steps``(検証する
+ステップを明示する)・``evaluation_fn``(検証の関数を差し替え、診断量を一緒に記録する)引数と、
+評価窓ごとの負の対数尤度を返す ``evaluate_window_negative_log_likelihoods()`` を追加した。
+**これら 3 引数を渡さない場合、021 までと完全に同一の挙動になる**(履歴のキーも増えない。
+022 で変更前のコミットと bit 単位で一致することを確認)。
+
 記号 / Notation:
     B : 訓練バッチサイズ
     S : 系列長(sequence length)
@@ -37,7 +44,7 @@ unscale -> 非有限値の検出 -> unscale 後の勾配に gradient clipping ->
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 import torch.nn.functional as functional
@@ -119,6 +126,51 @@ def evaluate_bits_per_byte(
     return compute_bits_per_byte(total_negative_log_likelihood_nats, total_bytes)
 
 
+def evaluate_window_negative_log_likelihoods(
+    model: nn.Module,
+    evaluation_windows: Tensor,
+    device: torch.device | str,
+    batch_size: int = 16,
+    batch_callback: Callable[[int, int], None] | None = None,
+) -> Tensor:
+    """評価窓ごとの負の対数尤度の和(nats)を返す(022)。
+
+    ``evaluate_bits_per_byte()`` と同じ規則(窓 ``[w_0, ..., w_{S-1}]`` の位置 ``0 .. S-2`` の
+    logits で位置 ``1 .. S-1`` のトークンを予測する。FP32)で、合計ではなく窓ごとの和を返す。
+    窓を単位(またはそのまとまりである記事を単位)とするブートストラップに使う。パディングの
+    ない窓だけを渡す想定で、マスクは取らない。窓は先頭から順に ``batch_size`` 個ずつ処理する
+    (MoE 層のようにバッチ内の他のトークンに出力が依存する層では、結果が区切り方に依存する
+    ので、比べる条件どうしで同じ ``batch_size`` を使う)。
+
+    Args:
+        model: 評価対象の言語モデル(``forward(token_ids) -> logits`` を持つ)。
+        evaluation_windows: 形状 ``(num_windows, S)`` の LongTensor。
+        device: 評価に使うデバイス。
+        batch_size: 1 回の順伝播で処理する窓の数。
+        batch_callback: 各バッチの順伝播の直後に、そのバッチの窓の範囲 ``(start, end)`` を
+            引数として呼ぶ関数。モデルの層が直近の順伝播について記録した量(MoE 層の
+            割り当て先など)を、窓ごとに取り出すために使う。``None``(既定値)なら呼ばない。
+
+    Returns:
+        形状 ``(num_windows,)`` の float64 の Tensor(CPU)。
+    """
+    model.eval()
+    sums = []
+    with torch.no_grad():
+        for start in range(0, evaluation_windows.size(0), batch_size):
+            batch = evaluation_windows[start : start + batch_size].to(device)
+            logits = model(batch)
+            if batch_callback is not None:
+                batch_callback(start, start + batch.size(0))
+            per_token_nll = functional.cross_entropy(
+                logits[:, :-1, :].reshape(-1, logits.size(-1)).float(),
+                batch[:, 1:].reshape(-1),
+                reduction="none",
+            ).view(batch.size(0), -1)
+            sums.append(per_token_nll.cpu().double().sum(dim=1))
+    return torch.cat(sums)
+
+
 def train_language_model(
     model: nn.Module,
     train_token_ids: Tensor,
@@ -138,6 +190,9 @@ def train_language_model(
     autocast_dtype: torch.dtype | None = None,
     loss_scaler: object | None = None,
     evaluate_at_final_step: bool = False,
+    auxiliary_loss_coefficients: Mapping[str, float] | None = None,
+    eval_steps: Sequence[int] | None = None,
+    evaluation_fn: Callable[[nn.Module], tuple[float, dict]] | None = None,
 ) -> dict[str, list[float]]:
     """Adam・固定学習率・fp32 の学習ループ(007 で AdamW・学習率スケジュール・
     gradient clipping に対応、後方互換性あり)。
@@ -196,9 +251,29 @@ def train_language_model(
             ``step % eval_interval == 0`` のステップでのみ検証する(006〜013 と完全に
             同一の挙動)。``eval_interval`` が ``num_steps`` を割り切らないとき、
             ``False`` では ``eval_bits_per_byte`` の末尾が学習途中の値になる点に注意する。
+        auxiliary_loss_coefficients: 補助損失の名前から係数への対応(022 で追加)。
+            指定した場合、順伝播のたびに ``model.auxiliary_losses()``(名前から、係数を
+            掛ける前のスカラーの損失への辞書)を呼び、ここに名前のある損失に係数を掛けて
+            交差エントロピー損失に加えたものを逆伝播する(係数が 0 の損失は加えないが、
+            値は記録する)。補助損失は FP32 で加える(``autocast_dtype`` の指定によらない)。
+            ``None``(既定値)の場合は ``auxiliary_losses()`` を呼ばない。
+        eval_steps: 検証するステップ番号(1-indexed)の列(022 で追加)。指定した場合、
+            ``eval_interval`` の規則の代わりに、ここに含まれるステップでだけ検証する
+            (``evaluate_at_final_step`` が ``True`` なら最終ステップでも検証する)。
+            ``None``(既定値)の場合は ``eval_interval`` の規則を使う。
+        evaluation_fn: 検証の関数(022 で追加)。モデルを受け取り、
+            ``(bits_per_byte, diagnostics)`` を返す。指定した場合、``evaluate_bits_per_byte()``
+            の代わりにこれを呼び、``diagnostics`` を ``eval_diagnostics`` に記録する
+            (``evaluation_windows``・``evaluation_mask``・``total_eval_bytes`` は使わない)。
+            ``None``(既定値)の場合は ``evaluate_bits_per_byte()`` を使う。
 
     Returns:
-        以下のキーを持つ履歴の辞書:
+        以下のキーを持つ履歴の辞書(``auxiliary_losses`` は ``auxiliary_loss_coefficients``
+        を、``eval_diagnostics`` は ``evaluation_fn`` を指定したときだけ含まれる):
+
+        - ``"auxiliary_losses"``: 補助損失の名前から、ステップごとの値(係数を掛ける前)の
+          リストへの辞書。``train_loss`` は補助損失を含まない交差エントロピー損失のままである。
+        - ``"eval_diagnostics"``: ``eval_step`` に対応する、``evaluation_fn`` が返した診断量。
 
         - ``"step"``: 学習ステップ番号のリスト(1-indexed)。
         - ``"train_loss"``: ステップごとの訓練損失(cross entropy、nats、バッチ平均、
@@ -252,6 +327,12 @@ def train_language_model(
         "eval_bits_per_byte": [],
     }
 
+    if auxiliary_loss_coefficients is not None:
+        history["auxiliary_losses"] = {name: [] for name in auxiliary_loss_coefficients}
+    if evaluation_fn is not None:
+        history["eval_diagnostics"] = []
+    eval_step_set = None if eval_steps is None else set(eval_steps)
+
     previous_loss: float | None = None
     for step in range(1, num_steps + 1):
         model.train()
@@ -277,9 +358,19 @@ def train_language_model(
                 logits.reshape(-1, logits.size(-1)), targets.reshape(-1)
             )
 
+        # 補助損失(022): 係数を掛けて交差エントロピー損失に加える。記録する train_loss は
+        # 交差エントロピー損失のままにする。auxiliary_loss_coefficients が None の場合は何もしない。
+        total_loss = loss
+        if auxiliary_loss_coefficients is not None:
+            auxiliary = model.auxiliary_losses()
+            for name, coefficient in auxiliary_loss_coefficients.items():
+                history["auxiliary_losses"][name].append(auxiliary[name].detach())
+                if coefficient != 0.0:
+                    total_loss = total_loss.float() + coefficient * auxiliary[name]
+
         # loss scaling: 連鎖律により、損失を S 倍すると全パラメータの勾配も S 倍になる
         # (011 理論セクション 3 節)。loss_scaler が None の場合はスケーリングなし。
-        scaled_loss = loss_scaler.scale_loss(loss) if loss_scaler is not None else loss
+        scaled_loss = loss_scaler.scale_loss(total_loss) if loss_scaler is not None else total_loss
 
         optimizer.zero_grad()
         scaled_loss.backward()
@@ -331,11 +422,22 @@ def train_language_model(
         history["loss_scale"].append(loss_scaler.scale if loss_scaler is not None else 1.0)
         history["step_skipped"].append(found_inf)
 
-        if step % eval_interval == 0 or (evaluate_at_final_step and step == num_steps):
-            bits_per_byte = evaluate_bits_per_byte(
-                model, evaluation_windows, evaluation_mask, total_eval_bytes, device
-            )
+        scheduled = step % eval_interval == 0 if eval_step_set is None else step in eval_step_set
+        if scheduled or (evaluate_at_final_step and step == num_steps):
+            if evaluation_fn is None:
+                bits_per_byte = evaluate_bits_per_byte(
+                    model, evaluation_windows, evaluation_mask, total_eval_bytes, device
+                )
+            else:
+                bits_per_byte, diagnostics = evaluation_fn(model)
+                history["eval_diagnostics"].append(diagnostics)
             history["eval_step"].append(step)
             history["eval_bits_per_byte"].append(bits_per_byte)
 
+    if auxiliary_loss_coefficients is not None:
+        # ステップごとの同期を避けるため、補助損失の値は学習の後にまとめて数値にする
+        history["auxiliary_losses"] = {
+            name: torch.stack(values).tolist() if values else []
+            for name, values in history["auxiliary_losses"].items()
+        }
     return history
