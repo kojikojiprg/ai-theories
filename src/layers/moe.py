@@ -131,7 +131,10 @@ class MixtureOfExpertsFeedForward(nn.Module):
         num_experts: エキスパート数 E。
         top_k: 1 トークンが通るエキスパートの数 k。
         train_capacity_factor: 学習時(``self.training`` が True)の capacity factor。
-        eval_capacity_factor: 評価時の capacity factor。
+        eval_capacity_factor: 評価時の capacity factor。``None`` の場合、評価時は破棄を
+            行わない(容量をトークン数 T にした固定形状 ``(E, T, d_model)`` で計算する。
+            計算時間はデータに依存しないが、エキスパートの行列積の量は E 倍になる)。破棄が
+            なければ、あるトークンの出力は同じバッチの他のトークンに依存しない。
         beta: Swish の形状パラメータ。
         renormalize_gates: 選ばれた k 個の確率の和でゲートを割るか。
         router_init_scale: ルーターの重みの初期化の尺度 s。標準偏差 sqrt(s / d_model) の
@@ -146,7 +149,7 @@ class MixtureOfExpertsFeedForward(nn.Module):
         num_experts: int,
         top_k: int = 1,
         train_capacity_factor: float = 1.25,
-        eval_capacity_factor: float = 2.0,
+        eval_capacity_factor: float | None = 2.0,
         beta: float = 1.0,
         renormalize_gates: bool = False,
         router_init_scale: float = 0.1,
@@ -158,7 +161,9 @@ class MixtureOfExpertsFeedForward(nn.Module):
             raise ValueError(
                 "top_k = 1 でゲートを正規化すると常に 1 になり、ルーターに勾配が流れない"
             )
-        if min(train_capacity_factor, eval_capacity_factor) <= 0.0:
+        if train_capacity_factor <= 0.0 or (
+            eval_capacity_factor is not None and eval_capacity_factor <= 0.0
+        ):
             raise ValueError("capacity factor は正の値である必要がある")
         self.d_model = d_model
         self.d_ff = d_ff
@@ -188,7 +193,7 @@ class MixtureOfExpertsFeedForward(nn.Module):
         self.track_statistics = False
         self._statistics: dict[str, dict[str, Tensor]] = {}
 
-    def capacity_factor(self) -> float:
+    def capacity_factor(self) -> float | None:
         """現在のモード(学習 / 評価)の capacity factor。"""
         return self.train_capacity_factor if self.training else self.eval_capacity_factor
 
@@ -223,7 +228,11 @@ class MixtureOfExpertsFeedForward(nn.Module):
         # 割り当てを「第 1 候補の全トークン、第 2 候補の全トークン、...」の順に並べる
         expert_index = top_index.t().reshape(-1)  # (k T,)
         token_index = torch.arange(num_tokens, device=flat_x.device).repeat(top_k)
-        capacity = compute_expert_capacity(num_tokens, num_experts, top_k, self.capacity_factor())
+        capacity_factor = self.capacity_factor()
+        if capacity_factor is None:  # 破棄なし: どのエキスパートも全トークンを受け取れる
+            capacity = num_tokens
+        else:
+            capacity = compute_expert_capacity(num_tokens, num_experts, top_k, capacity_factor)
         slot, keep = compute_dispatch_slots(expert_index, num_experts, capacity)
 
         # 振り分け: 枠ごとに、そこに入るトークンの番号を引く(空いた枠は 0 のトークン T を指す)
