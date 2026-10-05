@@ -38,7 +38,7 @@ API を叩いて待つだけの処理であり、``load_wikipedia_corpus()``(``s
 
 **記事のオフセットの追加(015)**: ``--article-offsets``を指定すると、``corpus.txt``は変えずに、
 既存の``metadata.json``に記事ごとの文字位置(``article_offsets``)を追加する処理だけを行う
-(対象は``supports_article_offsets``が真のスペック、現在は``en_006``のみ)。``corpus.txt``は
+(対象は``supports_article_offsets``が真のスペック、現在は``en_006``と``en``)。``corpus.txt``は
 記事を改行 1 つで連結したもので、記事の中にも改行があるため、``corpus.txt``だけからは記事の
 境界を復元できない。マニフェストの全記事を個別に取得し(記事単位のキャッシュを使うので、
 中断しても再実行時に取得済みの記事は再取得しない)、改行 1 つで連結した結果が Hub の
@@ -134,6 +134,11 @@ CORPUS_SPECS = [
         "cache_dir": _REPO_ROOT / ".cache" / "wikipedia_en",
         "loader": load_english_wikipedia_corpus,
         "usage_note": "009(スケーリング則)の学習グリッド用",
+        # 024: metadata.json に記事ごとの文字位置(article_offsets)を追加する対象
+        # (--article-offsets)。024 は記事を単位として学習用・検証用・評価用に分けるために
+        # 記事の境界を使う。記事単位のキャッシュ(wikipedia_en_articles/)に 9826 記事が
+        # すべて取得済みなら、Wikipedia API は呼ばれない。
+        "supports_article_offsets": True,
         "skip": False,
     },
     {
