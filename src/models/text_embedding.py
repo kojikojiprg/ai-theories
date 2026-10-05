@@ -165,7 +165,7 @@ def encode_tokens(
     was_training = model.training
     model.eval()
     full = model.embedding_dimension
-    keys = [full if dim is None else int(dim) for dim in dimensions]
+    keys = [full if dimension is None else int(dimension) for dimension in dimensions]
     by_dimension: dict[int, list[Tensor]] = {k: [] for k in keys}
     by_position: dict[int, list[Tensor]] = {int(p): [] for p in positions or ()}
     try:
