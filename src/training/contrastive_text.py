@@ -27,6 +27,9 @@ passage の埋め込み、``s_ij = u_i^T v_j`` はコサイン類似度、``N`` 
 を学習の前に作ってデバイスに置き、各ステップでは切り出すだけにする。同じシードの学習どうしは、条
 件によらず同じ組を同じ順序で見る。
 
+**同じ組での損失の測定**(``compute_pair_losses()``): 学習と同じ組・同じ損失で、更新を行わずに
+損失だけを測る。学習の最後の区間の訓練損失を、同じ組での学習前のモデルの損失と比べるために使う。
+
 """
 
 from __future__ import annotations
@@ -298,3 +301,72 @@ def train_text_embedding(
     history["data_stream_hash"] = digest.hexdigest()
     history["train_seconds"] = train_seconds
     return history
+
+
+def compute_pair_losses(
+    model: TextEmbeddingModel,
+    token_stream: Tensor,
+    article_starts: np.ndarray,
+    schedule: dict[str, np.ndarray],
+    steps: Sequence[int],
+    query_length: int,
+    passage_length: int,
+    temperature: float,
+    matryoshka_dimensions: Sequence[int] | None = None,
+    use_fp16_autocast: bool = False,
+) -> np.ndarray:
+    """``schedule`` の指定したステップの組での ``model`` の損失(勾配なし。1 ステップごと)。
+
+    ``train_text_embedding()`` と同じ組の切り出し・同じ損失(``matryoshka_dimensions`` を渡すと
+    Matryoshka Representation Learning の損失)で、更新を行わずに損失だけを測る。学習の最後の区間
+    の訓練損失を、**同じ組での学習前のモデルの損失** と比べるために使う。1 ステップごとの損失は、
+    バッチごとの難しさでばらつくので、別々のバッチの損失の平均どうしを比べると、区間が短いほど比の
+    ばらつきが大きくなる。同じバッチどうしを比べれば、バッチの難しさは打ち消される。学習率 0 の学習
+    の訓練損失は、この関数の値と一致する(更新がないため)。
+
+    Args:
+        model: ``TextEmbeddingModel``(``token_stream`` と同じデバイス)。呼び出しの前後で変更しない
+            (評価モードで測り、元のモードに戻す)。
+        token_stream, article_starts, schedule: ``train_text_embedding()`` と同じ引数。
+        steps: 測るステップ(0 始まりの行番号。``schedule`` の行)。
+        query_length, passage_length, temperature, matryoshka_dimensions, use_fp16_autocast:
+            ``train_text_embedding()`` と同じ。
+
+    Returns:
+        形状 ``(len(steps),)`` の float64 の配列。
+    """
+    device = token_stream.device
+    if use_fp16_autocast and device.type != "cuda":
+        raise ValueError("use_fp16_autocast は CUDA のときのみ有効にする")
+    starts = torch.as_tensor(np.asarray(article_starts)[schedule["article"]], device=device)
+    query_begin = starts + torch.as_tensor(schedule["query_start"], device=device)
+    passage_begin = starts + torch.as_tensor(schedule["passage_start"], device=device)
+    query_offsets = torch.arange(query_length, device=device)
+    passage_offsets = torch.arange(passage_length, device=device)
+
+    was_training = model.training
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for step in steps:
+            queries = token_stream[query_begin[step][:, None] + query_offsets[None, :]]
+            passages = token_stream[passage_begin[step][:, None] + passage_offsets[None, :]]
+            with torch.autocast(
+                device_type=device.type, dtype=torch.float16, enabled=use_fp16_autocast
+            ):
+                pooled_queries = model.pooled(queries)
+                pooled_passages = model.pooled(passages)
+            pooled_queries, pooled_passages = pooled_queries.float(), pooled_passages.float()
+            if matryoshka_dimensions:
+                loss, _ = matryoshka_representation_loss(
+                    pooled_queries, pooled_passages, matryoshka_dimensions, temperature
+                )
+            else:
+                loss = info_nce_loss(
+                    truncate_and_normalize(pooled_queries),
+                    truncate_and_normalize(pooled_passages),
+                    temperature,
+                )
+            losses.append(loss)
+    model.train(was_training)
+    return torch.stack(losses).cpu().numpy().astype(np.float64)
