@@ -1,7 +1,7 @@
 """テキスト検索(retrieval)の学習データ・評価データの構成(024)。
 
-英語 Wikipedia のコーパス(``kojikojiprg/ai-theories-corpus-en-pretraining``、356 記事)を **記事
-を単位として** 学習用・検証用・評価用に分け、次の 2 つを作る。
+英語 Wikipedia のコーパス(``kojikojiprg/ai-theories-corpus-en``、9,826 記事)のうち、使う記事を
+**記事を単位として** 学習用・検証用・評価用に分け、次の 2 つを作る。
 
 1. **学習の組**: 同じ記事から切り出した、**重ならない** 2 つの区間(長さ ``L_q`` の query 側と長
    さ ``L_p`` の passage 側)。Contriever(Izacard et al., TMLR 2022)の independent cropping に相
@@ -16,7 +16,7 @@
 分割と索引の構成は、シードと引数だけで決まる決定的な関数にしてある。025 などの後続のトピックが同
 じ評価用の passage の集合を再構成できる。
 
-**記事ごとの passage 数の上限**: 記事の長さは極端に偏る(中央値 約 9 千トークン、最長 約 16 万ト
+**記事ごとの passage 数の上限**: 記事の長さは極端に偏る(中央値 約 1.4 万トークン、最長 約 12.5 万ト
 ークン)。上限がないと、最長の記事 1 本が索引と query の多くを占め、正解(同じ記事の passage)が大
 量にあるので検索が易しくなる。そこで、索引に入れる passage は記事ごとに最大
 ``max_passages_per_article`` 個とし、記事の全体から等間隔に選ぶ。
@@ -63,8 +63,9 @@ class ArticleSplit:
 def find_articles_starting_at_or_after(spans: Sequence[dict], character_position: int) -> list[int]:
     """文字位置 ``character_position`` 以降に **始まる** 記事の番号(コーパスの中の並び順)を返す。
 
-    008 の事前学習はコーパスの先頭から ``character_position`` 手前までだけを使うので、その位置以降に
-    始まる記事は、008 が一度も見ていない記事である(位置をまたぐ記事は、一部を見ているので含めない)。
+    008 の事前学習と英語のトークナイザの学習は、コーパスの先頭から一定の位置の手前までだけを使う
+    ので、その位置以降に始まる記事は、どちらも一度も見ていない記事である(位置をまたぐ記事は、一部を
+    見ているので含めない)。
 
     Args:
         spans: ``locate_wikipedia_article_spans()`` が返す、``{"start", "end", ...}`` の辞書のリスト
@@ -77,59 +78,68 @@ def find_articles_starting_at_or_after(spans: Sequence[dict], character_position
 def split_articles(
     article_token_counts: Sequence[int],
     min_tokens_for_retrieval: int,
-    forced_evaluation: Sequence[int],
+    candidate_articles: Sequence[int],
     num_validation: int,
     num_evaluation: int,
     seed: int,
 ) -> ArticleSplit:
-    """記事を学習用・検証用・評価用に分ける(決定的)。
+    """候補の記事を学習用・検証用・評価用に分ける(決定的)。
 
-    検証用・評価用の記事は、検索に使える記事(トークン数が ``min_tokens_for_retrieval`` 以上、
-    すなわち passage を 2 個以上持つ記事)の中から選ぶ。評価用には、まず ``forced_evaluation``
-    (008 が見ていない記事)のうち検索に使えるものをすべて入れ、残りをシードで固定した乱数による
-    並べ替えの先頭から補う。次の ``num_validation`` 個を検証用にする。それ以外の記事(検索に使えない
-    短い記事を含む)はすべて学習用に入れる(短くて組が作れない記事は、学習でも使われない)。
+    ``candidate_articles`` に含まれない記事は、3 つのどれにも入れない(使わない)。検証用・評価用の
+    記事は、候補のうち検索に使える記事(トークン数が ``min_tokens_for_retrieval`` 以上、すなわち
+    passage を 2 個以上持つ記事)の中から、シードで固定した乱数による並べ替えの先頭から選ぶ。
+    先頭の ``num_evaluation`` 個を評価用、次の ``num_validation`` 個を検証用にする。候補の残り(検索
+    に使えない短い記事を含む)はすべて学習用に入れる(短くて組が作れない記事は、学習でも使われない)。
 
     Args:
-        article_token_counts: 記事ごとのトークン数(コーパスの中の順)。
+        article_token_counts: 記事ごとのトークン数(コーパスの中の順。候補でない記事の値は使わない)。
         min_tokens_for_retrieval: 検証用・評価用の記事に要求する最小のトークン数。
-        forced_evaluation: 評価用に必ず入れる記事の番号。
+        candidate_articles: 使ってよい記事の番号。
         num_validation: 検証用の記事の数。
-        num_evaluation: 評価用の記事の数(``forced_evaluation`` の分を含む)。
+        num_evaluation: 評価用の記事の数。
         seed: 並べ替えの乱数シード。
 
     Returns:
-        昇順に並べた記事の番号の 3 つ組(互いに素で、和集合が全記事)。
+        昇順に並べた記事の番号の 3 つ組(互いに素で、和集合が ``candidate_articles``)。
     """
     counts = np.asarray(article_token_counts, dtype=np.int64)
-    num_articles = len(counts)
-    eligible = counts >= min_tokens_for_retrieval
-    forced = sorted({int(a) for a in forced_evaluation if eligible[a]})
-    if len(forced) > num_evaluation:
-        raise ValueError("forced_evaluation の記事数が num_evaluation を超えている")
-    pool = np.array([a for a in range(num_articles) if eligible[a] and a not in set(forced)])
-    order = np.random.default_rng(seed).permutation(pool)
-    num_extra = num_evaluation - len(forced)
-    if num_extra + num_validation > len(order):
+    candidates = np.array(sorted({int(a) for a in candidate_articles}), dtype=np.int64)
+    pool = candidates[counts[candidates] >= min_tokens_for_retrieval]
+    if num_evaluation + num_validation > len(pool):
         raise ValueError("検索に使える記事が足りない")
-    evaluation = np.array(sorted(forced + order[:num_extra].tolist()), dtype=np.int64)
-    validation = np.array(
-        sorted(order[num_extra : num_extra + num_validation].tolist()), dtype=np.int64
-    )
-    held_out = set(evaluation.tolist()) | set(validation.tolist())
-    train = np.array([a for a in range(num_articles) if a not in held_out], dtype=np.int64)
+    order = np.random.default_rng(seed).permutation(pool)
+    evaluation = np.sort(order[:num_evaluation]).astype(np.int64)
+    validation = np.sort(order[num_evaluation : num_evaluation + num_validation]).astype(np.int64)
+    held_out = np.concatenate([evaluation, validation])
+    train = candidates[~np.isin(candidates, held_out)]
     return ArticleSplit(train=train, validation=validation, evaluation=evaluation)
 
 
-def encode_articles(tokenizer, corpus_text: str, spans: Sequence[dict]) -> list[np.ndarray]:
+def encode_articles(
+    tokenizer,
+    corpus_text: str,
+    spans: Sequence[dict],
+    article_ids: Sequence[int] | None = None,
+) -> list[np.ndarray | None]:
     """記事ごとに別々に符号化する(記事の境界をまたぐトークンを作らない)。
 
+    Args:
+        tokenizer: ``encode()`` を持つトークナイザ。
+        corpus_text: コーパス全文。
+        spans: 記事ごとの ``{"start", "end"}``(コーパスの中の順)。
+        article_ids: 符号化する記事の番号。``None`` なら全記事。指定しない記事の要素は ``None`` に
+            する(使わない記事を符号化して、時間とメモリを使わないため)。
+
     Returns:
-        記事ごとのトークン ID の配列(int64)のリスト(コーパスの中の順)。
+        記事ごとのトークン ID の配列(int32。語彙サイズが 2^31 未満の範囲で値は変わらない)の
+        リスト(コーパスの中の順、``len(spans)`` 個)。
     """
+    selected = set(range(len(spans))) if article_ids is None else {int(a) for a in article_ids}
     return [
-        np.asarray(tokenizer.encode(corpus_text[span["start"] : span["end"]]), dtype=np.int64)
-        for span in spans
+        np.asarray(tokenizer.encode(corpus_text[span["start"] : span["end"]]), dtype=np.int32)
+        if i in selected
+        else None
+        for i, span in enumerate(spans)
     ]
 
 
@@ -218,7 +228,8 @@ def build_retrieval_set(
        シード付きの乱数で決めた位置から ``query_length`` トークン切り出す。
 
     Args:
-        article_tokens: 全記事のトークン ID(コーパスの中の順、``encode_articles()``)。
+        article_tokens: 記事のトークン ID(コーパスの中の順、``encode_articles()``)。
+            ``article_ids`` の記事の要素だけを参照する。
         article_ids: 使う記事の番号。
         passage_length: ``L_p``。
         query_length: ``L_q``(``L_p`` 以下)。
@@ -352,4 +363,4 @@ def concatenate_articles(
     """
     parts = [article_tokens[int(a)] for a in article_ids]
     starts = np.concatenate([[0], np.cumsum([len(p) for p in parts])[:-1]]).astype(np.int64)
-    return np.concatenate(parts).astype(np.int64), starts
+    return np.concatenate(parts, dtype=np.int64), starts
