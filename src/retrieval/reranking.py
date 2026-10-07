@@ -68,9 +68,12 @@ class RerankingResult:
         """候補に正解が 1 つ以上入っている query の割合(並べ替えで到達できる Recall の上限)。"""
         return float((self.rank <= self.num_candidates).mean())
 
+    def reciprocal_ranks(self) -> np.ndarray:
+        """query ごとの逆順位 ``1 / rank``(候補に正解がなければ 0)。"""
+        return np.where(self.rank <= self.num_candidates, 1.0 / self.rank, 0.0)
+
     def mean_reciprocal_rank(self) -> float:
-        reciprocal = np.where(self.rank <= self.num_candidates, 1.0 / self.rank, 0.0)
-        return float(reciprocal.mean())
+        return float(self.reciprocal_ranks().mean())
 
     def mean_normalized_discounted_cumulative_gain_at_10(self) -> float:
         return float(self.normalized_discounted_cumulative_gain_at_10.mean())
