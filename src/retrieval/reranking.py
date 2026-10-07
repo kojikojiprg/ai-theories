@@ -21,8 +21,13 @@
 Mean Reciprocal Rank、normalized Discounted Cumulative Gain の上位 10 件の値)を使う。
 並べ替えの対象は第 1 段の上位 ``K`` 件だけなので、候補に正例が 1 つもない query の順位は
 ``K + 1``(候補の外)とし、平均逆順位では逆数を 0 とみなす(024 の索引全体の順位と異なり、
-候補の外の順位は定義されない)。同点のスコアは、第
-1 段の順位(候補の並び)が先の候補を上位とする(正例に有利・不利のどちらにも偏らない)。
+候補の外の順位は定義されない)。
+
+**同点のスコアは、正例に不利に数える**: 正例の順位は ``1 + (スコアが最も高い正例以上の、正例でない
+候補の数)`` である(同点では、正例でない候補を上位とする)。第 1 段の順位(候補の並び)は同点の
+解決に使わない。定数に近い出力に崩れたモデルが第 1 段の順位を受け継ぐと、指標が並べ替えモデルの
+識別の力ではなく第 1 段の力を測ってしまうためである。全候補に同じスコアを返すモデルの Recall@10 は、
+候補に正例が ``K - 9`` 個以上入っていない限り 0 になる。
 
 記号 / Notation:
     Q : query の数、K : 並べ替える候補の数、L_q・L_p : query・passage の長さ、G_i : query i
@@ -88,9 +93,12 @@ def rank_reranked_candidates(
 ) -> RerankingResult:
     """候補のスコアで並べ替えた後の順位と指標を求める。
 
+    同点のスコアは正例に不利に数える(正例でない候補を上位とする。モジュールの説明)。
+
     Args:
         scores: 形状 ``(Q, K)``。候補のスコア(大きいほど上位)。
-        candidate_ids: 形状 ``(Q, K)``。候補のコーパスの passage の添字(第 1 段の順位の順)。
+        candidate_ids: 形状 ``(Q, K)``。候補のコーパスの passage の添字(第 1 段の順位の順。
+        同点の解決には使わない)。
         query_articles: 形状 ``(Q,)``。query の記事。
         passage_articles: コーパスの passage ごとの記事。
         num_positives: 形状 ``(Q,)``。query ごとの正解の数(コーパス全体での、同じ記事の他の
@@ -98,7 +106,8 @@ def rank_reranked_candidates(
     """
     num_queries, k = candidate_ids.shape
     is_positive = passage_articles[candidate_ids] == query_articles[:, None]
-    order = np.argsort(-scores.astype(np.float64), axis=1, kind="stable")
+    # 主キーはスコアの降順、同点では正例でない候補(False)を先にする(正例に不利)
+    order = np.lexsort((is_positive.astype(np.int8), -scores.astype(np.float64)), axis=1)
     reordered = np.take_along_axis(is_positive, order, axis=1)
     any_positive = reordered.any(axis=1)
     rank = np.where(any_positive, reordered.argmax(axis=1) + 1, k + 1).astype(np.int64)

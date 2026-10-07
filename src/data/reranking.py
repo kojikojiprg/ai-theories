@@ -8,13 +8,19 @@
 **並べ替えの学習の組**: 並べ替えモデルの学習データは **学習用の記事のみ** から作る。
 1 つの組は``(query、正例、負例 n 個)`` で、
 
-- query: 学習用の記事の query(コーパスの query のうち、学習用の記事から切り出したもの)。
-- 正例: その query の記事の、元の passage 以外の passage から一様に 1 つ。
+- query: 学習用の記事の query(コーパスの query のうち、学習用の記事から切り出したもの)のうち、
+  **第 1 段の上位 ``K_mine`` 件(下の採掘の結果)に、同じ記事の passage(query の元の passage を除く)が
+  1 つ以上ある query** だけ(``usable_training_queries()``)。
+- 正例: その上位 ``K_mine`` 件の中の、同じ記事の passage から一様に 1 つ。推論時に並べ替えモデルが
+  見る正例は、必ず第 1 段の上位 ``K`` 件の中にあるので、学習の正例も同じ範囲から選び、学習時と
+  推論時の分布を、負例だけでなく正例にも揃える(正例が上位の外にあると、「第 1 段のスコアが低い
+  候補が正例」という、推論時には成り立たない手がかりで損失を下げられる)。
 - 困難な負例(hard negative): 第 1 段の検索器(024 のモデルによる全探索)で、**学習用の記事の passage
   だけ**を対象にして上位 ``K_mine`` 件を求め、そのうち **query と同じ記事の passage
   を除いた**残りから、一様に``n`` 個を選ぶ(偽の負例の抑制。同じ記事の passage
   は正例なので負例にしない)。推論時に並べ替える候補は、第 1 段の上位 ``K`` 件なので、
-  ``K_mine = K`` にして、学習時の負例の分布を推論時の入力の分布に揃える。
+  ``K_mine = K`` にして、学習時の負例の分布を推論時の入力の分布に揃える。正例は、同じ記事の
+  passage なので、この負例の候補(同じ記事を除く)には現れない。
 - ランダムな負例: 学習用の記事の passage から、query と同じ記事のものを除いて、一様に ``n`` 個。
 
 同じシードでは、query と正例の系列は **負例の種類によらず同じ**である(困難な負例とランダムな負例
@@ -52,6 +58,8 @@ class RerankingSchedule:
         num_mined_considered: 採掘の上位 ``K_mine`` 件の、調べた件数の合計(``T * B * K_mine``)。
         num_fallback_queries: 同じ記事を除いた残りが ``n`` 個に満たず、
         ランダムな負例で補った組の数。
+        num_usable_queries: 学習に使える query の数(``usable_training_queries()`` が真の数)。
+        num_train_queries: 学習用の query の数。
     """
 
     query: np.ndarray
@@ -61,6 +69,8 @@ class RerankingSchedule:
     num_same_article_removed: int
     num_mined_considered: int
     num_fallback_queries: int
+    num_usable_queries: int = 0
+    num_train_queries: int = 0
 
     def digest(self) -> str:
         """query と正例の系列の SHA-256(負例の種類によらない。同じシードで組が揃うことの確認)。"""
@@ -125,6 +135,35 @@ def mine_candidate_lists(
     return np.asarray(pool_passages)[local]
 
 
+def usable_training_queries(
+    train_queries: np.ndarray,
+    mined_candidates: np.ndarray,
+    query_articles: np.ndarray,
+    query_sources: np.ndarray,
+    passage_articles: np.ndarray,
+) -> np.ndarray:
+    """学習に使える query の真偽(形状 ``(len(train_queries),)``)。
+
+    採掘した第 1 段の上位 ``K_mine`` 件に、query と同じ記事の passage(query の元の passage を除く)が
+    1 つ以上ある query が、学習に使える。その同じ記事の passage が、正例の候補になる。
+    """
+    return _positive_candidate_mask(
+        train_queries, mined_candidates, query_articles, query_sources, passage_articles
+    ).any(axis=1)
+
+
+def _positive_candidate_mask(
+    train_queries: np.ndarray,
+    mined_candidates: np.ndarray,
+    query_articles: np.ndarray,
+    query_sources: np.ndarray,
+    passage_articles: np.ndarray,
+) -> np.ndarray:
+    """採掘した上位の各候補が、正例の候補(同じ記事の passage で、元の passage でない)かの真偽。"""
+    same_article = passage_articles[mined_candidates] == query_articles[train_queries][:, None]
+    return same_article & (mined_candidates != query_sources[train_queries][:, None])
+
+
 def sample_reranking_schedule(
     train_queries: np.ndarray,
     mined_candidates: np.ndarray,
@@ -152,12 +191,20 @@ def sample_reranking_schedule(
         num_negatives: ``n``。
         seed: 乱数シード。
 
+    学習に使う query は、採掘した上位に正例の候補がある query(``usable_training_queries()``)だけで、
+    正例は、その上位の中の同じ記事の passage から一様に選ぶ。
+
     Returns:
         ``RerankingSchedule``。query と正例は乱数の生成器 ``(seed, 0)``、困難な負例は
         ``(seed, 1)``、
         ランダムな負例は ``(seed, 2)`` で引く(負例の種類によらず query と正例が同じになる)。
     """
-    ranges = article_passage_ranges(passage_articles)
+    positive_mask = _positive_candidate_mask(
+        train_queries, mined_candidates, query_articles, query_sources, passage_articles
+    )
+    usable = np.nonzero(positive_mask.any(axis=1))[0]
+    if len(usable) < batch_queries:
+        raise ValueError(f"学習に使える query が少なすぎる: {len(usable)} < B = {batch_queries}")
     rng_query = np.random.default_rng([seed, 0])
     rng_hard = np.random.default_rng([seed, 1])
     rng_random = np.random.default_rng([seed, 2])
@@ -168,16 +215,16 @@ def sample_reranking_schedule(
     random_out = np.empty_like(hard_out)
     removed = considered = fallback = 0
     for step in range(num_steps):
-        positions = rng_query.choice(len(train_queries), size=batch_queries, replace=False)
+        positions = usable[rng_query.choice(len(usable), size=batch_queries, replace=False)]
         for b, position in enumerate(positions.tolist()):
             query = int(train_queries[position])
-            article, source = int(query_articles[query]), int(query_sources[query])
-            first, last = ranges[article]
-            members = np.arange(first, last)
-            members = members[members != source]
+            article = int(query_articles[query])
+            mined = mined_candidates[position]
+            members = mined[
+                positive_mask[position]
+            ]  # 上位の中の、同じ記事の passage(元の passage を除く)
             query_out[step, b] = query
             positive_out[step, b] = members[rng_query.integers(0, len(members))]
-            mined = mined_candidates[position]
             kept = mined[passage_articles[mined] != article]
             removed += len(mined) - len(kept)
             considered += len(mined)
@@ -195,7 +242,15 @@ def sample_reranking_schedule(
                 rng_random, pool, passage_articles, article, num_negatives
             )
     return RerankingSchedule(
-        query_out, positive_out, hard_out, random_out, removed, considered, fallback
+        query_out,
+        positive_out,
+        hard_out,
+        random_out,
+        removed,
+        considered,
+        fallback,
+        num_usable_queries=len(usable),
+        num_train_queries=len(train_queries),
     )
 
 
