@@ -4,16 +4,18 @@
 025 の 6.17 節(実験 D・E の再実行)は、初回の本番の出力が残っているノートブックに、
 別のセッションの出力を加える。Colab で全体を実行したノートブックをそのままコミットすると、
 6.16 節までの初回の出力が上書きされる。そこで、**6.17 節のコードセルの出力と実行回数だけ** を
-移し、それ以外のセルは 1 バイトも変えない。
+移し、それ以外のセルは 1 バイトも変えない。停止用のセル(6.3 節の直後。実行すると常に例外で
+止まる)の出力は移さない。
 
 次のどれかが成り立たなければ、**何も書き換えずに** 終了コード 1 で停止する。
 
-1. 2 つのノートブックのセルの数と、すべてのセルの種類・ソースが一致する。許す違いは、
-   6.17 節の実行のフラグ ``RUN_DE_RERUN``・``UPLOAD_RERUN_ARTIFACT`` の値だけ
-   (Colab で書き換えるのはこの 2 行だけ)。
-2. 移す側の 6.17 節のコードセルがすべて実行済みで、エラーの出力がなく、実行のフラグが
-   True で実行されている(スモークテストの出力は、``--allow-smoke`` を付けない限り拒否する)。
-3. 6.17 節以外のセル(6.16 節までと 7 章)の種類・ソース・出力・実行回数・メタデータと、
+1. 2 つのノートブックのセルの数と、すべてのセルの種類・ソースが一致する(許す違いはない。
+   Colab ではセルを書き換えない)。
+2. 6.4〜6.16 節のコードセル(停止用のセルの次から 6.17 節の前まで)の実行回数と出力が、
+   リポジトリ側と一致する(Colab 側で実行し直されていない)。
+3. 移す側の 6.17 節のコードセルがすべて実行済みで、エラーの出力がない(スモークテストの
+   出力は、``--allow-smoke`` を付けない限り拒否する)。
+4. 6.17 節以外のセル(6.16 節までと 7 章)の種類・ソース・出力・実行回数・メタデータと、
    ノートブック全体のメタデータが、書き込みの前後で一致する(書き込みの後に読み直して
    確かめ、一致しなければ元に戻す)。
 
@@ -31,7 +33,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -43,10 +44,8 @@ DEFAULT_REPOSITORY_NOTEBOOK = (
 )
 SECTION_START_PREFIX = "### 6.17"
 SECTION_END_PREFIX = "## 7."
-FLAG_LINE_PATTERN = re.compile(
-    r"^(RUN_DE_RERUN|UPLOAD_RERUN_ARTIFACT) = (True|False)", flags=re.MULTILINE
-)
-SKIPPED_MESSAGE = "RUN_DE_RERUN が False なので"
+STOP_CELL_PREFIX = "# 停止用のセル"
+SKIPPED_MESSAGE = "が False なので"  # 以前のフラグつきの構成で「実行しない」と出力された印
 SMOKE_MARKER = "[スモークテスト]"
 
 
@@ -58,22 +57,21 @@ def source_of(cell: dict) -> str:
     return "".join(cell["source"])
 
 
-def section_range(notebook: dict) -> tuple[int, int]:
-    cells = notebook["cells"]
-    starts = [i for i, c in enumerate(cells) if source_of(c).startswith(SECTION_START_PREFIX)]
-    ends = [i for i, c in enumerate(cells) if source_of(c).startswith(SECTION_END_PREFIX)]
-    if len(starts) != 1 or len(ends) != 1 or not starts[0] < ends[0]:
-        raise TransferError(
-            f"6.17 節の始まりと 7 章の始まりを 1 つずつ見つけられない: {starts}、{ends}"
-        )
-    return starts[0], ends[0]
+def find_unique(notebook: dict, prefix: str, what: str) -> int:
+    found = [i for i, c in enumerate(notebook["cells"]) if source_of(c).startswith(prefix)]
+    if len(found) != 1:
+        raise TransferError(f"{what}を 1 つだけ見つけられない: {found}")
+    return found[0]
 
 
-def normalized_source(cell: dict, in_section: bool) -> str:
-    text = source_of(cell)
-    if in_section and cell["cell_type"] == "code":
-        text = FLAG_LINE_PATTERN.sub(r"\1 = <値>", text)
-    return text
+def locate(notebook: dict) -> tuple[int, int, int]:
+    """停止用のセル・6.17 節の最初のセル・7 章の最初のセルの位置。"""
+    stop = find_unique(notebook, STOP_CELL_PREFIX, "停止用のセル")
+    start = find_unique(notebook, SECTION_START_PREFIX, "6.17 節の見出し")
+    end = find_unique(notebook, SECTION_END_PREFIX, "7 章の見出し")
+    if not stop < start < end:
+        raise TransferError(f"停止用のセル・6.17 節・7 章の順になっていない: {(stop, start, end)}")
+    return stop, start, end
 
 
 def output_texts(cell: dict) -> list[str]:
@@ -90,24 +88,41 @@ def fingerprint(cell: dict) -> str:
     return json.dumps(cell, ensure_ascii=False, sort_keys=True)
 
 
-def check(repository: dict, executed: dict, allow_smoke: bool) -> tuple[int, int]:
-    start, end = section_range(repository)
-    if section_range(executed) != (start, end) or len(repository["cells"]) != len(
-        executed["cells"]
-    ):
+def normalized_outputs(cell: dict) -> str:
+    # Colab が保存し直したときの、文字列の分割や末尾の空白の違いを無視して比べる
+    def normalize(value):
+        if isinstance(value, list) and all(isinstance(v, str) for v in value):
+            return "".join(value).rstrip()
+        if isinstance(value, dict):
+            return {k: normalize(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [normalize(v) for v in value]
+        return value.rstrip() if isinstance(value, str) else value
+
+    return json.dumps(normalize(cell.get("outputs", [])), ensure_ascii=False, sort_keys=True)
+
+
+def check(repository: dict, executed: dict, allow_smoke: bool) -> tuple[int, int, int]:
+    stop, start, end = locate(repository)
+    if locate(executed) != (stop, start, end) or len(repository["cells"]) != len(executed["cells"]):
         raise TransferError(
-            "セルの数・6.17 節の位置が一致しない"
-            f"(リポジトリ側 {len(repository['cells'])} 個・{(start, end)}、"
-            f"実行した側 {len(executed['cells'])} 個・{section_range(executed)})"
+            "セルの数・停止用のセルと 6.17 節の位置が一致しない"
+            f"(リポジトリ側 {len(repository['cells'])} 個・{(stop, start, end)}、"
+            f"実行した側 {len(executed['cells'])} 個・{locate(executed)})"
         )
     for i, (a, b) in enumerate(zip(repository["cells"], executed["cells"], strict=True)):
-        in_section = start <= i < end
-        if a["cell_type"] != b["cell_type"] or normalized_source(
-            a, in_section
-        ) != normalized_source(b, in_section):
+        if a["cell_type"] != b["cell_type"] or source_of(a) != source_of(b):
+            raise TransferError(f"セル {i} の種類またはソースが一致しない(セルは書き換えない)")
+    for i in range(stop + 1, start):  # 6.4〜6.16 節: 初回の本番の出力のまま(実行し直されていない)
+        a, b = repository["cells"][i], executed["cells"][i]
+        if a["cell_type"] != "code":
+            continue
+        if a.get("execution_count") != b.get("execution_count") or normalized_outputs(
+            a
+        ) != normalized_outputs(b):
             raise TransferError(
-                f"セル {i} の種類またはソースが一致しない"
-                "(6.17 節の実行のフラグの値の違いだけは許す)"
+                f"6.4〜6.16 節のセル {i} の実行回数か出力がリポジトリ側と違う"
+                "(実行し直されている。停止用のセルで止めずに実行した可能性がある)"
             )
     for i in range(start, end):
         cell = executed["cells"][i]
@@ -122,14 +137,12 @@ def check(repository: dict, executed: dict, allow_smoke: bool) -> tuple[int, int
             raise TransferError(f"{label} にエラーの出力がある")
         texts = output_texts(cell)
         if any(SKIPPED_MESSAGE in t for t in texts):
-            raise TransferError(
-                f"{label} は、実行のフラグ RUN_DE_RERUN が False のまま実行されている"
-            )
+            raise TransferError(f"{label} に「実行しない」の出力がある(実行されていない)")
         if not allow_smoke and any(SMOKE_MARKER in t for t in texts):
             raise TransferError(
                 f"{label} の出力にスモークテストの印がある(--allow-smoke を付けない限り移さない)"
             )
-    return start, end
+    return stop, start, end
 
 
 def transfer(repository: dict, executed: dict, start: int, end: int) -> dict:
@@ -180,7 +193,7 @@ def main() -> int:
         original_text = args.repository_notebook.read_text(encoding="utf-8")
         repository = json.loads(original_text)
         executed = json.loads(args.executed_notebook.read_text(encoding="utf-8"))
-        start, end = check(repository, executed, args.allow_smoke)
+        _, start, end = check(repository, executed, args.allow_smoke)
         result = transfer(repository, executed, start, end)
         verify_untouched(repository, result, start, end)
         code_cells = [i for i in range(start, end) if repository["cells"][i]["cell_type"] == "code"]
