@@ -11,8 +11,13 @@
 
 1. 2 つのノートブックのセルの数と、すべてのセルの種類・ソースが一致する(許す違いはない。
    Colab ではセルを書き換えない)。
-2. 6.4〜6.16 節のコードセル(停止用のセルの次から 6.17 節の前まで)の実行回数と出力が、
-   リポジトリ側と一致する(Colab 側で実行し直されていない)。
+2. 6.4〜6.16 節のコードセル(停止用のセルの次から 6.17 節の前まで)が、Colab 側で実行し
+   直されていない。許す状態は、次のいずれか(「すべてのセルを実行」が停止用のセルで
+   中断されたとき、Colab が後ろのセルの出力や実行回数を消す場合があるため)。
+   (a) 出力が空で、実行回数がない。
+   (b) 出力と実行回数が、リポジトリ側と完全に一致する。
+   (c) 出力がリポジトリ側と一致し、実行回数だけがない(実行回数の消去)。
+   停止用のセルは、出力が停止の例外(と、その直前の印字)だけであることを確かめる(移さない)。
 3. 移す側の 6.17 節のコードセルがすべて実行済みで、エラーの出力がない(スモークテストの
    出力は、``--allow-smoke`` を付けない限り拒否する)。
 4. 6.17 節以外のセル(6.16 節までと 7 章)の種類・ソース・出力・実行回数・メタデータと、
@@ -102,6 +107,29 @@ def normalized_outputs(cell: dict) -> str:
     return json.dumps(normalize(cell.get("outputs", [])), ensure_ascii=False, sort_keys=True)
 
 
+def check_stop_cell(cell: dict) -> None:
+    """停止用のセル: 出力は、停止の例外とその直前の印字だけ(出力が空なら、実行されていない)。"""
+    outputs = cell.get("outputs", [])
+    if not outputs:
+        return
+    errors = [o for o in outputs if o["output_type"] == "error"]
+    others = [o for o in outputs if o["output_type"] not in ("error", "stream")]
+    if others or len(errors) != 1:
+        raise TransferError("停止用のセルの出力が、停止の例外とその直前の印字だけではない")
+    error = errors[0]
+    if error.get("ename") != "RuntimeError" or "停止用のセル" not in error.get("evalue", ""):
+        raise TransferError("停止用のセルの例外が、停止用のセルのものではない")
+
+
+def not_re_executed(repository_cell: dict, executed_cell: dict) -> bool:
+    """6.4〜6.16 節のコードセルが、Colab 側で実行し直されていないか(許す状態 (a)(b)(c))。"""
+    count_a, count_b = repository_cell.get("execution_count"), executed_cell.get("execution_count")
+    same_outputs = normalized_outputs(repository_cell) == normalized_outputs(executed_cell)
+    empty_and_uncounted = not executed_cell.get("outputs") and count_b is None  # (a)
+    unchanged = same_outputs and count_b in (count_a, None)  # (b)(c)
+    return empty_and_uncounted or unchanged
+
+
 def check(repository: dict, executed: dict, allow_smoke: bool) -> tuple[int, int, int]:
     stop, start, end = locate(repository)
     if locate(executed) != (stop, start, end) or len(repository["cells"]) != len(executed["cells"]):
@@ -113,13 +141,12 @@ def check(repository: dict, executed: dict, allow_smoke: bool) -> tuple[int, int
     for i, (a, b) in enumerate(zip(repository["cells"], executed["cells"], strict=True)):
         if a["cell_type"] != b["cell_type"] or source_of(a) != source_of(b):
             raise TransferError(f"セル {i} の種類またはソースが一致しない(セルは書き換えない)")
-    for i in range(stop + 1, start):  # 6.4〜6.16 節: 初回の本番の出力のまま(実行し直されていない)
+    check_stop_cell(executed["cells"][stop])
+    for i in range(stop + 1, start):  # 6.4〜6.16 節: 実行し直されていない
         a, b = repository["cells"][i], executed["cells"][i]
         if a["cell_type"] != "code":
             continue
-        if a.get("execution_count") != b.get("execution_count") or normalized_outputs(
-            a
-        ) != normalized_outputs(b):
+        if not not_re_executed(a, b):
             raise TransferError(
                 f"6.4〜6.16 節のセル {i} の実行回数か出力がリポジトリ側と違う"
                 "(実行し直されている。停止用のセルで止めずに実行した可能性がある)"
