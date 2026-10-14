@@ -358,6 +358,172 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(report.position_shifted, 0)
 
 
+IMAGE_OUTPUT = [
+    {
+        "output_type": "display_data",
+        "data": {"image/png": "iVBORw0KGgo=", "text/plain": ["<Figure>"]},
+        "metadata": {},
+    }
+]
+
+
+def tagged(cell: dict, *tags: str) -> dict:
+    cell = copy.deepcopy(cell)
+    cell["metadata"]["tags"] = list(tags)
+    return cell
+
+
+class ImagesOnlyTagTests(unittest.TestCase):
+    """タグ zenn-images-only(コードセルのみ。画像以外の出力を Zenn から除く)。"""
+
+    def figure_notebook(self) -> dict:
+        return notebook(
+            [
+                markdown_cell("# 結果", "m1"),
+                code_cell("plot()\n", "c1", outputs=IMAGE_OUTPUT),
+            ]
+        )
+
+    def test_on_code_cell_passes_and_is_counted(self):
+        base = self.figure_notebook()
+        current = copy.deepcopy(base)
+        current["cells"][1] = tagged(current["cells"][1], "zenn-images-only")
+        report = checker.compare_notebooks(base, current)
+        self.assertTrue(report.passed, report.problems)
+        self.assertEqual(report.tag_counts["zenn-images-only"], (0, 1, 0, 0))
+        self.assertEqual(report.notes, [])  # 画像の出力があるので、注意は出ない
+
+    def test_switching_from_hide_input_to_images_only_passes(self):
+        base = self.figure_notebook()
+        base["cells"][1] = tagged(base["cells"][1], "zenn-hide-input")
+        current = copy.deepcopy(base)
+        current["cells"][1] = tagged(current["cells"][1], "zenn-images-only")
+        report = checker.compare_notebooks(base, current)
+        self.assertTrue(report.passed, report.problems)
+        self.assertEqual(report.tag_counts["zenn-hide-input"], (1, 0, 0, 0))
+        self.assertEqual(report.tag_counts["zenn-images-only"], (0, 1, 0, 0))
+
+    def test_on_markdown_cell_stops(self):
+        base = self.figure_notebook()
+        current = copy.deepcopy(base)
+        current["cells"][0] = tagged(current["cells"][0], "zenn-images-only")
+        report = checker.compare_notebooks(base, current)
+        self.assertFalse(report.passed)
+        self.assertTrue(
+            any("付けられない" in problem for problem in report.problems), report.problems
+        )
+
+    def test_on_raw_cell_stops(self):
+        base = self.figure_notebook()
+        base["cells"].append({"cell_type": "raw", "id": "r1", "metadata": {}, "source": ["x"]})
+        current = copy.deepcopy(base)
+        current["cells"][2] = tagged(current["cells"][2], "zenn-images-only")
+        report = checker.compare_notebooks(base, current)
+        self.assertFalse(report.passed)
+        self.assertTrue(
+            any("付けられない" in problem for problem in report.problems), report.problems
+        )
+
+    def test_without_image_output_gives_note_but_passes(self):
+        base = notebook([code_cell("print(1)\n", "c1")])
+        current = copy.deepcopy(base)
+        current["cells"][0] = tagged(current["cells"][0], "zenn-images-only")
+        report = checker.compare_notebooks(base, current)
+        self.assertTrue(report.passed, report.problems)
+        self.assertTrue(any("画像の出力がない" in note for note in report.notes), report.notes)
+
+    def test_unknown_image_tag_name_still_stops(self):
+        base = self.figure_notebook()
+        current = copy.deepcopy(base)
+        current["cells"][1] = tagged(current["cells"][1], "zenn-image-only")
+        report = checker.compare_notebooks(base, current)
+        self.assertFalse(report.passed)
+        self.assertTrue(any("未知の Zenn のタグ" in problem for problem in report.problems))
+
+
+class CharacterCountTests(unittest.TestCase):
+    """付録を除いた Markdown の文字数(本文の分量)の報告。"""
+
+    def test_body_and_appendix_are_separated_at_the_appendix_tag(self):
+        current = notebook(
+            [
+                markdown_cell("abc", "m1"),
+                code_cell("x = 1\n", "c1"),
+                markdown_cell("defg", "m2", metadata={"tags": ["zenn-hide"]}),
+                markdown_cell("## 付録", "m3", metadata={"tags": ["zenn-appendix"]}),
+                markdown_cell("hi", "m4"),
+            ]
+        )
+        # Zenn から除くセルも本文に数える。コードセルは数えない。付録は見出しのセルから末尾まで
+        self.assertEqual(checker.markdown_characters(current), (3 + 4, len("## 付録") + 2))
+
+    def test_without_appendix_all_markdown_is_body(self):
+        self.assertEqual(
+            checker.markdown_characters(notebook([markdown_cell("abc", "m1")])), (3, 0)
+        )
+
+    def test_report_has_base_and_current_characters(self):
+        base = notebook([markdown_cell("a" * 10, "m1"), code_cell("x = 1\n", "c1")])
+        current = notebook(
+            [
+                markdown_cell("a" * 4, "m1"),
+                code_cell("x = 1\n", "c1"),
+                markdown_cell("## 付録", "m2", metadata={"tags": ["zenn-appendix"]}),
+                markdown_cell("b" * 6, "m3"),
+            ]
+        )
+        report = checker.compare_notebooks(base, current)
+        self.assertTrue(report.passed, report.problems)
+        self.assertEqual(report.base_characters, (10, 0))
+        self.assertEqual(report.current_characters, (4, len("## 付録") + 6))
+
+
+class CellReferenceTests(unittest.TestCase):
+    """セルの番号への参照(「セル 15〜34」など)と、コードセルの位置の移動。"""
+
+    REFERENCING_CODE = "raise RuntimeError('セル 1〜3 を先に実行すること')\n"
+
+    def test_reference_and_moved_code_cell_gives_note(self):
+        base = notebook([markdown_cell("説明", "m1"), code_cell(self.REFERENCING_CODE, "c1")])
+        current = notebook(
+            [
+                markdown_cell("説明", "m1"),
+                markdown_cell("追加", "m2"),
+                code_cell(self.REFERENCING_CODE, "c1"),
+            ]
+        )
+        report = checker.compare_notebooks(base, current)
+        self.assertTrue(report.passed, report.problems)  # 判定には影響しない
+        self.assertTrue(any("セルの番号への参照" in note for note in report.notes), report.notes)
+
+    def test_reference_in_markdown_is_also_detected(self):
+        base = notebook([markdown_cell("セル 2 を実行", "m1"), code_cell("x = 1\n", "c1")])
+        current = notebook(
+            [
+                markdown_cell("セル 2 を実行", "m1"),
+                markdown_cell("追加", "m2"),
+                code_cell("x = 1\n", "c1"),
+            ]
+        )
+        report = checker.compare_notebooks(base, current)
+        self.assertTrue(any("セルの番号への参照" in note for note in report.notes), report.notes)
+
+    def test_reference_without_move_gives_no_note(self):
+        base = notebook([markdown_cell("説明", "m1"), code_cell(self.REFERENCING_CODE, "c1")])
+        current = copy.deepcopy(base)
+        current["cells"][0]["source"] = ["書き換えた説明\n"]  # Markdown の内容だけ。位置は動かない
+        report = checker.compare_notebooks(base, current)
+        self.assertEqual(report.notes, [])
+
+    def test_move_without_reference_gives_no_note(self):
+        base = notebook([markdown_cell("説明", "m1"), code_cell("x = 1\n", "c1")])
+        current = notebook(
+            [markdown_cell("説明", "m1"), markdown_cell("追加", "m2"), code_cell("x = 1\n", "c1")]
+        )
+        report = checker.compare_notebooks(base, current)
+        self.assertEqual(report.notes, [])
+
+
 class GitIntegrationTests(unittest.TestCase):
     """git の基準の取り出し、サブディレクトリ、別のカレントディレクトリ、終了コードを確かめる。"""
 
@@ -408,6 +574,10 @@ class GitIntegrationTests(unittest.TestCase):
         result = self.run_script(str(self.notebook_path))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("判定: 通った", result.stdout)
+
+    def test_report_shows_markdown_characters(self):
+        result = self.run_script(str(self.notebook_path))
+        self.assertIn("Markdown の文字数: 本文(付録を除く)基準", result.stdout)
 
     def test_comment_change_passes_and_is_reported(self):
         self.write(edited(base_notebook(), "c3", "y = 3  # 書き換えた\nprint(y)\n"))

@@ -15,18 +15,24 @@
    一致することを求める。
 3. 対応するコードセルの ``outputs`` と ``execution_count`` が完全に一致する。
 4. 対応するコードセルのメタデータの違いは、``tags`` への Zenn のタグの追加・削除だけ。
-   Zenn のタグは ``zenn-hide``・``zenn-hide-input``・``zenn-details``・``zenn-appendix`` の 4 つで、
-   それぞれ付けてよいセルの種類が決まっている(``zenn-hide-input`` はコードセルだけ、
-   ``zenn-appendix`` は Markdown セルだけ)。接頭辞 ``zenn-`` の未知のタグ、種類の合わないタグ、
-   基準にない未知のタグは認めない。``zenn-appendix`` は 1 つまでで、付録の見出し(``#`` で始まる行)の
-   Markdown セルに付ける。
+   Zenn のタグは ``zenn-hide``・``zenn-hide-input``・``zenn-images-only``・``zenn-details``・
+   ``zenn-appendix`` の 5 つで、それぞれ付けてよいセルの種類が決まっている(``zenn-hide-input`` と
+   ``zenn-images-only`` はコードセルだけ、``zenn-appendix`` は Markdown セルだけ)。
+   接頭辞 ``zenn-`` の未知のタグ、種類の合わないタグ、基準にない未知のタグは認めない。
+   ``zenn-appendix`` は 1 つまでで、付録の見出し(``#`` で始まる行)の Markdown セルに付ける。
 5. 上記以外のセルの種類(``markdown``・``code``・``raw`` 以外)がない。
 
 報告するのは、コードセルの対応づけの方法と数、ソースが変わったコードセルの内訳(コメントが
-変わったもの、空行・書式だけが変わったもの)、変わった Markdown セルの数、Zenn のタグを付けた
-セルの数(タグごと)である。判定には影響しない **注意** も印字する。特に、構文木が同じでも
-ソース上の行の位置が動いたセルの出力に、行番号を含みうるもの(例外、stderr の警告など)がある
-場合は、出力が再実行の結果と一致しなくなりうるので注意する。
+変わったもの、空行・書式だけが変わったもの)、変わった Markdown セルの数、**付録を除いた
+Markdown の文字数(本文の分量。付録は ``zenn-appendix`` のセルから末尾まで)**、Zenn のタグを
+付けたセルの数(タグごと)である。文字数は判定に使わない。判定には影響しない **注意** も印字する。
+特に、次の場合である。
+
+- 構文木が同じでもソース上の行の位置が動いたセルの出力に、行番号を含みうるもの(例外、stderr の
+  警告など)がある。出力が再実行の結果と一致しなくなりうる。
+- 画像の出力がないコードセルに ``zenn-images-only`` が付いている。Zenn ではセルごと除かれる。
+- セルの番号への参照(「セル 15〜34」など)を含むセルがあり、かつコードセルの位置が基準から動いた。
+  参照が指すセルが変わっていないかを確かめる。
 
 ノートブックは読むだけで、一切変更しない。``scripts/`` の他のスクリプトと同じく、ローカルで実行し、
 結果は標準出力に残す。
@@ -72,9 +78,13 @@ ZENN_TAG_PREFIX = "zenn-"
 ZENN_TAG_TARGETS: dict[str, tuple[str, ...]] = {
     "zenn-hide": ("code", "markdown", "raw"),
     "zenn-hide-input": ("code",),
+    "zenn-images-only": ("code",),
     "zenn-details": ("code", "markdown", "raw"),
     "zenn-appendix": ("markdown",),
 }
+
+# セルの番号への参照(「セル 15〜34」など)。コードの文字列や説明が、セルの位置に依存する。
+CELL_REFERENCE_PATTERN = re.compile(r"セル\s*\d+")
 
 # 出力に、実行したコードの行番号を含みうることを示す文字列(例外の追跡、stderr の警告など)。
 LINE_NUMBER_PATTERN = re.compile(r"\.py:\d+|\bline \d+|ipython-input|Cell In")
@@ -113,6 +123,9 @@ class Report:
     markdown_current: int = 0
     markdown_added_or_rewritten: int = 0
     markdown_removed_or_rewritten: int = 0
+    # Markdown の文字数。(本文 = 付録を除く, 付録)
+    base_characters: tuple[int, int] = (0, 0)
+    current_characters: tuple[int, int] = (0, 0)
     # タグごとの個数。(基準のコードセル, 現在のコードセル, 基準の Markdown, 現在の Markdown)
     tag_counts: dict[str, tuple[int, int, int, int]] = field(default_factory=dict)
 
@@ -172,6 +185,33 @@ def outputs_may_contain_line_numbers(cell: dict) -> bool:
         if is_stderr and LINE_NUMBER_PATTERN.search("".join(output.get("text", ""))):
             return True
     return False
+
+
+def markdown_characters(notebook: dict) -> tuple[int, int]:
+    """Markdown の文字数を (本文, 付録) で返す。
+
+    付録は ``zenn-appendix`` のタグを付けたセルから末尾まで(なければ 0)。本文は、それより前の
+    すべての Markdown セル(Zenn から除くセルを含む)。
+    """
+    body = appendix = 0
+    in_appendix = False
+    for cell in notebook["cells"]:
+        if "zenn-appendix" in tags_of(cell):
+            in_appendix = True
+        if cell["cell_type"] == "markdown":
+            if in_appendix:
+                appendix += len(source_text(cell))
+            else:
+                body += len(source_text(cell))
+    return body, appendix
+
+
+def has_image_output(cell: dict) -> bool:
+    return any(
+        key.startswith("image/")
+        for output in cell.get("outputs", [])
+        for key in output.get("data", {})
+    )
 
 
 def code_cells(notebook: dict) -> list[tuple[int, dict]]:
@@ -290,7 +330,7 @@ def check_code_cell_pair(report: Report, index: int, base_cell: dict, current_ce
 
 
 def check_tag_usage(report: Report, base_notebook: dict, current_notebook: dict) -> None:
-    """現在のノートブックのすべてのセルで、タグの使い方が 4 つのタグの定めに合うかを確かめる。"""
+    """現在のノートブックのすべてのセルで、タグの使い方が Zenn のタグの定めに合うかを確かめる。"""
     preexisting = {
         (cell["cell_type"], tag) for cell in base_notebook["cells"] for tag in tags_of(cell)
     }
@@ -346,6 +386,29 @@ def compare_notebooks(base_notebook: dict, current_notebook: dict) -> Report:
     for index, base_cell, current_cell in pairs:
         check_code_cell_pair(report, index, base_cell, current_cell)
     check_tag_usage(report, base_notebook, current_notebook)
+
+    report.base_characters = markdown_characters(base_notebook)
+    report.current_characters = markdown_characters(current_notebook)
+    for index, cell in code_cells(current_notebook):
+        if "zenn-images-only" in tags_of(cell) and not has_image_output(cell):
+            report.notes.append(
+                f"{describe_cell(index, cell)}: zenn-images-only だが画像の出力がない。"
+                "Zenn ではセルごと除かれる(zenn-hide と同じ)"
+            )
+    base_index_of = {id(cell): index for index, cell in base_code}
+    moved = [index for index, base_cell, _ in pairs if base_index_of[id(base_cell)] != index]
+    references = [
+        index
+        for index, cell in enumerate(current_notebook["cells"])
+        if CELL_REFERENCE_PATTERN.search(source_text(cell))
+    ]
+    if moved and references:
+        report.notes.append(
+            f"セルの番号への参照を含むセルがある(セル {references[:10]}"
+            f"{'…' if len(references) > 10 else ''})。コードセルの位置が基準から {len(moved)} 個"
+            f"動いた(セル {moved[:10]}{'…' if len(moved) > 10 else ''})。"
+            "参照が指すセルが変わっていないかを確かめる"
+        )
 
     base_markdown = Counter(
         source_text(c) for c in base_notebook["cells"] if c["cell_type"] == "markdown"
@@ -442,6 +505,11 @@ def print_report(path: Path, base_description: str, report: Report) -> None:
         f"Markdown セル: 基準 {report.markdown_base} 個、現在 {report.markdown_current} 個"
         f"(基準にない内容 {report.markdown_added_or_rewritten} 個、現在にない内容 "
         f"{report.markdown_removed_or_rewritten} 個。書き換えは両方に数える)"
+    )
+    (base_body, base_appendix), (body, appendix) = report.base_characters, report.current_characters
+    print(
+        f"Markdown の文字数: 本文(付録を除く)基準 {base_body:,} → 現在 {body:,}、"
+        f"付録 基準 {base_appendix:,} → 現在 {appendix:,}"
     )
     print("Zenn のタグを付けたセル(現在の個数、括弧内は基準):")
     for tag, (base_code_n, current_code_n, base_md_n, current_md_n) in report.tag_counts.items():
