@@ -41,12 +41,17 @@ def pooled_with_lengths(
 ) -> Tensor:
     """可変長の入力の、プーリングした **正規化前の** ベクトル ``(B, d)``。
 
+    導入: 026。
+
     Args:
         model: 因果マスクの ``TextEmbeddingModel``。
         token_ids: 形状 ``(B, S)``。右側を任意のトークンでパディングしてよい。
         lengths: 形状 ``(B,)``。各行の有効な長さ(1 以上 ``S`` 以下)。
         full_length: すべての行が満長(``lengths == S``)であると呼び出し側が保証するとき真。
             ``model.pooled()`` と同じ計算(bit 単位で一致)になる。
+
+    Returns:
+        形状 ``(B, d)`` の、正規化前のプーリング済みベクトル。
     """
     if model.attention != "causal":
         raise ValueError("右側のパディングが出力に影響しないのは因果マスクのときだけ")
@@ -73,6 +78,15 @@ def encode_tokens_with_lengths(
 
     長さの昇順に並べ替えてバッチにし、バッチごとに最大の長さまで切り詰めて計算する(パディングの
     計算を減らす)。結果は元の並びに戻す。
+
+    導入: 026。
+
+    Args:
+        model: 因果マスクの ``TextEmbeddingModel``。
+        token_ids: 形状 ``(n, S)`` のトークン ID(右側をパディングしてよい)。
+        lengths: 形状 ``(n,)``。各行の有効な長さ。
+        batch_size: 1 回に符号化する行数。
+        dimensions: 切り詰める次元の候補(``None`` は全次元)。
 
     Returns:
         ``{次元: 形状 (n, 次元) の埋め込み}``(モデルと同じデバイス。次元の ``None`` は全次元)。
@@ -112,11 +126,15 @@ def build_variable_cross_encoder_inputs(
     """``[query (lq)] [区切り] [passage (lp)] [終端]`` を左から詰めて並べ、右側を 0
     でパディングする。
 
+    導入: 026。
+
     Args:
         query_tokens: 形状 ``(B, L_q)``(右側がパディング)。
         query_lengths: 形状 ``(B,)``。
         passage_tokens: 形状 ``(B, L_p)``(右側がパディング。組ごとに 1 対 1 に対応)。
         passage_lengths: 形状 ``(B,)``。
+        separator_id: query と passage の間に置く区切りのトークン ID。
+        terminal_id: 列の終端に置くトークン ID。
 
     Returns:
         ``(列 (B, W)、各行の有効な長さ (B,))``。``W`` は ``L_q + 1 + L_p + 1``。
@@ -161,6 +179,14 @@ class VariableLengthCrossEncoder(CrossEncoder):
 
     スコアは、列の終端の位置(有効な長さの最後)の、最終正規化層の後の隠れ状態に線形のヘッドを掛けた
     スカラーである。ヘッドは FP32 で計算する。
+
+    導入: 026。
+
+    Args:
+        backbone: 本体の ``GPTLanguageModel``。
+        separator_id: query と passage の間に置く区切りのトークン ID。
+        terminal_id: 列の終端に置くトークン ID(この位置の隠れ状態がスコアになる)。
+        head_init_std: 線形のヘッドの重みの初期化の標準偏差。
     """
 
     def forward(  # type: ignore[override]

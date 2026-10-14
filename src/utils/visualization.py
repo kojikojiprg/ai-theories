@@ -40,6 +40,8 @@ def plot_attention_heatmap(
 ) -> Axes:
     """Attention 重み行列を 1 枚のヒートマップとして描画する。
 
+    導入: 001。
+
     Args:
         weights: 形状 ``(S_q, S_k)`` の Attention 重み。行方向(Query)の和が 1。
         x_labels: 横軸(Key 側)のラベル。
@@ -103,6 +105,8 @@ def plot_multi_head_attention(
     vmax: float | None = None,
 ) -> Figure:
     """ヘッドごとの Attention 重みを並べて描画する。
+
+    導入: 001。
 
     Args:
         weights: 形状 ``(h, S_q, S_k)`` の Attention 重み
@@ -170,6 +174,8 @@ def plot_seed_scatter(
     複数シードで実行した実験(004 の実験 C・E・G など)で、平均値だけでなく
     個々のシードの値をすべて重ねて表示するために使う。条件間で最小値〜最大値の
     区間が重なるかどうかを目視で判定できるようにすることが目的。
+
+    導入: 004。
 
     Args:
         values_by_condition: ``{条件名: シードごとの値のリスト}`` の辞書。
@@ -240,6 +246,8 @@ def plot_learning_curves_multi_seed(
     シード番号は出さない(`ax.plot([], [], ...)`でシードごとの線とは別に凡例専用の
     ダミー線を 1 本だけ登録する)。
 
+    導入: 004。
+
     Args:
         histories_by_condition: ``{条件名: シードごとの history 辞書のリスト}``。
             各 history は`train_character_level_language_model()`の戻り値のように
@@ -293,6 +301,8 @@ def plot_bar_by_layer(
     隠れ状態の平均/RMS 比(実験 D)や死んだユニット(dead unit)の割合(実験 F)など、
     層番号を横軸にした条件間比較に使う。
 
+    導入: 004。
+
     Args:
         values_by_condition: ``{条件名: 層ごとの値のリスト}`` の辞書。
             すべての条件で層数(リストの長さ)が揃っている必要がある。
@@ -338,6 +348,8 @@ def plot_function_curves(
 
     活性化関数の形状比較(004 の実験 A、ReLU / GELU / Swish とその導関数)に使う。
 
+    導入: 004。
+
     Args:
         x: 形状 ``(N,)`` の共通の横軸の値。
         curves: ``{系列名: f(x) の値}`` の辞書。各値は x と同じ形状 ``(N,)``。
@@ -376,6 +388,8 @@ def plot_learning_curves(
     log_scale: bool = False,
 ) -> Axes:
     """学習曲線(複数系列)を折れ線で描画する。
+
+    導入: 001。
 
     Args:
         histories: ``{系列名: 値のリスト}`` の辞書。
@@ -417,6 +431,8 @@ def plot_grouped_bar(
 
     ドメイン(英語・日本語・コードなど)× 条件(chunk_split_mode など)のように、
     2 つの離散軸を持つ値を比較する際に使う(005 の実験4など)。
+
+    導入: 005。
 
     Args:
         values_by_series: ``{系列名: {カテゴリ名: 値}}`` の辞書。全系列でカテゴリの
@@ -498,6 +514,8 @@ def plot_stacked_bar(
     バイト数を dtype × 形状カテゴリで積み上げる)。`plot_grouped_bar`が系列を
     横に並べるのに対し、本関数は系列(セグメント)を縦に積み上げる点が異なる。
 
+    導入: 011。
+
     Args:
         categories: x 軸のカテゴリ名のリスト。
         values_by_segment: ``{セグメント名: カテゴリごとの値のリスト}`` の辞書。
@@ -541,12 +559,14 @@ def plot_gradient_norm_trace(
     ax: Axes | None = None,
     log_scale: bool = False,
 ) -> Axes:
-    """勾配ノルムの時系列を折れ線で描画し、gradient clipping 閾値を水平線で重畳表示する(007)。
+    """勾配ノルムの時系列を折れ線で描画し、gradient clipping 閾値を水平線で重畳表示する。
 
     ``gradient_norms`` は ``train_language_model``(``src/training/trainer.py``)の
     history の ``"gradient_norm"``(クリッピング適用前の値)を想定する。学習中の
     勾配ノルムのスパイクと、それが ``clip_threshold`` に対してどの程度の大きさかを
     目視で確認する(007 主張 3、gradient clipping の効果の検証)。
+
+    導入: 007。
 
     Args:
         gradient_norms: ステップごとの勾配ノルム(クリッピング適用前)。
@@ -595,6 +615,8 @@ def plot_isoflop_profile(
 ) -> Axes:
     """IsoFLOP プロファイル(計算量予算ごとの (log N, L) の点と、あてはめた放物線・
     頂点)を重ね描きする(009、Hoffmann et al., 2022 Approach 2)。
+
+    導入: 009。
 
     Args:
         profiles: ``{計算量予算 C: {"log_n": [...], "loss": [...],
@@ -654,7 +676,9 @@ def plot_optimal_frontier(
     ylabel: str = "log N_opt",
     ax: Axes | None = None,
 ) -> Axes:
-    """log N_opt 対 log C のフロンティアを、複数の計算量の数え方で重ね描きする(009)。
+    """log N_opt 対 log C のフロンティアを、複数の計算量の数え方で重ね描きする。
+
+    導入: 009。
 
     Args:
         frontiers: ``{数え方の名前: (log_c の系列, log_n_opt の系列,
@@ -697,12 +721,14 @@ def plot_log_log_fit(
     ylabel: str = "y",
     ax: Axes | None = None,
 ) -> Axes:
-    """両対数プロット(log-log plot)に、べき乗則あてはめ y = a x^b の直線を重畳する(010)。
+    """両対数プロット(log-log plot)に、べき乗則あてはめ y = a x^b の直線を重畳する。
 
     ``src.scaling.laws.fit_power_law``・``src.utils.statistics.fit_power_law_exponent``
     の結果(``exponent``・``coefficient``)をそのまま渡せる。べき乗則(``log y = log a
     + b log x``)は両対数軸上で直線になるため、実測点があてはめ直線に沿っているかを
     目視で確認できる。
+
+    導入: 010。
 
     Args:
         x: 横軸の実測値の系列(正の実数値)。
@@ -766,6 +792,8 @@ def plot_dual_axis_curves(
     演算量(語彙サイズが増えるほど fertility が下がり減少する)のように、
     スケールの異なる量を同一の x 軸(語彙サイズなど)上で比較する際に使う
     (005 の実験6、語彙サイズと計算量のトレードオフ)。
+
+    導入: 005。
 
     Args:
         x: 共通の横軸の値。

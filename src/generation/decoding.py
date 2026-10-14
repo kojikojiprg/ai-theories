@@ -34,6 +34,8 @@ def top_k_filter(logits: Tensor, k: int) -> Tensor:
     上位 ``k`` 個を残し、残りを ``-inf`` に置き換える。``-inf`` にされた要素は、
     後段の ``softmax`` で確率 0 になる。
 
+    導入: 008。
+
     Args:
         logits: 形状 ``(..., V)`` の logits。
         k: 残す候補の数(1 以上)。``V`` を超える場合は ``V`` に丸める
@@ -77,6 +79,8 @@ def top_p_filter(logits: Tensor, p: float) -> Tensor:
     (自分を含まない)が既に ``p`` を超えているトークンを nucleus の外側と判定する
     (この時点で自分を含めなくても累積確率が ``p`` に達しているため、自分を含めた
     最小集合には不要)。
+
+    導入: 008。
 
     Args:
         logits: 形状 ``(..., V)`` の logits。
@@ -153,6 +157,8 @@ def beam_search(
     ``beam_size=1`` の場合、各ステップで残る候補は常に 1 個(その時点での最尤トークンを
     追加した系列)になるため、``GPTLanguageModel.generate(temperature=0.0)``(貪欲法)と
     完全に同一の系列を生成する(不変条件アサーション、008 4 節)。
+
+    導入: 008。
 
     Args:
         model: 生成に使う言語モデル(``forward(token_ids) -> logits`` を持つ)。

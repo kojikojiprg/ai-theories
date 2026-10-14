@@ -48,6 +48,8 @@ from src.data.retrieval import RetrievalSet
 class RankingResult:
     """query ごとの順位と指標。
 
+    導入: 024。
+
     Attributes:
         rank: 形状 ``(Q,)``。最も上位の正解の順位(1 始まり)。
         ndcg_at_10: 形状 ``(Q,)``。nDCG@10。
@@ -74,6 +76,29 @@ class RankingResult:
         return float(self.ndcg_at_10.mean())
 
 
+def compute_ndcg_at_10(relevance: np.ndarray, num_positives: np.ndarray) -> np.ndarray:
+    """二値の関連度から nDCG@10 を求める(025 の並べ替えの評価と共通)。
+
+    ``DCG@10 = sum_{j=1}^{10} rel_j / log2(j + 1)``、理想の ``IDCG@10`` は先頭から
+    ``min(正解の数, 10)`` 個が正解のときの値である。
+
+    導入: 024。
+
+    Args:
+        relevance: 形状 ``(Q, 10)`` の float64。上位 10 件の関連度(1 が正解)。候補が 10 件に
+            満たない位置は 0 で埋める。
+        num_positives: 形状 ``(Q,)``。query ごとの正解の数(1 以上)。
+
+    Returns:
+        形状 ``(Q,)`` の nDCG@10。
+    """
+    log_discount = np.log2(np.arange(2, 12, dtype=np.float64))  # 位置 1〜10 の割引 log2(j + 1)
+    ideal_cumulative = np.cumsum(1.0 / log_discount)  # 先頭 j 個が正解のときの DCG
+    dcg = (relevance / log_discount[None, :]).sum(axis=1)
+    ideal = ideal_cumulative[np.minimum(num_positives, 10) - 1]
+    return dcg / ideal
+
+
 @torch.no_grad()
 def rank_candidates(
     scores: Tensor,
@@ -84,18 +109,22 @@ def rank_candidates(
 ) -> RankingResult:
     """スコア行列から query ごとの順位と nDCG@10 を求める。
 
+    導入: 024。
+
     Args:
         scores: 形状 ``(Q, P)`` のスコア(内積または BM25。大きいほど上位)。
         query_articles: 形状 ``(Q,)``。query の元の記事。
         passage_articles: 形状 ``(P,)``。passage の記事。
         query_sources: 形状 ``(Q,)``。query を含む passage の添字(候補から除く)。
+        chunk_size: 1 回に処理する query の数(結果には影響しない)。
+
+    Returns:
+        query ごとの順位と nDCG@10(``RankingResult``)。
     """
     scores = torch.as_tensor(scores)
     device = scores.device
     passage_articles_t = torch.as_tensor(passage_articles, device=device)
     num_queries, num_passages = scores.shape
-    log_discount = np.log2(np.arange(2, 12, dtype=np.float64))  # 位置 1〜10 の割引 log2(j + 1)
-    ideal_cumulative = np.cumsum(1.0 / log_discount)  # 先頭 j 個が正解のときの DCG
     ranks, ndcgs, positives = [], [], []
     for start in range(0, num_queries, chunk_size):
         end = min(start + chunk_size, num_queries)
@@ -117,11 +146,8 @@ def rank_candidates(
         found = is_positive.gather(1, top).cpu().numpy()
         relevance[:, : found.shape[1]] = found
         num_positive = num_positive.cpu()
-        dcg = (relevance / log_discount[None, :]).sum(
-            axis=1
-        )  # MPS は FP64 を扱えないので CPU で計算する
-        ideal = ideal_cumulative[np.minimum(num_positive.numpy(), 10) - 1]
-        ndcgs.append(dcg / ideal)
+        # MPS は FP64 を扱えないので CPU で計算する
+        ndcgs.append(compute_ndcg_at_10(relevance, num_positive.numpy()))
         positives.append(num_positive)
     return RankingResult(
         rank=torch.cat(ranks).numpy().astype(np.int64),
@@ -135,7 +161,18 @@ def rank_candidates(
 def evaluate_embeddings(
     query_embeddings: Tensor, passage_embeddings: Tensor, retrieval_set: RetrievalSet
 ) -> RankingResult:
-    """正規化済みの埋め込みの内積(全件の厳密な探索)で、評価用の索引と query を評価する。"""
+    """正規化済みの埋め込みの内積(全件の厳密な探索)で、評価用の索引と query を評価する。
+
+    導入: 024。
+
+    Args:
+        query_embeddings: 形状 ``(Q, d)`` の正規化済みの query の埋め込み。
+        passage_embeddings: 形状 ``(P, d)`` の正規化済みの passage の埋め込み。
+        retrieval_set: 評価用の索引と query(``RetrievalSet``)。
+
+    Returns:
+        query ごとの順位と nDCG@10(``RankingResult``)。
+    """
     scores = query_embeddings.float() @ passage_embeddings.float().t()
     return rank_candidates(
         scores,
@@ -153,6 +190,16 @@ def expected_random_recall(num_positives: np.ndarray, num_candidates: int, k: in
     ``1 - prod_{i=0}^{k-1} (M - g - i) / (M - i)`` である。``M - g < k`` のとき積は 0 になる
     (因子 ``M - g - i`` が 0 を通る)。積の形で計算するので、丸め誤差は項数 ``k`` x
     丸めの単位程度である。
+
+    導入: 024。
+
+    Args:
+        num_positives: query ごとの正解の数 ``g``。
+        num_candidates: 候補の数 ``M``。
+        k: 上位 ``k`` 件。
+
+    Returns:
+        ランダムに並べたときの Recall@k の期待値(query の平均)。
     """
     index = np.arange(k, dtype=np.float64)
     values = []
@@ -173,6 +220,14 @@ def mean_pairwise_cosine(embeddings: Tensor) -> float:
     ``sum_{i != j} e_i . e_j = || sum_i e_i ||^2 - sum_i || e_i ||^2`` を使って、全
     ``n (n - 1)`` 組の平均を厳密に求める。ノルムは 1 とみなさず、実際の値 ``sum_i || e_i ||^2`` を
     引く(FP32 で正規化した埋め込みのノルムは 1 から約 ``1e-7`` ずれる)。FP64 で計算する。
+
+    導入: 024。
+
+    Args:
+        embeddings: 形状 ``(n, d)`` の L2 正規化済みの埋め込み。
+
+    Returns:
+        異なる 2 つの組すべてのコサイン類似度の平均。
     """
     e = embeddings.detach().cpu().double()
     n = e.size(0)
@@ -181,13 +236,34 @@ def mean_pairwise_cosine(embeddings: Tensor) -> float:
 
 
 def alignment(embeddings_x: Tensor, embeddings_y: Tensor, alpha: float = 2.0) -> float:
-    """正例の組 ``(x_i, y_i)`` の ``E[ || f(x) - f(y) ||^alpha ]`` (Wang & Isola)。FP64。"""
+    """正例の組 ``(x_i, y_i)`` の ``E[ || f(x) - f(y) ||^alpha ]`` (Wang & Isola)。FP64。
+
+    導入: 024。
+
+    Args:
+        embeddings_x: 形状 ``(n, d)`` の正例の組の 1 つ目の埋め込み。
+        embeddings_y: 形状 ``(n, d)`` の正例の組の 2 つ目の埋め込み。
+        alpha: 距離のべき ``alpha``。
+
+    Returns:
+        alignment の値(小さいほど正例が近い)。
+    """
     difference = embeddings_x.detach().cpu().double() - embeddings_y.detach().cpu().double()
     return float(difference.norm(dim=1).pow(alpha).mean())
 
 
 def uniformity(embeddings: Tensor, t: float = 2.0) -> float:
     """``log E[ exp(-t || f(x) - f(y) ||^2) ]`` (Wang & Isola)。異なる 2
-    つの組すべてについて平均する。FP64。"""
+    つの組すべてについて平均する。FP64。
+
+    導入: 024。
+
+    Args:
+        embeddings: 形状 ``(n, d)`` の L2 正規化済みの埋め込み。
+        t: 温度 ``t``。
+
+    Returns:
+        uniformity の値(小さいほど一様に広がっている)。
+    """
     squared = torch.pdist(embeddings.detach().cpu().double(), p=2).pow(2)
     return float(squared.mul(-t).exp().mean().log())

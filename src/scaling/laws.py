@@ -61,6 +61,8 @@ def estimate_flops_per_token(
     場合は ``6 V d_model`` を加算し、Attention 機構の系列長依存項を含める場合は
     ``12 n_layer n_ctx d_model`` を加算する(009 5.2 節の導出)。
 
+    導入: 009。
+
     Args:
         non_embedding_params: 非埋め込みパラメータ数 N(``count_non_embedding_parameters``
             の実測値を渡す想定)。
@@ -91,7 +93,16 @@ def estimate_flops_per_token(
 
 @dataclass
 class PowerLawFit:
-    """``fit_power_law`` の結果。y = coefficient * x^exponent。"""
+    """``fit_power_law`` の結果。y = coefficient * x^exponent。
+
+    導入: 009。
+
+    Attributes:
+        exponent: べき指数 ``b``。
+        coefficient: 係数 ``a``。
+        r_squared: 対数空間の決定係数。
+        residuals: 対数空間の残差 ``log y - (log a + b log x)``。
+    """
 
     exponent: float
     coefficient: float
@@ -103,6 +114,8 @@ def fit_power_law(x: Sequence[float], y: Sequence[float]) -> PowerLawFit:
     """対数空間の最小二乗によるべき乗則あてはめ y = a x^b。
 
     ``log y = log a + b log x`` を線形最小二乗(``numpy.linalg.lstsq``)であてはめる。
+
+    導入: 009。
 
     Args:
         x: 正の実数値の系列。
@@ -247,7 +260,17 @@ def _levenberg_marquardt(
 
 @dataclass
 class SaturatingPowerLawFit:
-    """``fit_saturating_power_law`` の結果。L(x) = l_inf + (x_c / x)^alpha。"""
+    """``fit_saturating_power_law`` の結果。L(x) = l_inf + (x_c / x)^alpha。
+
+    導入: 009。
+
+    Attributes:
+        l_inf: 飽和する損失(``x`` を無限に増やしたときの値)。
+        x_c: 特徴的なスケール。
+        alpha: べき指数。
+        converged: 最適化が収束したか。
+        residuals: あてはめの残差。
+    """
 
     l_inf: float
     x_c: float
@@ -264,6 +287,8 @@ def fit_saturating_power_law(x: Sequence[float], y: Sequence[float]) -> Saturati
     自動的に満たす。初期値を複数(l_inf の初期割合 x alpha の初期値)組み合わせて試す
     multi-start とし、最良の残差平方和を与える解を採用する(単一の初期値では局所解に
     陥りやすいため)。
+
+    導入: 009。
 
     Args:
         x: 正の実数値の系列(D、訓練トークン数を想定)。
@@ -337,7 +362,18 @@ def fit_saturating_power_law(x: Sequence[float], y: Sequence[float]) -> Saturati
 
 @dataclass
 class IsoFLOPParabolaFit:
-    """``fit_isoflop_parabola`` の結果。L = a (log N)^2 + b (log N) + c。"""
+    """``fit_isoflop_parabola`` の結果。L = a (log N)^2 + b (log N) + c。
+
+    導入: 009。
+
+    Attributes:
+        a: 2 次の係数。
+        b: 1 次の係数。
+        c: 定数項。
+        vertex_log_n: 頂点の ``log N``(頂点を求められないとき ``nan``)。
+        vertex_loss: 頂点の損失(同上)。
+        is_interior: 頂点が与えた ``log N`` の範囲の内点か。
+    """
 
     a: float
     b: float
@@ -354,6 +390,8 @@ def fit_isoflop_parabola(log_n: Sequence[float], loss: Sequence[float]) -> IsoFL
     あてはめ、頂点 ``log N* = -b / (2a)`` を解析解で求める(Hoffmann et al., 2022,
     Approach 2)。``a <= 0``(下に凸でない、極小点を持たない)場合は頂点を求められない
     ため ``is_interior=False`` とする。
+
+    導入: 009。
 
     Args:
         log_n: log N の値の系列(IsoFLOP プロファイル、同一計算量予算での複数
@@ -446,7 +484,19 @@ def _fit_nonlinear_huber(
 
 @dataclass
 class ChinchillaParametricFit:
-    """``fit_chinchilla_parametric`` の結果。L(N,D) = e + a_coef/N^alpha + b_coef/D^beta。"""
+    """``fit_chinchilla_parametric`` の結果。L(N,D) = e + a_coef/N^alpha + b_coef/D^beta。
+
+    導入: 009。
+
+    Attributes:
+        e: 既約の損失 ``E``。
+        a_coef: パラメータ数の項の係数 ``A``。
+        b_coef: トークン数の項の係数 ``B``。
+        alpha: パラメータ数のべき指数。
+        beta: トークン数のべき指数。
+        converged: 最適化が収束したか。
+        residuals: 対数空間の残差。
+    """
 
     e: float
     a_coef: float
@@ -511,6 +561,8 @@ def fit_chinchilla_parametric(
     どの初期値からの最適化も改善しなかった場合(データが極端に識別不能な場合)でも、
     最初の初期値をフォールバックとして返す(``best_params`` が ``None`` のまま
     関数を抜けることはない)。
+
+    導入: 009。
 
     Args:
         n: 非埋め込みパラメータ数 N の測定値の系列。
@@ -597,6 +649,8 @@ def compute_optimal_allocation_exponents(alpha: float, beta: float) -> tuple[flo
     ``b = alpha/(alpha+beta)``)が導かれる。この導出は ``C`` が ``ND`` に比例する
     ことを前提とする(出力層を含む数え方では成り立たない、009 5.3 節)。
 
+    導入: 009。
+
     Args:
         alpha, beta: ``fit_chinchilla_parametric`` で得た指数。
 
@@ -615,7 +669,16 @@ def compute_optimal_allocation_exponents(alpha: float, beta: float) -> tuple[flo
 
 @dataclass
 class GridPoint:
-    """学習グリッドの 1 セル(1 つの d_model x 1 つの計算量予算)の実測値。"""
+    """学習グリッドの 1 セル(1 つの d_model x 1 つの計算量予算)の実測値。
+
+    導入: 009。
+
+    Attributes:
+        d_model: モデルの幅 ``d_model``。
+        non_embedding_params: 埋め込みを除くパラメータ数 ``N``。
+        tokens_trained: 学習したトークン数 ``D``。
+        loss: 損失(bits-per-byte など)。
+    """
 
     d_model: int
     non_embedding_params: float
@@ -625,7 +688,19 @@ class GridPoint:
 
 @dataclass
 class FrontierResult:
-    """``reconstruct_optimal_frontier`` の結果。"""
+    """``reconstruct_optimal_frontier`` の結果。
+
+    導入: 009。
+
+    Attributes:
+        power_law_fit: ``log N_opt`` 対 ``log C`` のべき乗則(使える計算量予算が 2 点未満なら
+            ``None``)。
+        frontier_log_c: フロンティアの推定に使えた計算量予算の ``log C``。
+        frontier_log_n_opt: その予算での最適なパラメータ数の ``log N_opt``。
+        saturating_fits: ``d_model`` ごとの飽和べき乗則のあてはめ。
+        num_interior_budgets: 頂点が内点になった計算量予算の数。
+        profiles: 計算量予算ごとの IsoFLOP プロファイル。
+    """
 
     power_law_fit: PowerLawFit | None
     frontier_log_c: list[float]
@@ -653,6 +728,8 @@ def reconstruct_optimal_frontier(
        プロファイルから除外する)。
     3. ``log N_opt`` 対 ``log C`` のべき乗則あてはめ(``fit_power_law``)から
        指数を推定する。
+
+    導入: 009。
 
     Args:
         grid: 学習グリッドの全セル(``GridPoint`` のリスト)。
@@ -738,7 +815,21 @@ def reconstruct_optimal_frontier(
 
 @dataclass
 class BootstrapResult:
-    """``bootstrap_scaling_analysis`` の結果(各指数のブートストラップ標本)。"""
+    """``bootstrap_scaling_analysis`` の結果(各指数のブートストラップ標本)。
+
+    導入: 009。
+
+    Attributes:
+        a_body: 数え方「本体のみ」の IsoFLOP から推定した指数のブートストラップ標本。
+        a_body_output: 数え方「本体 + 出力層」の IsoFLOP から推定した指数の標本。
+        a_approach3: Chinchilla のパラメトリックあてはめから導いた指数の標本。
+        delta_b: ``a_body_output`` と ``a_body`` の同一反復内の差の標本。
+        delta_c: ``a_approach3`` と ``a_body`` の同一反復内の差の標本。
+        alpha: あてはめた ``alpha`` の標本。
+        beta: あてはめた ``beta`` の標本。
+        num_successful: 成功した反復の数。
+        num_attempted: 試行した反復の数。
+    """
 
     a_body: np.ndarray
     a_body_output: np.ndarray
@@ -774,6 +865,8 @@ def bootstrap_scaling_analysis(
     Chinchilla のパラメトリックあてはめは計算コストが高いため、ノイズなしの点推定で
     収束した解を全反復の初期値(warm start)として使い、multi-start は行わない
     (ノイズの大きさが小さければ最適解の近傍に留まるとみなせる)。
+
+    導入: 009。
 
     Args:
         grid: 学習グリッドの全セル(実測値)。

@@ -44,11 +44,14 @@ from torch import Tensor
 
 from src.models.cross_encoder import CrossEncoder
 from src.models.text_embedding import TextEmbeddingModel, truncate_and_normalize
+from src.retrieval.evaluation import compute_ndcg_at_10
 
 
 @dataclass
 class RerankingResult:
     """並べ替えの後の query ごとの順位と指標。
+
+    導入: 025。
 
     Attributes:
         rank: 形状 ``(Q,)``。候補を並べ替えた後の、最も上位の正解の順位(1 始まり。
@@ -95,6 +98,8 @@ def rank_reranked_candidates(
 
     同点のスコアは正例に不利に数える(正例でない候補を上位とする。モジュールの説明)。
 
+    導入: 025。
+
     Args:
         scores: 形状 ``(Q, K)``。候補のスコア(大きいほど上位)。
         candidate_ids: 形状 ``(Q, K)``。候補のコーパスの passage の添字(第 1 段の順位の順。
@@ -103,6 +108,9 @@ def rank_reranked_candidates(
         passage_articles: コーパスの passage ごとの記事。
         num_positives: 形状 ``(Q,)``。query ごとの正解の数(コーパス全体での、同じ記事の他の
         passage の数)。
+
+    Returns:
+        並べ替えた後の順位と指標(``RerankingResult``)。
     """
     num_queries, k = candidate_ids.shape
     is_positive = passage_articles[candidate_ids] == query_articles[:, None]
@@ -111,15 +119,13 @@ def rank_reranked_candidates(
     reordered = np.take_along_axis(is_positive, order, axis=1)
     any_positive = reordered.any(axis=1)
     rank = np.where(any_positive, reordered.argmax(axis=1) + 1, k + 1).astype(np.int64)
-    log_discount = np.log2(np.arange(2, 12, dtype=np.float64))
     top = np.zeros((num_queries, 10))
     width = min(10, k)
     top[:, :width] = reordered[:, :width]
-    dcg = (top / log_discount[None, :]).sum(axis=1)
-    ideal_cumulative = np.cumsum(1.0 / log_discount)
-    ideal = ideal_cumulative[np.minimum(num_positives, 10) - 1]
     return RerankingResult(
-        rank=rank, normalized_discounted_cumulative_gain_at_10=dcg / ideal, num_candidates=k
+        rank=rank,
+        normalized_discounted_cumulative_gain_at_10=compute_ndcg_at_10(top, num_positives),
+        num_candidates=k,
     )
 
 
@@ -134,6 +140,8 @@ def score_candidates_cross_encoder(
 ) -> np.ndarray:
     """cross-encoder で、各 query の候補のスコア ``(Q, K)`` を求める(組ごとに 1 回の順伝播)。
 
+    導入: 025。
+
     Args:
         model: ``CrossEncoder``(呼び出しの間 ``eval()`` にし、終わったら元のモードに戻す)。
         query_tokens: 形状 ``(Q, L_q)``。
@@ -141,6 +149,9 @@ def score_candidates_cross_encoder(
         candidate_ids: 形状 ``(Q, K)``。
         batch_size: 1 回の順伝播の組の数(結果に影響しない)。
         use_fp16_autocast: 真なら本体を FP16 の autocast で計算する(CUDA のみ。ヘッドは FP32)。
+
+    Returns:
+        形状 ``(Q, K)`` のスコア(float32)。
     """
     device = next(model.parameters()).device
     was_training = model.training
@@ -177,6 +188,19 @@ def score_candidates_dual_encoder(
 
     候補に現れる passage を 1 回ずつ符号化する(passage の埋め込みは事前に計算できる)。
     埋め込みの正規化と内積は FP32 で計算する。
+
+    導入: 025。
+
+    Args:
+        model: ``TextEmbeddingModel``(呼び出しの間 ``eval()`` にし、終わったら元のモードに戻す)。
+        query_tokens: 形状 ``(Q, L_q)``。
+        passage_tokens: 形状 ``(P, L_p)``(コーパスの passage)。
+        candidate_ids: 形状 ``(Q, K)``。
+        batch_size: 1 回の順伝播の数(結果に影響しない)。
+        use_fp16_autocast: 真なら本体を FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        形状 ``(Q, K)`` のスコア(float32)。
     """
     device = next(model.parameters()).device
     was_training = model.training
@@ -217,7 +241,22 @@ def score_candidates(
     batch_size: int,
     use_fp16_autocast: bool = False,
 ) -> np.ndarray:
-    """``kind``(cross_encoder か dual_encoder)で、候補のスコアを求める関数を切り替える。"""
+    """``kind``(cross_encoder か dual_encoder)で、候補のスコアを求める関数を切り替える。
+
+    導入: 025。
+
+    Args:
+        model: ``CrossEncoder`` または ``TextEmbeddingModel``。
+        kind: ``"cross_encoder"`` または ``"dual_encoder"``。
+        query_tokens: 形状 ``(Q, L_q)``。
+        passage_tokens: 形状 ``(P, L_p)``(コーパスの passage)。
+        candidate_ids: 形状 ``(Q, K)``。
+        batch_size: 1 回の順伝播の数(結果に影響しない)。
+        use_fp16_autocast: 真なら本体を FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        形状 ``(Q, K)`` のスコア(float32)。
+    """
     if kind == "cross_encoder":
         return score_candidates_cross_encoder(
             model, query_tokens, passage_tokens, candidate_ids, batch_size, use_fp16_autocast

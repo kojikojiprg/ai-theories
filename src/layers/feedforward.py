@@ -35,6 +35,8 @@ class FeedForwardNetwork(nn.Module):
     (位置間の情報混合は Multi-Head Attention 側が担い、このモジュールは
     各位置内の非線形変換のみを行う)。
 
+    導入: 002。
+
     Args:
         d_model: 入出力の次元。
         d_ff: 中間層の次元。原論文(Vaswani et al., 2017)では d_ff = 4 * d_model。
@@ -90,6 +92,8 @@ class SwiGLUFeedForwardNetwork(nn.Module):
     2 * d_model * d_ff と一致する条件から導出、詳細は 004 の理論セクション参照)。
     この丸め込みはノートブック側の責務とし、本クラスは ``d_ff`` を
     そのまま中間次元として使う(呼び出し側が既に丸めた値を渡す想定)。
+
+    導入: 004。
 
     Args:
         d_model: 入出力の次元。

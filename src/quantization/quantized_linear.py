@@ -54,6 +54,8 @@ _STORAGE_PREFIX = "quantized_"
 class QuantizedLinear(nn.Module):
     """量子化した重みで順伝播する線形層(重みは凍結、buffer として保持する)。
 
+    導入: 013。
+
     Args:
         quantized_weight: 量子化した重み(形状 ``(out_features, in_features)``)。
         bias: バイアス(``None`` 可)。持つ場合は ``requires_grad=False`` の FP32 パラメータ
@@ -152,6 +154,8 @@ def quantize_linear_layers(
 ) -> list[str]:
     """``module`` 内のすべての ``nn.Linear`` を ``QuantizedLinear`` に置き換える(その場で)。
 
+    導入: 013。
+
     Args:
         module: 置換対象(例: ``GPTLanguageModel.blocks``。埋め込みと重みを共有する出力層を
             量子化しないよう、呼び出し側が範囲を渡す)。
@@ -178,7 +182,17 @@ def quantize_linear_layers(
 @torch.no_grad()
 def quantize_linear_weights(module: nn.Module, **quantize_kwargs) -> dict[str, QuantizedWeight]:
     """``module`` 内のすべての ``nn.Linear`` の重みを量子化した結果を CPU 上で返す
-    (``quantize_linear_layers(precomputed=...)`` に渡すキャッシュを作る)。"""
+    (``quantize_linear_layers(precomputed=...)`` に渡すキャッシュを作る)。
+
+    導入: 013。
+
+    Args:
+        module: 対象のモジュール(``nn.Linear`` を含む)。
+        **quantize_kwargs: ``quantize_weight()`` に渡す引数(方式・ビット幅など)。
+
+    Returns:
+        ``{モジュール名: QuantizedWeight}``(CPU 上)。
+    """
     return {
         name: quantize_weight(child.weight.detach().cpu(), **quantize_kwargs)
         for name, child in module.named_modules()

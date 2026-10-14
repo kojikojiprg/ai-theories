@@ -37,48 +37,17 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 from src.data.image import EpochShuffledBatchSampler, random_crop_and_flip, to_normalized_float
-from src.training.optimizer import AdamW
 from src.training.precision import DynamicLossScaler
 from src.training.schedule import compute_warmup_cosine_learning_rate
-
-
-def split_weight_decay_parameters(
-    model: nn.Module,
-) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
-    """重み減衰を掛けるパラメータと掛けないパラメータに分ける。
-
-    行列形(2 階以上)の重み(線形層・畳み込み層の重み)に重み減衰を掛け、バイアス・正規化層の
-    パラメータ(1 階)と、モデルが ``no_weight_decay_parameter_names()`` で指定する行列形の
-    パラメータ(ViT の [CLS] トークン・学習可能な位置埋め込み)には掛けない。
-
-    Returns:
-        (重み減衰を掛けるパラメータ, 掛けないパラメータ)。
-    """
-    excluded = set()
-    if hasattr(model, "no_weight_decay_parameter_names"):
-        excluded = set(model.no_weight_decay_parameter_names())
-    decay, no_decay = [], []
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
-            continue
-        if parameter.ndim >= 2 and name not in excluded:
-            decay.append(parameter)
-        else:
-            no_decay.append(parameter)
-    return decay, no_decay
-
-
-def unscale_gradients_and_compute_norm(
-    parameters: list[nn.Parameter], scale: float | None
-) -> Tensor:
-    """勾配をその場でスケール値で除し、全パラメータの勾配を連結した L2 ノルムを返す。
-
-    ``scale`` が ``None`` のときは除算をしない。返り値は GPU 上のスカラー(CPU に読み出さない)。
-    """
-    grads = [p.grad for p in parameters if p.grad is not None]
-    if scale is not None:
-        torch._foreach_mul_(grads, 1.0 / scale)
-    return torch.linalg.vector_norm(torch.stack(torch._foreach_norm(grads)))
+from src.training.update_step import (
+    build_weight_decay_split_optimizers,
+    clip_gradients_to_threshold,
+    flag_clipped_steps,
+    split_weight_decay_parameters,  # noqa: F401  (019 のノートブックが本モジュールから import する)
+    step_optimizers_and_update_loss_scale,
+    unscale_gradients_and_compute_norm,
+)
+from src.utils.device import synchronize_device
 
 
 def train_image_classifier(
@@ -103,6 +72,8 @@ def train_image_classifier(
     evaluation_fn: Callable[[nn.Module], dict] | None = None,
 ) -> dict:
     """画像分類器を ``num_steps`` ステップ学習する(交差エントロピー損失)。
+
+    導入: 019。
 
     Args:
         model: 学習するモデル(``images`` と同じデバイスに置いておく)。
@@ -142,12 +113,9 @@ def train_image_classifier(
     generator.manual_seed(data_seed)
     sampler = EpochShuffledBatchSampler(int(train_indices.numel()), batch_size, generator)
 
-    decay, no_decay = split_weight_decay_parameters(model)
-    optimizers = [
-        AdamW(decay, lr=peak_learning_rate, weight_decay=weight_decay),
-        AdamW(no_decay, lr=peak_learning_rate, weight_decay=0.0),
-    ]
-    parameters = decay + no_decay
+    optimizers, parameters = build_weight_decay_split_optimizers(
+        model, peak_learning_rate, weight_decay, foreach=False
+    )
     loss_scaler = (
         DynamicLossScaler(init_loss_scale, growth_interval=loss_scale_growth_interval)
         if use_fp16_autocast
@@ -200,22 +168,11 @@ def train_image_classifier(
             parameters, loss_scaler.scale if loss_scaler is not None else None
         )
         # 007 と同じ定義: ノルムが閾値を超えたら threshold / norm 倍する(CPU に読み出さずに行う)
-        clip_coefficient = torch.where(
-            gradient_norm > threshold, threshold / gradient_norm, torch.ones_like(gradient_norm)
-        )
-        torch._foreach_mul_([p.grad for p in parameters if p.grad is not None], clip_coefficient)
+        clip_gradients_to_threshold(parameters, gradient_norm, threshold)
 
-        found_inf = False
-        if loss_scaler is not None:  # ここで 1 回だけ CPU と同期する
-            found_inf = not bool(torch.isfinite(gradient_norm))
-        if not found_inf:
-            for optimizer in optimizers:
-                optimizer.step()
-        if loss_scaler is not None:
-            history["loss_scale"].append(loss_scaler.scale)
-            loss_scaler.update(found_inf)
-        else:
-            history["loss_scale"].append(1.0)
+        found_inf = step_optimizers_and_update_loss_scale(
+            optimizers, gradient_norm, loss_scaler, history
+        )
 
         losses[step - 1] = loss.detach()
         gradient_norms[step - 1] = gradient_norm.detach()
@@ -223,30 +180,23 @@ def train_image_classifier(
         history["step_skipped"].append(found_inf)
 
         if evaluation_fn is not None and step in evaluation_steps:
-            _synchronize(device)
+            synchronize_device(device)
             train_seconds += time.time() - start
             history["evaluations"][step] = evaluation_fn(model)
             start = time.time()
-    _synchronize(device)
+    synchronize_device(device)
     train_seconds += time.time() - start
 
     digest.update(generator.get_state().numpy().tobytes())
     history["loss"] = losses.cpu().tolist()
     history["gradient_norm"] = gradient_norms.cpu().tolist()
-    history["gradient_clip_triggered"] = [
-        g > gradient_clip_threshold for g in history["gradient_norm"]
-    ]
+    history["gradient_clip_triggered"] = flag_clipped_steps(
+        history["gradient_norm"], gradient_clip_threshold
+    )
     history["epochs_started"] = sampler.epochs_started
     history["data_stream_hash"] = digest.hexdigest()
     history["train_seconds"] = train_seconds
     return history
-
-
-def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
 
 
 @torch.no_grad()
@@ -259,6 +209,8 @@ def evaluate_image_classifier(
     channels_last: bool = False,
 ) -> dict:
     """top-1 正解率と交差エントロピーを FP32 で評価する(データ拡張なし)。
+
+    導入: 019。
 
     Args:
         model: 評価するモデル。
@@ -296,6 +248,15 @@ def evaluate_image_classifier(
 
 
 def logit(p: float | np.ndarray) -> float | np.ndarray:
-    """正解率のロジット log(p / (1 - p))(天井効果の診断に使う)。"""
+    """正解率のロジット log(p / (1 - p))(天井効果の診断に使う)。
+
+    導入: 019。
+
+    Args:
+        p: 確率(正解率など。0 より大きく 1 より小さい値、またはその配列)。
+
+    Returns:
+        ``log(p / (1 - p))``(``p`` と同じ形状)。
+    """
     p = np.asarray(p, dtype=np.float64)
     return np.log(p) - np.log1p(-p)

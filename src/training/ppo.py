@@ -79,6 +79,13 @@ def collate_rollout_sequences(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """プロンプト + 応答を右パディングしてバッチにする。
 
+    導入: 017。
+
+    Args:
+        prompts: プロンプトのトークン ID の列の集まり。
+        responses: 同じ順の応答のトークン ID の列の集まり(空でないこと)。
+        pad_token_id: 右パディングに使うトークン ID。
+
     Returns:
         ``(token_ids, prompt_lengths, response_mask)``。形状は ``(B, S_max)``・``(B,)``・
         ``(B, R)``(``response_mask[b, t]`` は行 b の応答が t 番目のトークンを持つか)。
@@ -122,11 +129,16 @@ def gather_response_log_probs(
 ) -> Tensor:
     """応答のトークンごとの対数確率 ``log pi(y_t | x, y_{<t})``(``(B, R)``、パディングは 0)。
 
+    導入: 017。
+
     Args:
         logits: 形状 ``(B, S, V)``(``token_ids`` を順伝播した出力)。
         token_ids: 形状 ``(B, S)``。
         prompt_lengths: 形状 ``(B,)``。
         response_mask: 形状 ``(B, R)``。
+
+    Returns:
+        形状 ``(B, R)`` の応答のトークンごとの対数確率(パディングは 0)。
     """
     positions = _response_positions(prompt_lengths, response_mask)  # (B, R)
     selector = _position_selector(positions, logits.size(1), logits.dtype)
@@ -139,14 +151,35 @@ def gather_response_log_probs(
 
 
 def gather_response_values(values: Tensor, prompt_lengths: Tensor, response_mask: Tensor) -> Tensor:
-    """位置ごとの価値 ``(B, S)`` から、応答の t 番目のトークンの直前の状態の価値 ``(B, R)``。"""
+    """位置ごとの価値 ``(B, S)`` から、応答の t 番目のトークンの直前の状態の価値 ``(B, R)``。
+
+    導入: 017。
+
+    Args:
+        values: 形状 ``(B, S)`` の位置ごとの価値。
+        prompt_lengths: 形状 ``(B,)``。プロンプトの長さ。
+        response_mask: 形状 ``(B, R)`` の bool。応答の有効なトークンの位置。
+
+    Returns:
+        形状 ``(B, R)`` の価値(パディングは 0)。
+    """
     positions = _response_positions(prompt_lengths, response_mask)
     selector = _position_selector(positions, values.size(1), values.dtype)
     return torch.bmm(selector, values[:, :, None]).squeeze(-1) * response_mask
 
 
 def masked_mean(values: Tensor, mask: Tensor) -> Tensor:
-    """``mask`` が True の要素だけの平均(バッチ全体のトークンで平均する)。"""
+    """``mask`` が True の要素だけの平均(バッチ全体のトークンで平均する)。
+
+    導入: 017。
+
+    Args:
+        values: 平均する値。
+        mask: ``values`` と同じ形状の bool。真の要素だけを使う。
+
+    Returns:
+        形状 ``()`` の平均。
+    """
     mask = mask.to(values.dtype)
     return (values * mask).sum() / mask.sum()
 
@@ -160,12 +193,17 @@ def compute_kl_penalized_rewards(
 ) -> Tensor:
     """トークンごとの報酬 ``r_t = -beta (log pi_old - log pi_ref) + [t = T] r_phi``(``(B, R)``)。
 
+    導入: 017。
+
     Args:
         log_probs: ロールアウト時の方策の対数確率 ``log pi_old``(``(B, R)``)。
         reference_log_probs: 参照方策の対数確率 ``log pi_ref``(``(B, R)``)。
         scores: 系列ごとの報酬モデルのスコア ``r_phi(x, y)``(``(B,)``)。
         response_mask: ``(B, R)``。各行は先頭から連続して True である前提。
         beta: KL 係数。
+
+    Returns:
+        形状 ``(B, R)`` のトークンごとの報酬(勾配を持たない)。
     """
     mask = response_mask.to(log_probs.dtype)
     rewards = -beta * (log_probs.detach() - reference_log_probs.detach()) * mask
@@ -187,6 +225,15 @@ def compute_gae(
     を計算する。パディングの列の値は 0 とし、計算にも寄与しない(各行は先頭から連続して True で
     ある前提なので、パディングの列の次の値 ``V_{t+1}``・``A_{t+1}`` を 0 として扱えば正しい)。
 
+    導入: 017。
+
+    Args:
+        rewards: 形状 ``(B, R)`` のトークンごとの報酬。
+        values: 形状 ``(B, R)`` のトークンごとの価値 ``V_t``。
+        response_mask: 形状 ``(B, R)`` の bool(各行は先頭から連続して真)。
+        gamma: 割引率 ``gamma``。
+        lam: GAE の ``lambda``。
+
     Returns:
         ``(advantages, returns)``。いずれも ``(B, R)``(勾配を持たない)。
     """
@@ -206,7 +253,18 @@ def compute_gae(
 
 
 def whiten_advantages(advantages: Tensor, response_mask: Tensor, eps: float = 1e-8) -> Tensor:
-    """アドバンテージを、マスク内のトークン全体で平均 0・標準偏差 1 に標準化する。"""
+    """アドバンテージを、マスク内のトークン全体で平均 0・標準偏差 1 に標準化する。
+
+    導入: 017。
+
+    Args:
+        advantages: 形状 ``(B, R)`` のアドバンテージ。
+        response_mask: 形状 ``(B, R)`` の bool。
+        eps: 標準偏差の分母に加える微小量。
+
+    Returns:
+        標準化したアドバンテージ(形状 ``(B, R)``、パディングは 0)。
+    """
     mean = masked_mean(advantages, response_mask)
     variance = masked_mean((advantages - mean) ** 2, response_mask)
     return (advantages - mean) / torch.sqrt(variance + eps) * response_mask
@@ -224,6 +282,18 @@ def ppo_clipped_policy_loss(
     ``loss = -mean_t min(rho_t A_t, clip(rho_t, 1 - eps, 1 + eps) A_t)``(マスク内のトークンで平均)。
     「クリップが効いた」は、min が 2 つ目の項(クリップした項)をとり、かつ 2 つの項が異なる
     (rho_t がクリップの範囲の外にある)トークンとする。
+
+    導入: 017。
+
+    Args:
+        log_probs: 更新中の方策の対数確率(形状 ``(B, R)``、勾配を持つ)。
+        old_log_probs: ロールアウト時の方策の対数確率(形状 ``(B, R)``)。
+        advantages: 形状 ``(B, R)`` のアドバンテージ。
+        response_mask: 形状 ``(B, R)`` の bool。
+        clip_epsilon: クリップの幅 ``eps``。
+
+    Returns:
+        ``(損失 (形状 ``()``), クリップが効いたトークンの割合 (形状 ``()``))``。
     """
     ratio = torch.exp(log_probs - old_log_probs)
     unclipped = ratio * advantages
@@ -235,12 +305,25 @@ def ppo_clipped_policy_loss(
 
 
 def value_function_loss(values: Tensor, returns: Tensor, response_mask: Tensor) -> Tensor:
-    """価値関数の損失 ``0.5 mean_t (V_t - R_t)^2``(マスク内のトークンで平均)。"""
+    """価値関数の損失 ``0.5 mean_t (V_t - R_t)^2``(マスク内のトークンで平均)。
+
+    導入: 017。
+
+    Args:
+        values: 形状 ``(B, R)`` の価値 ``V_t``(勾配を持つ)。
+        returns: 形状 ``(B, R)`` の目標 ``R_t``(勾配を止めて使う)。
+        response_mask: 形状 ``(B, R)`` の bool。
+
+    Returns:
+        損失(形状 ``()``)。
+    """
     return 0.5 * masked_mean((values - returns.detach()) ** 2, response_mask)
 
 
 class PolicyWithValueHead(nn.Module):
     """方策(言語モデル)と、その本体を共有する価値ヘッド。
+
+    導入: 017。
 
     Args:
         policy: 方策の ``GPTLanguageModel``(017 では SFT のマージ済みの重みに LoRA を掛けたもの)。
@@ -273,6 +356,8 @@ def ppo_update(
     rng: np.random.Generator,
 ) -> dict[str, float]:
     """1 回のロールアウトのバッチで、方策と価値関数を ``num_epochs`` エポック更新する。
+
+    導入: 017。
 
     Args:
         agent: 方策と価値ヘッド。

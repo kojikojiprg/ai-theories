@@ -40,6 +40,8 @@ import numpy as np
 class BM25Index:
     """BM25 の転置索引。
 
+    導入: 024。
+
     Args:
         documents: 文書ごとのトークン ID の列(長さが異なってもよい)。
         vocabulary_size: 語彙サイズ(トークン ID は ``[0, vocabulary_size)``)。

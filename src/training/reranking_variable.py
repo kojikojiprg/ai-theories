@@ -28,19 +28,24 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from src.training.classification import (
-    split_weight_decay_parameters,
-    unscale_gradients_and_compute_norm,
-)
-from src.training.optimizer import AdamW
 from src.training.precision import DynamicLossScaler
 from src.training.reranking import softmax_cross_entropy_over_candidates
 from src.training.schedule import compute_warmup_cosine_learning_rate
+from src.training.update_step import (
+    build_weight_decay_split_optimizers,
+    clip_gradients_to_threshold,
+    flag_clipped_steps,
+    step_optimizers_and_update_loss_scale,
+    unscale_gradients_and_compute_norm,
+)
+from src.utils.device import synchronize_device
 
 
 @dataclass
 class ClozeRerankingSchedule:
     """学習の組(学習の前に全ステップぶんを作る)。
+
+    導入: 026。
 
     Attributes:
         query_ids: 形状 ``(T, B)``。query の表(索引の passage と同じ番号)の添字。
@@ -60,7 +65,17 @@ class ClozeRerankingSchedule:
 
 
 def usable_cloze_queries(mined_candidates: np.ndarray, positives: np.ndarray) -> np.ndarray:
-    """正例が上位の候補に入っている query の真偽 ``(len(positives),)``。"""
+    """正例が上位の候補に入っている query の真偽 ``(len(positives),)``。
+
+    導入: 026。
+
+    Args:
+        mined_candidates: 形状 ``(Q, K)``。各 query の第 1 段の上位 ``K`` 件(passage の添字)。
+        positives: 形状 ``(Q,)``。各 query の正例の passage の添字。
+
+    Returns:
+        形状 ``(Q,)`` の bool(正例が上位の候補に入っているか)。
+    """
     return (mined_candidates == positives[:, None]).any(axis=1)
 
 
@@ -74,6 +89,8 @@ def sample_cloze_reranking_schedule(
 ) -> ClozeRerankingSchedule:
     """学習全体の組を、学習の前に作る(決定的)。
 
+    導入: 026。
+
     Args:
         train_queries: 学習用の query の添字(昇順。正例は同じ添字の passage)。
         mined_candidates: 形状 ``(len(train_queries), K)``。各 query の第 1 段の上位 ``K`` 件(
@@ -82,6 +99,9 @@ def sample_cloze_reranking_schedule(
         batch_queries: ``B``。
         num_negatives: ``n``(``K - 1`` 以下)。
         seed: 乱数シード。
+
+    Returns:
+        学習の組(``ClozeRerankingSchedule``)。
     """
     positives = np.asarray(train_queries)
     usable = np.nonzero(usable_cloze_queries(mined_candidates, positives))[0]
@@ -105,7 +125,17 @@ def sample_cloze_reranking_schedule(
 
 
 class VariableTables:
-    """query と passage のトークンの表(デバイスに置く)と、長さの配列(CPU・デバイス)。"""
+    """query と passage のトークンの表(デバイスに置く)と、長さの配列(CPU・デバイス)。
+
+    導入: 026。
+
+    Args:
+        query_tokens: 形状 ``(Q, L_q)``。query のトークン(右側がパディング)。
+        query_lengths: 形状 ``(Q,)``。query の有効な長さ。
+        passage_tokens: 形状 ``(P, L_p)``。passage のトークン。
+        passage_lengths: 形状 ``(P,)``。passage の有効な長さ。
+        device: 表を置くデバイス。
+    """
 
     def __init__(
         self,
@@ -145,13 +175,6 @@ class VariableTables:
         return q_rep, ql_rep, p, pl_flat, (batch, width)
 
 
-def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
-
-
 def candidate_scores(
     model: nn.Module,
     tables: VariableTables,
@@ -159,6 +182,20 @@ def candidate_scores(
     candidate_ids: np.ndarray,
     use_fp16_autocast: bool,
 ) -> Tensor:
+    """1 ステップぶんの候補のスコア ``(B, 1 + n)`` を FP32 で返す(可変長の cross-encoder)。
+
+    導入: 026。
+
+    Args:
+        model: ``VariableLengthCrossEncoder``。
+        tables: query と passage の表(``VariableTables``)。
+        query_ids: 形状 ``(B,)``。query の表の添字。
+        candidate_ids: 形状 ``(B, 1 + n)``。passage の表の添字(0 番目が正例)。
+        use_fp16_autocast: 真なら FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        形状 ``(B, 1 + n)`` のスコア(FP32)。
+    """
     q, ql, p, pl, shape = tables.step_inputs(query_ids, candidate_ids)
     with torch.autocast(
         device_type=tables.device.type, dtype=torch.float16, enabled=use_fp16_autocast
@@ -188,17 +225,34 @@ def train_reranker_variable(
     ``"loss"``・``"gradient_norm"``・``"gradient_clip_triggered"``・
     ``"learning_rate"``・``"loss_scale"``・``"step_skipped"``・``"evaluations"``・``"data_stream_hash"``・
     ``"train_seconds"``)。
+
+    導入: 026。
+
+    Args:
+        model: 学習する ``VariableLengthCrossEncoder``。
+        tables: query と passage の表(``VariableTables``)。
+        schedule: 全ステップの組(``ClozeRerankingSchedule``)。
+        peak_learning_rate: warmup の後の学習率の最大値。
+        warmup_steps: 線形 warmup のステップ数。
+        min_learning_rate: cosine decay の下限。
+        weight_decay: 重み減衰(行列形の重みのみ)。
+        gradient_clip_threshold: gradient clipping の閾値。
+        use_fp16_autocast: 真なら FP16 の autocast と動的損失スケーリングを使う(CUDA のみ)。
+        init_loss_scale: 動的損失スケーリングの初期スケール値。
+        loss_scale_growth_interval: スケール値を増やすまでの連続成功ステップ数。
+        evaluation_steps: 学習の途中で ``evaluation_fn`` を呼ぶステップ(更新の後)。
+        evaluation_fn: モデルを受け取り、評価結果の辞書を返す関数。
+
+    Returns:
+        学習の記録の辞書(キーは上の説明のとおり)。
     """
     device = tables.device
     if use_fp16_autocast and device.type != "cuda":
         raise ValueError("use_fp16_autocast は CUDA のときのみ有効にする")
     num_steps = schedule.query_ids.shape[0]
-    decay, no_decay = split_weight_decay_parameters(model)
-    optimizers = [
-        AdamW(decay, lr=peak_learning_rate, weight_decay=weight_decay, foreach=True),
-        AdamW(no_decay, lr=peak_learning_rate, weight_decay=0.0, foreach=True),
-    ]
-    parameters = decay + no_decay
+    optimizers, parameters = build_weight_decay_split_optimizers(
+        model, peak_learning_rate, weight_decay
+    )
     loss_scaler = (
         DynamicLossScaler(init_loss_scale, growth_interval=loss_scale_growth_interval)
         if use_fp16_autocast
@@ -231,38 +285,27 @@ def train_reranker_variable(
         gradient_norm = unscale_gradients_and_compute_norm(
             parameters, loss_scaler.scale if loss_scaler is not None else None
         )
-        clip_coefficient = torch.where(
-            gradient_norm > threshold, threshold / gradient_norm, torch.ones_like(gradient_norm)
+        clip_gradients_to_threshold(parameters, gradient_norm, threshold)
+        found_inf = step_optimizers_and_update_loss_scale(
+            optimizers, gradient_norm, loss_scaler, history
         )
-        torch._foreach_mul_([p.grad for p in parameters if p.grad is not None], clip_coefficient)
-        found_inf = False
-        if loss_scaler is not None:
-            found_inf = not bool(torch.isfinite(gradient_norm))
-        if not found_inf:
-            for optimizer in optimizers:
-                optimizer.step()
-        if loss_scaler is not None:
-            history["loss_scale"].append(loss_scaler.scale)
-            loss_scaler.update(found_inf)
-        else:
-            history["loss_scale"].append(1.0)
         with torch.no_grad():
             losses[step - 1] = loss.detach()
             gradient_norms[step - 1] = gradient_norm.detach()
         history["learning_rate"].append(learning_rate)
         history["step_skipped"].append(found_inf)
         if evaluation_fn is not None and step in evaluation_steps:
-            _synchronize(device)
+            synchronize_device(device)
             train_seconds += time.time() - start_time
             history["evaluations"][step] = evaluation_fn(model)
             start_time = time.time()
-    _synchronize(device)
+    synchronize_device(device)
     train_seconds += time.time() - start_time
     history["loss"] = losses.cpu().tolist()
     history["gradient_norm"] = gradient_norms.cpu().tolist()
-    history["gradient_clip_triggered"] = [
-        g > gradient_clip_threshold for g in history["gradient_norm"]
-    ]
+    history["gradient_clip_triggered"] = flag_clipped_steps(
+        history["gradient_norm"], gradient_clip_threshold
+    )
     history["data_stream_hash"] = schedule.digest()
     history["train_seconds"] = train_seconds
     return history
@@ -276,7 +319,20 @@ def compute_reranking_losses_variable(
     steps,
     use_fp16_autocast: bool = False,
 ) -> np.ndarray:
-    """``schedule`` の指定したステップの組での ``model`` の損失(勾配なし。1 ステップごと)。"""
+    """``schedule`` の指定したステップの組での ``model`` の損失(勾配なし。1 ステップごと)。
+
+    導入: 026。
+
+    Args:
+        model: 測るモデル(``VariableLengthCrossEncoder``)。
+        tables: query と passage の表(``VariableTables``)。
+        schedule: 全ステップの組(``ClozeRerankingSchedule``)。
+        steps: 損失を測るステップの番号(0 始まり)。
+        use_fp16_autocast: 真なら FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        ステップごとの損失(形状 ``(len(steps),)`` の float64 の配列)。
+    """
     was_training = model.training
     model.eval()
     losses = []

@@ -181,7 +181,17 @@ PREAMBLES: tuple[str, ...] = (
 
 
 def apply_task(task: str, words: Sequence[str]) -> tuple[str, ...]:
-    """課題 ``task`` を入力 ``words`` に適用した応答(正解の単語の列)を返す。"""
+    """課題 ``task`` を入力 ``words`` に適用した応答(正解の単語の列)を返す。
+
+    導入: 016。
+
+    Args:
+        task: 課題の名前(``TASK_NAMES`` のいずれか)。
+        words: 入力の単語の列。
+
+    Returns:
+        正解の単語の列。
+    """
     words = tuple(words)
     if task == "reverse":
         return words[::-1]
@@ -195,14 +205,34 @@ def apply_task(task: str, words: Sequence[str]) -> tuple[str, ...]:
 
 
 def format_prompt(instruction: str, words: Sequence[str], preamble: str | None = None) -> str:
-    """指示部分(プロンプト)の文字列を返す。``preamble`` を与えると長い水準になる。"""
+    """指示部分(プロンプト)の文字列を返す。``preamble`` を与えると長い水準になる。
+
+    導入: 016。
+
+    Args:
+        instruction: 指示文。
+        words: 入力の単語の列。
+        preamble: 指示文の前に置く前置き(``None`` なら置かない)。
+
+    Returns:
+        指示部分の文字列。
+    """
     body = instruction if preamble is None else f"{preamble} {instruction}"
     listed = "".join(" " + w for w in words)
     return f"{INSTRUCTION_HEADER}\n{body}\n{WORDS_LABEL}{listed}\n{RESPONSE_HEADER}"
 
 
 def format_response(answer: Sequence[str]) -> str:
-    """応答部分の文字列(先頭の空白から終端記号まで)を返す。"""
+    """応答部分の文字列(先頭の空白から終端記号まで)を返す。
+
+    導入: 016。
+
+    Args:
+        answer: 正解の単語の列。
+
+    Returns:
+        応答部分の文字列。
+    """
     return "".join(" " + w for w in answer) + "\n" + END_MARKER
 
 
@@ -211,6 +241,11 @@ def template_words() -> set[str]:
 
     入力の単語がテンプレートの単語と重ならないことを確かめるのに使う(入力の単語が指示文の
     単語と一致すると、どこまでが指示でどこからが入力かが曖昧になるため)。
+
+    導入: 016。
+
+    Returns:
+        小文字の英単語の集合。
     """
     texts = [INSTRUCTION_HEADER, RESPONSE_HEADER, END_MARKER, WORDS_LABEL, *PREAMBLES]
     texts += [
@@ -229,13 +264,25 @@ def template_words() -> set[str]:
 
 
 def check_single_token_words(encode: Callable[[str], list[int]], words: Sequence[str]) -> list[str]:
-    """``" " + word`` が単一トークンにならない単語のリストを返す(空なら全単語が単一トークン)。"""
+    """``" " + word`` が単一トークンにならない単語のリストを返す(空なら全単語が単一トークン)。
+
+    導入: 016。
+
+    Args:
+        encode: 文字列をトークン ID の列にする関数。
+        words: 確かめる単語の列。
+
+    Returns:
+        単一トークンにならない単語のリスト。
+    """
     return [w for w in words if len(encode(" " + w)) != 1]
 
 
 @dataclass(frozen=True)
 class InstructionExample:
     """指示データの 1 事例(入力・課題・テンプレートの選択)。
+
+    導入: 016。
 
     Attributes:
         words: 入力 x(単語の列)。
@@ -282,6 +329,19 @@ def sample_word_sequences(
     列の長さは ``[min_length, max_length]`` から一様に選び、単語は ``vocabulary`` から
     非復元抽出する(1 つの列の中に同じ単語は現れない)。生成する列どうし、および
     ``exclude`` に含まれる列とは重複しない(重複した場合は引き直す)。
+
+    導入: 016。
+
+    Args:
+        rng: 乱数生成器。
+        count: 生成する列の数。
+        vocabulary: 単語の語彙。
+        min_length: 列の長さの最小値。
+        max_length: 列の長さの最大値。
+        exclude: 重複を避ける既存の列の集合(``None`` なら避けない)。
+
+    Returns:
+        互いに異なる単語の列のリスト。
     """
     exclude = set() if exclude is None else set(exclude)
     sequences: list[tuple[str, ...]] = []
@@ -305,6 +365,15 @@ def build_training_examples(
     課題は、先頭から K 個ずつの区切りごとに ``TASK_NAMES`` の並べ替えを割り当てる。
     したがって、K の倍数の長さの任意の先頭部分で課題の数が均等になる(016 の実験 C で、
     入れ子にした先頭 N 個の部分集合を使うため)。指示文・前置きの番号は一様に選ぶ。
+
+    導入: 016。
+
+    Args:
+        inputs: 入力の単語の列の集まり。
+        rng: 課題・指示文・前置きの選択に使う乱数生成器。
+
+    Returns:
+        学習用の事例のリスト(``inputs`` と同じ長さ)。
     """
     k = len(TASK_NAMES)
     examples = []
@@ -330,6 +399,16 @@ def build_evaluation_examples(
 
     事例は入力の順、同じ入力の中では ``TASK_NAMES`` の順に並ぶ(事例 ``i`` の入力は
     ``inputs[i // K]``、課題は ``TASK_NAMES[i % K]``)。指示文・前置きの番号は一様に選ぶ。
+
+    導入: 016。
+
+    Args:
+        inputs: 入力の単語の列の集まり。
+        rng: 指示文・前置きの選択に使う乱数生成器。
+        unseen: 真なら、学習に使わない指示文(``UNSEEN_INSTRUCTIONS``)を使う。
+
+    Returns:
+        評価用の事例のリスト(長さは ``len(inputs) * K``)。
     """
     table = UNSEEN_INSTRUCTIONS if unseen else SEEN_INSTRUCTIONS
     examples = []
@@ -360,6 +439,8 @@ def compute_instruction_agnostic_upper_bound(
 
         c^* = \\frac{1}{|X|} \\sum_{x \\in X} \\max_y \\frac{n_x(y)}{K}
 
+    導入: 016。
+
     Args:
         answers_by_input: 入力ごとの、K 個の課題の正解(単語の列)のリスト。
 
@@ -376,6 +457,8 @@ def compute_instruction_agnostic_upper_bound(
 @dataclass(frozen=True)
 class EncodedInstructionExample:
     """符号化した事例。``token_ids = 指示部分のトークン列 + 応答部分のトークン列``。
+
+    導入: 016。
 
     Attributes:
         token_ids: 連結したトークン列。
@@ -400,6 +483,17 @@ def encode_instruction_example(
 
     別々に符号化するので、損失マスクの境界(``prompt_length``)は必ずトークンの境界と一致する。
     連結したトークン列の復号が全文(``prompt + response``)と一致することを確かめる。
+
+    導入: 016。
+
+    Args:
+        encode: 文字列をトークン ID の列にする関数。
+        decode: トークン ID の列を文字列に戻す関数。
+        prompt: 指示部分の文字列。
+        response: 応答部分の文字列。
+
+    Returns:
+        符号化した事例(``EncodedInstructionExample``)。
     """
     prompt_ids = encode(prompt)
     response_ids = encode(response)
@@ -424,6 +518,12 @@ def collate_instruction_batch(
     パディングは系列の右側にだけ置く。因果マスクにより実トークンの位置はそれより右の
     パディングを参照しないので、パディングは実トークンの logits を変えない。パディングの位置は
     どちらのマスクにも含まれず、損失に寄与しない。
+
+    導入: 016。
+
+    Args:
+        examples: 符号化した事例のリスト。
+        pad_token_id: 右パディングに使うトークン ID。
 
     Returns:
         ``(token_ids, prompt_target_mask, response_target_mask)``。形状はそれぞれ
@@ -451,6 +551,15 @@ def score_generated_response(generated_text: str, answer: Sequence[str]) -> tupl
     - **完全一致**: 形式を遵守し、かつ終端記号より前の文字列を空白で区切った単語の列が正解と
       一致すること(空白の正規化: 先頭・末尾の空白を除き、連続する空白・改行を 1 つの区切りと
       みなす。``text.split()`` による)。
+
+    導入: 016。
+
+    Args:
+        generated_text: 生成した応答部分の文字列(上限トークン数で打ち切ったもの)。
+        answer: 正解の単語の列。
+
+    Returns:
+        ``(形式の遵守, 完全一致)``。
     """
     first = generated_text.find(DELIMITER_PREFIX)
     format_ok = first != -1 and generated_text.startswith(END_MARKER, first)

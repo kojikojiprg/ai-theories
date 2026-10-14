@@ -45,6 +45,13 @@ class ArticleSplit:
     """記事の学習用・検証用・評価用への分割。
 
     記事の番号は、コーパスの中の並び順の 0 始まりの番号である。
+
+    導入: 024。
+
+    Attributes:
+        train: 学習用の記事の番号(昇順)。
+        validation: 検証用の記事の番号(昇順)。
+        evaluation: 評価用の記事の番号(昇順)。
     """
 
     train: np.ndarray
@@ -67,10 +74,15 @@ def find_articles_starting_at_or_after(spans: Sequence[dict], character_position
     ので、その位置以降に始まる記事は、どちらも一度も見ていない記事である(位置をまたぐ記事は、一部を
     見ているので含めない)。
 
+    導入: 024。
+
     Args:
         spans: ``locate_wikipedia_article_spans()`` が返す、``{"start", "end", ...}`` の辞書のリスト
             (コーパスの中の順)。
         character_position: 文字位置。
+
+    Returns:
+        記事の番号のリスト(昇順)。
     """
     return [i for i, span in enumerate(spans) if span["start"] >= character_position]
 
@@ -90,6 +102,8 @@ def split_articles(
     passage を 2 個以上持つ記事)の中から、シードで固定した乱数による並べ替えの先頭から選ぶ。
     先頭の ``num_evaluation`` 個を評価用、次の ``num_validation`` 個を検証用にする。候補の残り(検索
     に使えない短い記事を含む)はすべて学習用に入れる(短くて組が作れない記事は、学習でも使われない)。
+
+    導入: 024。
 
     Args:
         article_token_counts: 記事ごとのトークン数(コーパスの中の順。候補でない記事の値は使わない)。
@@ -123,6 +137,8 @@ def encode_articles(
 ) -> list[np.ndarray | None]:
     """記事ごとに別々に符号化する(記事の境界をまたぐトークンを作らない)。
 
+    導入: 024。
+
     Args:
         tokenizer: ``encode()`` を持つトークナイザ。
         corpus_text: コーパス全文。
@@ -147,6 +163,15 @@ def select_evenly(num_available: int, num_selected: int) -> np.ndarray:
     """``0, ..., num_available - 1`` から、等間隔に ``min(num_available, num_selected)`` 個を選ぶ。
 
     選んだ添字は重複せず昇順である。``num_available <= num_selected`` なら全部を返す。
+
+    導入: 024。
+
+    Args:
+        num_available: 選べる要素の数。
+        num_selected: 選ぶ個数の上限。
+
+    Returns:
+        選んだ添字(昇順、重複なし)。
     """
     if num_available <= num_selected:
         return np.arange(num_available)
@@ -159,6 +184,8 @@ def select_evenly(num_available: int, num_selected: int) -> np.ndarray:
 @dataclass
 class RetrievalSet:
     """評価用の索引と query。
+
+    導入: 024。
 
     Attributes:
         passages: 形状 ``(P, L_p)``。索引の passage のトークン ID(重ならない窓)。
@@ -227,6 +254,8 @@ def build_retrieval_set(
        ``max_queries_per_article`` 個まで選び、元の passage にする。query は、元の passage の中の
        シード付きの乱数で決めた位置から ``query_length`` トークン切り出す。
 
+    導入: 024。
+
     Args:
         article_tokens: 記事のトークン ID(コーパスの中の順、``encode_articles()``)。
             ``article_ids`` の記事の要素だけを参照する。
@@ -236,6 +265,9 @@ def build_retrieval_set(
         max_passages_per_article: 記事ごとの索引の passage 数の上限。
         max_queries_per_article: 記事ごとの query 数の上限。
         seed: query の切り出し位置の乱数シード。
+
+    Returns:
+        評価用の索引と query(``RetrievalSet``)。
     """
     if query_length > passage_length:
         raise ValueError("query_length は passage_length 以下である必要がある")
@@ -286,6 +318,17 @@ def compute_article_sampling_weights(
     ``min(floor(n / L_p), max_passages_per_article)``(ただし 1 以上)にする。
     評価の索引と同じ上限なので、
     最長の記事に偏らない。組を作れない記事の重みは 0。
+
+    導入: 024。
+
+    Args:
+        article_token_counts: 記事ごとのトークン数。
+        query_length: query の長さ ``L_q``。
+        passage_length: passage の長さ ``L_p``。
+        max_passages_per_article: 記事ごとの passage 数の上限。
+
+    Returns:
+        記事ごとの重み(組を作れない記事は 0)。
     """
     counts = np.asarray(article_token_counts, dtype=np.int64)
     windows = np.minimum(counts // passage_length, max_passages_per_article)
@@ -311,6 +354,8 @@ def sample_pair_schedule(
     ``s = n - L_q - L_p`` として、``[0, s]`` の整数を 2 つ一様に引いて ``x <= y`` に並べ、先に置く
     区間の開始位置を ``x``、後に置く区間の開始位置を ``y + (先に置いた区間の長さ)`` とする。query 側
     と passage 側のどちらを先に置くかは、等確率で決める。
+
+    導入: 024。
 
     Args:
         article_token_counts: 学習用の記事ごとのトークン数。
@@ -357,6 +402,12 @@ def concatenate_articles(
     article_tokens: Sequence[np.ndarray], article_ids: Sequence[int]
 ) -> tuple[np.ndarray, np.ndarray]:
     """学習用の記事のトークンを 1 本の配列に連結する。
+
+    導入: 024。
+
+    Args:
+        article_tokens: 記事のトークン ID(コーパスの中の順)。
+        article_ids: 連結する記事の番号。
 
     Returns:
         ``(連結したトークン ID, 各記事の先頭の位置)``。``article_ids`` の順に並べる。

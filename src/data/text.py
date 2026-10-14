@@ -122,6 +122,8 @@ class CharacterLevelTokenizer:
     相互変換のみを行う。サブワード分割(Byte Pair Encoding など、005 で扱う)は
     一切行わない、文字単位の最小限の処理である。
 
+    導入: 004。
+
     Args:
         text: 語彙構築に使うテキスト。出現した文字だけが語彙に含まれる
             (未知文字への対応は持たない)。
@@ -165,6 +167,12 @@ def save_character_level_tokenizer_json(
 
     文字 → ID の対応表(``char_to_id``)のみを保存する(``id_to_char``は``char_to_id``
     から一意に復元できるため冗長)。
+
+    導入: 006。
+
+    Args:
+        tokenizer: 保存する ``CharacterLevelTokenizer``。
+        path: 書き出す JSON のパス(親ディレクトリは作る)。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,7 +181,16 @@ def save_character_level_tokenizer_json(
 
 
 def load_character_level_tokenizer_json(path: str | Path) -> CharacterLevelTokenizer:
-    """``save_character_level_tokenizer_json()``が書き出した JSON を読み込む。"""
+    """``save_character_level_tokenizer_json()``が書き出した JSON を読み込む。
+
+    導入: 006。
+
+    Args:
+        path: 読み込む JSON のパス。
+
+    Returns:
+        再構築した ``CharacterLevelTokenizer``。
+    """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return CharacterLevelTokenizer.from_char_to_id(data["char_to_id"])
 
@@ -183,6 +200,8 @@ def load_tiny_shakespeare(cache_dir: str | Path) -> str:
 
     Andrej Karpathy の char-rnn リポジトリで配布されているテキストファイルを取得する
     (https://github.com/karpathy/char-rnn)。2 回目以降の呼び出しはキャッシュから読む。
+
+    導入: 004。
 
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
@@ -338,6 +357,8 @@ def load_wikipedia_corpus(
     <記事数>_fetch_metadata.json``に記録した上で、取得できた記事だけでコーパスを
     組み立てる(目標記事数を下回った場合はその旨を標準出力に警告として出す)。
 
+    導入: 006。
+
     Args:
         language: Wikipedia の言語コード(``"ja"``・``"en"`` など)。
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
@@ -442,7 +463,7 @@ def load_wikipedia_articles(
     indices: list[int],
     manifest_path: str | Path | None = None,
 ) -> list[str]:
-    """マニフェストの指定した番号の記事を 1 記事ずつ取得して返す(015)。
+    """マニフェストの指定した番号の記事を 1 記事ずつ取得して返す。
 
     ``load_wikipedia_corpus()`` は記事を ``"\n"`` で連結した 1 つの文字列を返し、記事の中にも
     改行があるため、連結後の文字列からは記事の境界を復元できない。本関数は記事の境界が
@@ -452,6 +473,8 @@ def load_wikipedia_articles(
     (``cache_dir/wikipedia_<language>_articles/<番号 3 桁>_<リビジョン ID>.txt``)を使うので、
     どちらの関数で取得した記事も相互に再利用される。取得に失敗した記事は例外をそのまま
     送出する(呼び出し側が境界の復元に使うため、欠けた記事を黙って飛ばさない)。
+
+    導入: 015。
 
     Args:
         language: Wikipedia の言語コード。
@@ -483,12 +506,14 @@ def load_wikipedia_articles(
 def compute_wikipedia_article_offsets(
     corpus_text: str, article_texts: list[str], manifest_path: str | Path
 ) -> list[dict]:
-    """記事を個別に取得した本文から、連結済みコーパスの中での各記事の文字位置を求める(015)。
+    """記事を個別に取得した本文から、連結済みコーパスの中での各記事の文字位置を求める。
 
     ``load_wikipedia_corpus()`` は本文が空でない記事を ``"\n"`` 1 つで連結する。本関数は
     その連結を先頭から再現しながら、各記事が ``corpus_text`` の対応する位置の文字列と完全に
     一致することを確かめ、最後に連結の全体が ``corpus_text`` と一致することを確かめる。
     本文が空の記事は連結で飛ばされているので、オフセットにも含めない。
+
+    導入: 015。
 
     Args:
         corpus_text: 連結済みのコーパス全文(Hub の ``corpus.txt``)。
@@ -528,12 +553,19 @@ def compute_wikipedia_article_offsets(
 def validate_wikipedia_article_offsets(
     offsets: list[dict], corpus_text: str, manifest_path: str | Path
 ) -> None:
-    """記事のオフセットの整合性を確かめる(015)。
+    """記事のオフセットの整合性を確かめる。
 
     - 記事数がマニフェストの記事数と一致し、マニフェストの番号が狭義単調増加で、リビジョン ID が
       マニフェストと一致する。
     - オフセットは単調増加で重ならず、隣り合う記事の間はちょうど 1 文字の区切りの改行である。
       先頭の記事は位置 0 から始まり、最後の記事はコーパスの末尾で終わる。
+
+    導入: 015。
+
+    Args:
+        offsets: 記事ごとの ``{"start", "end", "manifest_index", "revision_id"}`` のリスト。
+        corpus_text: 連結済みコーパスの全文。
+        manifest_path: マニフェストの JSON のパス。
 
     Raises:
         AssertionError: いずれかが成り立たない場合。
@@ -566,7 +598,7 @@ def locate_wikipedia_article_spans(
     metadata_path: str | Path | None = None,
     start_position: int = 0,
 ) -> tuple[list[dict], str]:
-    """連結済みコーパスの中で、文字位置 ``start_position`` 以降にかかる記事の範囲を返す(015)。
+    """連結済みコーパスの中で、文字位置 ``start_position`` 以降にかかる記事の範囲を返す。
 
     コーパスのアーティファクトの ``metadata.json`` に ``article_offsets``
     (``scripts/promote_canonical_corpora.py`` が書き込む記事ごとの文字位置)があれば、それを
@@ -578,6 +610,8 @@ def locate_wikipedia_article_spans(
     ``load_wikipedia_articles()`` で取得し(Wikipedia API、記事単位のキャッシュを使う)、各記事が
     コーパスの対応する位置の文字列と完全に一致することを確かめながら、``start_position`` に
     達するまで遡る。
+
+    導入: 015。
 
     Args:
         corpus_text: 連結済みのコーパス全文。
@@ -657,6 +691,8 @@ def load_japanese_corpus(cache_dir: str | Path) -> str:
     ``load_wikipedia_corpus`` に一般化する際に、005 の呼び出し結果が変わらないことを
     検証済み)。
 
+    導入: 005。
+
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
 
@@ -683,6 +719,8 @@ def load_japanese_wikipedia_corpus(
     呼び出し結果と同一のテキストを返す。現時点で本関数を直接呼び出す既存ノートブックは
     ない(``scripts/promote_canonical_corpora.py``が、英語の
     ``load_english_wikipedia_corpus()``と対称にするために``loader``として使う)。
+
+    導入: 005。
 
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
@@ -713,6 +751,8 @@ def load_english_wikipedia_corpus(
     拡張しているため、006・008 で既に取得済みの記事のキャッシュ
     (``wikipedia_en_articles/``)をそのまま再利用でき、追加で取得が必要なのは
     新規記事分のみである。
+
+    導入: 009。
 
     Args:
         cache_dir: キャッシュ先ディレクトリ。存在しない場合は作成する。
@@ -759,6 +799,8 @@ def load_wikipedia_corpus_with_fallback(
     ``ValueError``で即座に停止する(直接取得へのフォールバックには落とさない。
     フォールバックに落とすと、設定ミスが「取得が少し遅いだけ」に見えてしまい、
     誤ったコーパスの取得に気づけないため)。
+
+    導入: 006。
 
     Args:
         language: Wikipedia の言語コード(``"ja"``・``"en"`` など、
@@ -876,6 +918,8 @@ def load_english_wikipedia_corpus_with_fallback(
     返り値は変えていない(``load_wikipedia_corpus_with_fallback``への一般化に伴い、
     009 の呼び出し結果が変わらないことを検証済み)。
 
+    導入: 009。
+
     Args:
         cache_dir: 直接取得にフォールバックした場合のキャッシュ先ディレクトリ
             (``load_english_wikipedia_corpus()``にそのまま渡す)。
@@ -918,6 +962,15 @@ def upload_corpus_artifact_to_hub(
     ため。CLAUDE.md「共有アーティファクトの管理方針」)。リポジトリが元々
     ``corpus.json``を含まない(初回アップロードなど)場合、削除は失敗するがこれは
     正常な状態のため無視する。
+
+    導入: 009。
+
+    Args:
+        repo_id: Dataset リポジトリの ID。
+        corpus_txt_path: アップロードする ``corpus.txt`` のパス。
+        metadata_json_path: アップロードする ``metadata.json`` のパス。
+        dataset_card_text: データセットカード(README.md)の本文。
+        token: Hugging Face のトークン(呼び出し側が用意する)。
     """
     from huggingface_hub import HfApi
 
@@ -956,6 +1009,8 @@ def load_code_corpus(repo_root: str | Path = ".") -> str:
     コーパスとして連結する。実在するコードであることが保証され、追加のダウンロードも
     不要である。
 
+    導入: 005。
+
     Args:
         repo_root: リポジトリルートのパス。ノートブックの Colab セットアップセルで
             ``%cd ai-theories`` 済みであれば既定値(カレントディレクトリ)のままでよい。
@@ -972,6 +1027,8 @@ def split_train_val(ids: list[int], val_ratio: float = 0.1) -> tuple[Tensor, Ten
     """文字 ID 列を学習用・検証用に分割する。
 
     時系列順を保ったまま末尾側を検証用に割り当てる(シャッフルしない)。
+
+    導入: 004。
 
     Args:
         ids: ``CharacterLevelTokenizer.encode`` で得た整数 ID のリスト。
@@ -992,6 +1049,8 @@ def get_random_batch(
     generator: torch.Generator | None = None,
 ) -> tuple[Tensor, Tensor]:
     """連続する区間をランダムに切り出して、次トークン予測用のバッチを作る。
+
+    導入: 004。
 
     Args:
         data: 1 次元の LongTensor(``split_train_val`` の出力など)、または
@@ -1026,7 +1085,7 @@ def get_random_batch(
 
 
 def split_train_val_text(text: str, validation_ratio: float) -> tuple[str, str]:
-    """テキストを文字列の段階で学習用・検証用に分割する(006)。
+    """テキストを文字列の段階で学習用・検証用に分割する。
 
     時系列順を保ったまま末尾側を検証用に割り当てる(シャッフルしない、
     ``split_train_val`` と同じ方針)。**トークン化の前に文字列のまま分割する** 点が
@@ -1041,6 +1100,8 @@ def split_train_val_text(text: str, validation_ratio: float) -> tuple[str, str]:
        なりうるため、先にトークン化してから ID 列を分割すると、学習用・検証用の
        境界をまたぐ位置でトークンが本来と異なる形に分割される可能性がある。
 
+    導入: 006。
+
     Args:
         text: 分割対象のテキスト全体。
         validation_ratio: 検証用に割り当てる割合(0 以上 1 未満)。
@@ -1053,7 +1114,7 @@ def split_train_val_text(text: str, validation_ratio: float) -> tuple[str, str]:
 
 
 def encode_corpus(tokenizer, text: str) -> Tensor:
-    """トークナイザでコーパス全体を符号化して ID の配列を返す(006)。
+    """トークナイザでコーパス全体を符号化して ID の配列を返す。
 
     ``tokenizer`` は ``encode(text) -> Sequence[int]``(整数 ID の列を直接返す)を
     持つ想定(``CharacterLevelTokenizer`` と同じインターフェース)。005 の
@@ -1061,6 +1122,8 @@ def encode_corpus(tokenizer, text: str) -> Tensor:
     (``list[str]``)を返し、シンボル <-> 整数 ID の対応を持たないため、そのままでは
     ここに渡せない(整数 ID を割り当てる語彙ラッパーの追加は 006 のノートブック
     段階で扱う)。
+
+    導入: 006。
 
     Args:
         tokenizer: ``encode(text) -> Sequence[int]`` を持つトークナイザ。
@@ -1115,6 +1178,8 @@ def encode_text_to_memmap(
     全体のハッシュではなく先頭/末尾の一部に基づく簡易な同一性チェックであり、
     ``.cache/``が Colab のセッションをまたいで永続しないことを踏まえ、
     セッション内での再利用ができれば十分という方針(CLAUDE.md)に基づく)。
+
+    導入: 009。
 
     Args:
         tokenizer: ``encode(text) -> Sequence[int]``と``vocab_size: int``を持つ
@@ -1189,7 +1254,7 @@ def make_evaluation_windows(
     token_ids: Tensor | np.ndarray,
     sequence_length: int,
 ) -> tuple[Tensor, Tensor]:
-    """検証用の非重複窓(non-overlapping window)を作る(006)。
+    """検証用の非重複窓(non-overlapping window)を作る。
 
     ``token_ids`` を長さ ``sequence_length`` の窓に先頭から順に区切る(非重複)。
     末尾の端数トークンは **切り捨てず、パディングして最終窓を埋める**(006、当初は
@@ -1204,6 +1269,8 @@ def make_evaluation_windows(
     トークナイザ条件によらず **検証テキスト全体の UTF-8 バイト数が全条件で同一の
     定数になる** ため(006、3.5 節)、呼び出し側が符号化前のテキストから直接
     ``len(text.encode("utf-8"))`` として求める(``evaluate_bits_per_byte`` に渡す)。
+
+    導入: 006。
 
     Args:
         token_ids: 1 次元の LongTensor(``encode_corpus`` の出力)、または

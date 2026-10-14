@@ -47,6 +47,8 @@ def greedy_generate_until_stop(
 ) -> list[list[int]]:
     """貪欲法で、終端記号の文字列が現れるまで(または上限トークン数まで)生成する。
 
+    導入: 016。
+
     Args:
         model: ``GPTLanguageModel``(``forward(token_ids, positions, kv_cache)`` を持つ)。
         prompts: 事例ごとの起点の文脈(トークン ID の列)。
@@ -114,6 +116,8 @@ def sample_generate_until_stop(
     **再現性**: 抽選には ``generator``(``device`` 上の ``torch.Generator``)だけを使う。同じ
     ``generator`` の状態・同じ ``prompts`` の並び・同じ ``batch_size`` なら、同じデバイスでは
     同じ結果になる。バッチの組み方が変わると、抽選の乱数の割り当ても変わる。
+
+    導入: 017。
 
     Args:
         model: ``GPTLanguageModel``(``forward(token_ids, positions, kv_cache)`` を持つ)。

@@ -95,6 +95,8 @@ def evaluate_bits_per_byte(
     3.5 節。全トークナイザ条件で同一の定数になることが望ましい特性であり、
     ``make_evaluation_windows`` はこの値を計算しない)。
 
+    導入: 006。
+
     Args:
         model: 評価対象の言語モデル(``forward(token_ids) -> logits`` を持つ)。
         evaluation_windows: 形状 ``(num_windows, S)`` の LongTensor。
@@ -133,7 +135,7 @@ def evaluate_window_negative_log_likelihoods(
     batch_size: int = 16,
     batch_callback: Callable[[int, int], None] | None = None,
 ) -> Tensor:
-    """評価窓ごとの負の対数尤度の和(nats)を返す(022)。
+    """評価窓ごとの負の対数尤度の和(nats)を返す。
 
     ``evaluate_bits_per_byte()`` と同じ規則(窓 ``[w_0, ..., w_{S-1}]`` の位置 ``0 .. S-2`` の
     logits で位置 ``1 .. S-1`` のトークンを予測する。FP32)で、合計ではなく窓ごとの和を返す。
@@ -141,6 +143,8 @@ def evaluate_window_negative_log_likelihoods(
     ない窓だけを渡す想定で、マスクは取らない。窓は先頭から順に ``batch_size`` 個ずつ処理する
     (MoE 層のようにバッチ内の他のトークンに出力が依存する層では、結果が区切り方に依存する
     ので、比べる条件どうしで同じ ``batch_size`` を使う)。
+
+    導入: 022。
 
     Args:
         model: 評価対象の言語モデル(``forward(token_ids) -> logits`` を持つ)。
@@ -200,6 +204,8 @@ def train_language_model(
     訓練データは ``get_random_batch``(``src/data/text.py``)でランダムな連続区間を
     切り出してミニバッチを作る(訓練はランダムサンプリングでよい。評価との違いは
     ``evaluate_bits_per_byte`` の docstring を参照)。
+
+    導入: 006。
 
     Args:
         model: 学習対象の言語モデル(``forward(token_ids) -> logits`` を持つ)。

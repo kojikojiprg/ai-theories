@@ -58,6 +58,8 @@ class EncoderBlock(nn.Module):
     どちらの場合も残差接続(Residual Connection)は必ず正規化前の ``x`` を経路に持つ
     (正規化前置では残差経路そのものが正規化を一切経由しない)。
 
+    導入: 002。
+
     Args:
         d_model: 入出力次元。
         num_heads: Multi-Head Attention のヘッド数 h。
@@ -152,6 +154,8 @@ class DecoderBlock(nn.Module):
         x = x + SelfAttention(LayerNorm(x), LayerNorm(x), LayerNorm(x), tgt_mask)
         x = x + CrossAttention(LayerNorm(x), memory, memory, memory_mask)
         x = x + FeedForwardNetwork(LayerNorm(x))
+
+    導入: 002。
 
     Args:
         d_model: 入出力次元。

@@ -22,18 +22,6 @@ import torch
 from torch import Tensor
 from torch.nn import functional
 
-CIFAR10_CLASSES = (
-    "airplane",
-    "automobile",
-    "bird",
-    "cat",
-    "deer",
-    "dog",
-    "frog",
-    "horse",
-    "ship",
-    "truck",
-)
 # 訓練集合 50,000 枚のチャネルごとの平均・標準偏差(広く使われている値)
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
 CIFAR10_STD = (0.2470, 0.2435, 0.2616)
@@ -42,7 +30,16 @@ DEFAULT_CIFAR10_CACHE_DIR = Path(".cache") / "cifar10"
 
 @dataclass
 class ImageClassificationData:
-    """画像分類のデータ一式(画像は uint8、形状 ``(num, C, H, W)``)。"""
+    """画像分類のデータ一式(画像は uint8、形状 ``(num, C, H, W)``)。
+
+    導入: 019。
+
+    Attributes:
+        train_images: 訓練用の画像(uint8、形状 ``(N_train, C, H, W)``)。
+        train_labels: 訓練用のラベル(形状 ``(N_train,)``)。
+        test_images: 評価用の画像(uint8、形状 ``(N_test, C, H, W)``)。
+        test_labels: 評価用のラベル(形状 ``(N_test,)``)。
+    """
 
     train_images: Tensor
     train_labels: Tensor
@@ -55,6 +52,8 @@ def load_cifar10(cache_dir: str | Path = DEFAULT_CIFAR10_CACHE_DIR) -> ImageClas
 
     torchvision の ``CIFAR10(download=True)`` は、アーカイブの MD5 を照合してから展開する。
     キャッシュが既にあれば、照合のうえで再ダウンロードしない。
+
+    導入: 019。
 
     Args:
         cache_dir: キャッシュのディレクトリ(既定値 ``.cache/cifar10``)。
@@ -79,6 +78,8 @@ def split_class_balanced_validation(
     labels: np.ndarray, per_class: int, seed: int
 ) -> tuple[np.ndarray, np.ndarray]:
     """訓練集合から、各クラス ``per_class`` 枚の検証集合を切り出す。
+
+    導入: 019。
 
     Args:
         labels: 訓練集合のラベル(形状 ``(num,)``)。
@@ -112,6 +113,8 @@ def make_nested_class_balanced_subsets(
     ``floor(f * n_c)`` 枚を入れる(n_c はクラス c の枚数)。並べ替えを全割合で共有するので、
     部分集合は割合の順に入れ子になる。
 
+    導入: 019。
+
     Args:
         labels: 全体のラベル(``pool_indices`` の添字で引く)。
         pool_indices: 部分集合を選ぶ元の添字(検証集合を除いた訓練集合など)。
@@ -142,6 +145,8 @@ class EpochShuffledBatchSampler:
     (エポックの末尾の端数は次のエポックの先頭とつながる)。1 エポックの中では各事例を
     ちょうど 1 回ずつ使う。
 
+    導入: 019。
+
     Args:
         num_examples: データの枚数。
         batch_size: バッチサイズ。
@@ -166,14 +171,34 @@ class EpochShuffledBatchSampler:
 
 
 def normalize_images(images: Tensor, mean=CIFAR10_MEAN, std=CIFAR10_STD) -> Tensor:
-    """[0, 1] の画素値(float)をチャネルごとに標準化する。"""
+    """[0, 1] の画素値(float)をチャネルごとに標準化する。
+
+    導入: 019。
+
+    Args:
+        images: 形状 ``(B, C, H, W)`` の、[0, 1] の画素値(float)。
+        mean: チャネルごとの平均(既定は CIFAR-10 の値)。
+        std: チャネルごとの標準偏差(既定は CIFAR-10 の値)。
+
+    Returns:
+        標準化した画像(``images`` と同じ形状・dtype)。
+    """
     mean_t = torch.tensor(mean, dtype=images.dtype, device=images.device)[None, :, None, None]
     std_t = torch.tensor(std, dtype=images.dtype, device=images.device)[None, :, None, None]
     return (images - mean_t) / std_t
 
 
 def to_normalized_float(images_uint8: Tensor) -> Tensor:
-    """uint8 の画像を [0, 1] の float32 にして標準化する(データ拡張なし、評価用)。"""
+    """uint8 の画像を [0, 1] の float32 にして標準化する(データ拡張なし、評価用)。
+
+    導入: 019。
+
+    Args:
+        images_uint8: 形状 ``(B, C, H, W)`` の uint8 の画像。
+
+    Returns:
+        標準化した float32 の画像。
+    """
     return normalize_images(images_uint8.float() / 255.0)
 
 
@@ -183,6 +208,8 @@ def random_crop_and_flip(images_uint8: Tensor, padding: int, generator: torch.Ge
     画像の周囲を 0(黒)で ``padding`` 画素ずつ埋め、元の大きさの窓を一様に選んで切り出す
     (torchvision の ``RandomCrop(size, padding)`` と同じ分布)。その後、確率 1/2 で左右を
     反転する。窓の位置と反転の有無は CPU の ``generator`` から引き、画像のあるデバイスへ送る。
+
+    導入: 019。
 
     Args:
         images_uint8: 形状 ``(B, C, H, W)`` の uint8 の画像(GPU 上にあってよい)。

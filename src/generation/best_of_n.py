@@ -47,6 +47,15 @@ def best_of_n_order_weights(pool_size: int, n: int) -> np.ndarray:
 
     ``w_i = C(i - 1, n - 1) / C(M, n)``。対数ガンマ関数で計算する(M が大きくても桁があふれない)。
     ``i < n`` では 0。和は 1 になる。
+
+    導入: 017。
+
+    Args:
+        pool_size: プールの応答の数 ``M``。
+        n: best-of-n の ``n``(1 以上 ``M`` 以下)。
+
+    Returns:
+        形状 ``(M,)`` の重み ``w_i``(昇順で ``i`` 番目の応答が最大になる確率。和は 1)。
     """
     if not 1 <= n <= pool_size:
         raise ValueError(f"1 <= n <= M である必要がある: n={n}, M={pool_size}")
@@ -68,10 +77,15 @@ def best_of_n_expected_value(
 ) -> float:
     """代理報酬 ``proxy_scores`` で n 個の最大を選んだときの、``values`` の期待値(1 プロンプト分)。
 
+    導入: 017。
+
     Args:
         proxy_scores: プールの応答ごとの代理報酬(長さ M)。
         values: 同じ応答ごとの、期待値をとる量(真の報酬など、長さ M)。
         n: best-of-n の n。
+
+    Returns:
+        選ばれた応答の ``values`` の期待値。
     """
     proxy_scores = np.asarray(proxy_scores, dtype=np.float64)
     values = np.asarray(values, dtype=np.float64)
@@ -85,6 +99,8 @@ def best_of_n_expected_values(
     proxy_scores: np.ndarray, values: np.ndarray, ns: Sequence[int]
 ) -> np.ndarray:
     """複数のプロンプト・複数の n について ``best_of_n_expected_value()`` をまとめて計算する。
+
+    導入: 017。
 
     Args:
         proxy_scores: 形状 ``(P, M)``(P はプロンプトの数)。
@@ -105,7 +121,16 @@ def best_of_n_expected_values(
 
 
 def best_of_n_kl_upper_bound(n: int) -> float:
-    """best-of-n の KL ダイバージェンスの上界 ``log n - (n - 1) / n``(nats)。"""
+    """best-of-n の KL ダイバージェンスの上界 ``log n - (n - 1) / n``(nats)。
+
+    導入: 017。
+
+    Args:
+        n: best-of-n の ``n``(1 以上)。
+
+    Returns:
+        KL ダイバージェンスの上界(nats)。
+    """
     if n < 1:
         raise ValueError(f"n は 1 以上である必要がある: {n}")
     return math.log(n) - (n - 1) / n

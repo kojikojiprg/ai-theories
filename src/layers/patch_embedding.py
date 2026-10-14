@@ -34,6 +34,8 @@ def extract_patches(images: Tensor, patch_size: int) -> Tensor:
     ``(D, C, P, P)`` の並びに合わせる。原論文は (P, P, C) の順で平坦化するが、平坦化の順序の
     違いは E の行の並べ替えにすぎず、表現できる写像は同じである。
 
+    導入: 019。
+
     Args:
         images: 形状 ``(B, C, H, W)`` の画像。H・W は P で割り切れる必要がある。
         patch_size: パッチの一辺 P。
@@ -60,6 +62,8 @@ def permute_patches(images: Tensor, patch_size: int, permutation: Tensor) -> Ten
     位置埋め込みを持たない ViT の出力がこの並べ替えに対して不変であることの確認と、
     パッチを並べ替えた画像での正解率(位置情報への依存度の診断量)に使う。
 
+    導入: 019。
+
     Args:
         images: 形状 ``(B, C, H, W)``。
         patch_size: パッチの一辺 P。
@@ -85,6 +89,8 @@ class PatchEmbedding(nn.Module):
     """パッチ分割 + 線形射影(カーネル幅・stride が P の畳み込みとして実装する)。
 
     z_i = x_p^i E + b(i = 1, ..., N)
+
+    導入: 019。
 
     Args:
         image_size: 入力画像の一辺 H = W(正方形を想定する)。
@@ -141,6 +147,8 @@ def build_2d_sinusoidal_position_embedding(
 
     を連結する(各ブロックが D/4 次元)。横方向の位置 x と縦方向の位置 y を別々の次元に
     符号化するので、2 つの位置の埋め込みの内積は、横方向の差と縦方向の差の関数の和になる。
+
+    導入: 019。
 
     Args:
         grid_height: パッチの格子の行数。

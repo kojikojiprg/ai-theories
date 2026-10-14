@@ -38,13 +38,25 @@ IGNORE_INDEX = -100
 
 def make_rng(seed: int, *stream: int) -> np.random.Generator:
     """シードと添字の列から、
-    決定的な乱数の生成器を作る(学習のステップごと・評価集合ごとに別の流れ)。"""
+    決定的な乱数の生成器を作る(学習のステップごと・評価集合ごとに別の流れ)。
+
+    導入: 023。
+
+    Args:
+        seed: 基本のシード。
+        *stream: 流れを区別する整数の列(ステップの番号など)。
+
+    Returns:
+        ``np.random.default_rng([seed, *stream])`` の乱数生成器。
+    """
     return np.random.default_rng([seed, *stream])
 
 
 @dataclass(frozen=True)
 class SelectiveCopyingTask:
     """Selective copying の課題の定義。
+
+    導入: 023。
 
     Attributes:
         num_symbols: データのトークンの種類の数。
@@ -87,6 +99,13 @@ def generate_selective_copying(
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Selective copying の事例を ``batch_size`` 個生成する。
 
+    導入: 023。
+
+    Args:
+        task: 課題の定義(``SelectiveCopyingTask``)。
+        batch_size: 生成する事例の数。
+        rng: 乱数生成器。
+
     Returns:
         ``(tokens, targets, data_positions)``。``tokens`` は形状 ``(batch_size, total_length)`` の
         LongTensor(入力・区切り・答え)、``targets`` は同じ形状で、位置 ``t`` に
@@ -113,6 +132,8 @@ def generate_selective_copying(
 @dataclass(frozen=True)
 class InductionHeadsTask:
     """Induction heads の課題の定義。
+
+    導入: 023。
 
     Attributes:
         num_symbols: ランダムなトークンの種類の数。特別なトークンの番号は ``num_symbols``。
@@ -142,6 +163,14 @@ def generate_induction_heads(
     最初の特別なトークンの位置は ``[0, length - 3]`` の一様分布から引く(その直後のトークンは位置
     ``length - 2`` 以前のランダムなトークンで、末尾の特別なトークンではない)。
 
+    導入: 023。
+
+    Args:
+        task: 課題の定義(``InductionHeadsTask``)。
+        length: 系列長(4 以上)。
+        batch_size: 生成する事例の数。
+        rng: 乱数生成器。
+
     Returns:
         ``(tokens, answers, first_positions)``。``tokens`` は形状 ``(batch_size, length)`` の
         LongTensor、``answers`` は形状 ``(batch_size,)`` の
@@ -165,7 +194,17 @@ def generate_induction_heads(
 
 
 def induction_heads_targets(tokens: Tensor, answers: Tensor) -> Tensor:
-    """Induction heads の学習用の目標。末尾の位置にだけ答えを置き、他は ``IGNORE_INDEX`` にする。"""
+    """Induction heads の学習用の目標。末尾の位置にだけ答えを置き、他は ``IGNORE_INDEX`` にする。
+
+    導入: 023。
+
+    Args:
+        tokens: 形状 ``(N, L)`` の入力のトークン。
+        answers: 形状 ``(N,)`` の正解のトークン。
+
+    Returns:
+        形状 ``(N, L)`` の目標(末尾以外は ``IGNORE_INDEX``)。
+    """
     targets = torch.full_like(tokens, IGNORE_INDEX)
     targets[:, -1] = answers
     return targets

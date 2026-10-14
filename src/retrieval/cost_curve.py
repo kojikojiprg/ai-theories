@@ -34,25 +34,23 @@ from __future__ import annotations
 
 import numpy as np
 
-
-def interpolate_log_cost(recalls: np.ndarray, costs: np.ndarray, target: float) -> float:
-    """目標の recall での費用の対数(定義できなければ ``NaN``)。
-
-    Args:
-        recalls: 形状 ``(G,)``。格子の順(探索の幅などが小さい順)の recall の平均。
-        costs: 形状 ``(G,)``。同じ順の費用の平均(正)。
-        target: 目標の recall。
-    """
-    return float(interpolate_log_cost_batch(recalls[None, :], costs[None, :], target)[0])
+from src.utils.statistics import encode_cluster_labels, iter_bootstrap_weight_chunks
 
 
 def interpolate_log_cost_batch(recalls: np.ndarray, costs: np.ndarray, target: float) -> np.ndarray:
-    """``interpolate_log_cost()`` を、形状 ``(R, G)``
-    の複数の曲線(ブートストラップの再標本など)にまとめて行う。
+    """目標の recall での費用の対数を、形状 ``(R, G)`` の複数の曲線(ブートストラップの再標本など)
+    にまとめて求める。
 
-        Returns:
-            形状 ``(R,)``。補間できない曲線(最小の格子点で既に ``target`` 以上、
-            または最大の格子点でも届かない)は ``NaN``。
+    導入: 025。
+
+    Args:
+        recalls: 形状 ``(R, G)``。格子の順(探索の幅などが小さい順)の recall の平均。
+        costs: 形状 ``(R, G)``。同じ順の費用の平均(正)。
+        target: 目標の recall。
+
+    Returns:
+        形状 ``(R,)``。補間できない曲線(最小の格子点で既に ``target`` 以上、
+        または最大の格子点でも届かない)は ``NaN``。
     """
     recalls = np.asarray(recalls, dtype=np.float64)
     costs = np.asarray(costs, dtype=np.float64)
@@ -74,6 +72,8 @@ def weighted_curve(
 ) -> tuple[np.ndarray, np.ndarray]:
     """query の重み(ブートストラップの抽出回数)で、格子点ごとの recall と費用を重み付き平均する。
 
+    導入: 025。
+
     Args:
         per_query_recall: 形状 ``(G, Q)``。
         per_query_cost: 形状 ``(G, Q)``。
@@ -92,6 +92,15 @@ def fit_log_log_slope(x: np.ndarray, log_y: np.ndarray) -> np.ndarray:
     """``log y = log a + b log x`` の最小二乗の傾き ``b``(``x`` は共通、``log_y`` は ``(..., L)``)。
 
     ``x`` は ``L`` 個の水準(正)。複数の曲線(シード・再標本)の傾きを一度に求める。
+
+    導入: 025。
+
+    Args:
+        x: ``L`` 個の水準(正)。
+        log_y: 形状 ``(..., L)`` の ``log y``(複数の曲線をまとめて渡せる)。
+
+    Returns:
+        形状 ``(...)`` の最小二乗の傾き ``b``。
     """
     log_x = np.log(np.asarray(x, dtype=np.float64))
     centered = log_x - log_x.mean()
@@ -99,14 +108,35 @@ def fit_log_log_slope(x: np.ndarray, log_y: np.ndarray) -> np.ndarray:
 
 
 def positions_in_subset(subset: np.ndarray, num_total: int) -> np.ndarray:
-    """要素の番号 -> ``subset`` の中での位置(含まれなければ ``-1``)の対応 ``(num_total,)``。"""
+    """要素の番号 -> ``subset`` の中での位置(含まれなければ ``-1``)の対応 ``(num_total,)``。
+
+    導入: 025。
+
+    Args:
+        subset: 部分集合に含まれる要素の番号。
+        num_total: 全体の要素の数。
+
+    Returns:
+        形状 ``(num_total,)`` の int64(含まれない要素は ``-1``)。
+    """
     positions = np.full(num_total, -1, dtype=np.int64)
     positions[np.asarray(subset)] = np.arange(len(subset))
     return positions
 
 
 def geometric_grid(start: int, ratio: float, count: int) -> list[int]:
-    """``start`` から公比 ``ratio`` の等比の整数の格子(昇順、重複なし。候補は ``count`` 個)。"""
+    """``start`` から公比 ``ratio`` の等比の整数の格子(昇順、重複なし。候補は ``count`` 個)。
+
+    導入: 025。
+
+    Args:
+        start: 格子の最初の値。
+        ratio: 公比。
+        count: 候補の個数(丸めて重複した値は 1 つにまとめる)。
+
+    Returns:
+        昇順で重複のない整数のリスト。
+    """
     values = sorted({int(round(start * ratio**j)) for j in range(count)})
     return values
 
@@ -127,6 +157,8 @@ def sweep_hnsw_search_width(
     各格子点で ``k + 1`` 件を探索し、query の元の
     passage(``excluded``)が含まれていれば取り除いて先頭 ``k`` 件を返す(全探索の ``excluded``
     と同じ候補の集合)。recall の平均が ``stop_recall``以上になった格子点で掃引を止める。
+
+    導入: 025。
 
     Args:
         index: ``HierarchicalNavigableSmallWorld``(掃引する部分集合を挿入済み)。
@@ -175,6 +207,18 @@ def sweep_inverted_file_probes(
     で要素の番号に戻して、正解と比べる。recall の平均が ``stop_recall``
     以上になった格子点より後ろは記録に含めない(``p`` が ``K``を超える格子点も除く)。
 
+    導入: 025。
+
+    Args:
+        index: 転置ファイルの索引(``subset`` のベクトルだけを持つ)。
+        queries: 形状 ``(Q, d)`` の query。
+        local_excluded: 形状 ``(Q,)``。索引の中の位置で表した、除くベクトル(負の値は除かない)。
+        subset: 索引に入れたベクトルの、元の要素の番号。
+        ground_truth: 形状 ``(Q, k)``。全探索の上位 ``k`` 件(元の要素の番号)。
+        grid: 探索するリストの数 ``p`` の格子(昇順)。
+        k: 返す近傍の数。
+        stop_recall: recall の平均がこの値以上になったら、それより後ろの格子点は記録しない。
+
     Returns:
         ``{"grid": 記録した格子点, "recall": (G_used, Q), "cost": (G_used, Q)}``。
     """
@@ -207,19 +251,21 @@ def cluster_bootstrap_weights(
     と同じ再標本)。同じ``seed`` で作った重みを、比べる全条件・全シードに使えば、
     対応付きの再標本になる。
 
+    導入: 025。
+
     Args:
         clusters: 長さ ``n`` の、各単位が属するクラスタの識別子(ハッシュ可能な任意の値)。
         num_resamples: 反復回数 ``R``。
         seed: 乱数シード。
+        chunk_size: 1 回に引く反復の数(結果には影響しない)。
+
+    Returns:
+        形状 ``(R, n)`` の重み(float64)。
     """
-    labels = {c: i for i, c in enumerate(dict.fromkeys(list(clusters)))}
-    cluster_index = np.array([labels[c] for c in clusters])
-    num_clusters = len(labels)
-    rng = np.random.default_rng(seed)
-    probabilities = np.full(num_clusters, 1.0 / num_clusters)
+    cluster_index, num_clusters = encode_cluster_labels(list(clusters))
     weights = np.empty((num_resamples, len(cluster_index)), dtype=np.float64)
-    for start in range(0, num_resamples, chunk_size):
-        size = min(chunk_size, num_resamples - start)
-        counts = rng.multinomial(num_clusters, probabilities, size=size).astype(np.float64)
-        weights[start : start + size] = counts[:, cluster_index]
+    for start, counts in iter_bootstrap_weight_chunks(
+        num_clusters, num_resamples, seed, chunk_size, unit_cluster_index=cluster_index
+    ):
+        weights[start : start + counts.shape[0]] = counts
     return weights

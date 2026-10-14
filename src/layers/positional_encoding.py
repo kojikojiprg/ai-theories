@@ -48,6 +48,8 @@ class SinusoidalPositionalEncoding(nn.Module):
     トークン埋め込みに加算して使う。位置ごとに異なる周波数の sin / cos を
     偶数・奇数次元に交互に割り当てることで、各位置が一意なパターンを持つ。
 
+    導入: 002。
+
     Args:
         d_model: モデルの隠れ次元。
         max_len: 事前に計算しておく位置の最大数。
@@ -93,6 +95,8 @@ class LearnedAbsolutePositionalEmbedding(nn.Module):
     超える位置に対応する行が存在しないため、原理的に長さの外挿(length extrapolation)
     ができない(詳細はノートブック 003 の理論セクション参照)。
 
+    導入: 003。
+
     Args:
         d_model: モデルの隠れ次元。
         max_len: 学習時に想定する最大系列長 L_max。
@@ -132,6 +136,8 @@ class QueryKeyPositionalTransform(nn.Module, ABC):
 
     Attention スコア e_mn = q_m · k_n / sqrt(d_k) を計算する前に、Query・Key
     そのものへ位置情報を作用させる方式(RoPE 等)の共通インターフェース。
+
+    導入: 003。
     """
 
     @abstractmethod
@@ -160,6 +166,8 @@ class AttentionScoreBias(nn.Module, ABC):
 
     Attention スコア e_mn = q_m · k_n / sqrt(d_k) の計算後、softmax を取る前に
     加算する、位置のみに依存するバイアス項(T5・ALiBi 等)の共通インターフェース。
+
+    導入: 003。
     """
 
     @abstractmethod
@@ -191,6 +199,8 @@ def compute_rope_inverse_frequencies(d_k: int, base: float) -> Tensor:
     ``RotaryPositionEmbedding`` の既定の計算(003)と同じ式・同じ dtype(float32)で計算する
     (015 で周波数の変換を注入するために関数として切り出した。既定の挙動は変わらない)。
 
+    導入: 015。
+
     Args:
         d_k: ヘッドあたりの次元(偶数)。
         base: 角周波数の基数 b。
@@ -206,6 +216,16 @@ def compute_ntk_aware_base(base: float, scale: float, d_k: int) -> float:
 
     最も低い周波数の部分空間(i = d_k/2 - 1)の角周波数がちょうど 1/s 倍(位置補間と同じ)に
     なり、最も高い周波数(i = 0、theta_0 = 1)は変わらないように底を選ぶ。
+
+    導入: 015。
+
+    Args:
+        base: 元の底 ``b``(RoPE では通常 10000)。
+        scale: 拡張の倍率 ``s``。
+        d_k: Query・Key の 1 ヘッドあたりの次元。
+
+    Returns:
+        変換後の底 ``b'``。
     """
     return base * scale ** (d_k / (d_k - 2))
 
@@ -214,6 +234,16 @@ def compute_yarn_ramp(ratio: Tensor, alpha: float, beta: float) -> Tensor:
     """NTK-by-parts のランプ関数 gamma(r)(Peng et al., ICLR 2024 の式 18)。
 
     r < alpha で 0(完全に補間)、r > beta で 1(補間しない)、その間は線形に 0 から 1。
+
+    導入: 015。
+
+    Args:
+        ratio: 部分空間ごとの比 ``r``(学習時の文脈長に対する、その部分空間の波長の比)。
+        alpha: これ未満で 0(完全に補間)になる境界。
+        beta: これを超えると 1(補間しない)になる境界。
+
+    Returns:
+        ``ratio`` と同じ形状で、0 以上 1 以下のランプ関数の値。
     """
     return ((ratio - alpha) / (beta - alpha)).clamp(0.0, 1.0)
 
@@ -223,6 +253,14 @@ def compute_yarn_attention_factor(scale: float) -> float:
 
     cos・sin にこの値を掛けると Query・Key の両方がこの倍率になり、Attention の
     logits は 1/t 倍になる。
+
+    導入: 015。
+
+    Args:
+        scale: 拡張の倍率 ``s``。
+
+    Returns:
+        cos・sin に掛ける倍率 ``0.1 ln(s) + 1``。
     """
     return 0.1 * math.log(scale) + 1.0
 
@@ -239,6 +277,8 @@ class RotaryFrequencyScaling(ABC):
         s : 拡張の倍率(scale factor)
         L : 学習時の文脈長(original_max_position)
         l : 現在の系列長(dynamic scaling で使う)
+
+    導入: 015。
     """
 
     #: True のとき、周波数が現在の系列長 l に依存する(dynamic scaling)。
@@ -275,6 +315,11 @@ class PositionInterpolation(RotaryFrequencyScaling):
 
     位置 m を m/s に縮める。回転角 (m/s) theta_i = m (theta_i / s) なので、全部分空間の
     角周波数を一様に 1/s 倍にするのと同じである。
+
+    導入: 015。
+
+    Args:
+        scale: 拡張の倍率 ``s``(学習時の文脈長に対する、推論時の文脈長の比)。
     """
 
     def __init__(self, scale: float) -> None:
@@ -290,6 +335,11 @@ class NTKAwareScaling(RotaryFrequencyScaling):
     底を b' = b s^(d_k/(d_k-2)) に変える(``compute_ntk_aware_base``)。高周波の部分空間は
     ほぼ変えず、低周波の部分空間ほど強く補間する。底の調整(Adjusted Base Frequency、
     Xiong et al., NAACL 2024)と同じ形の変換を、推論時に使うものである。
+
+    導入: 015。
+
+    Args:
+        scale: 拡張の倍率 ``s``。
     """
 
     def __init__(self, scale: float) -> None:
@@ -307,6 +357,8 @@ class NTKByPartsScaling(RotaryFrequencyScaling):
     から、theta'_i = (1 - gamma(r_i)) theta_i / s + gamma(r_i) theta_i とする
     (``compute_yarn_ramp``)。波長が L より長い(r_i < alpha)部分空間は位置補間と同じく
     1/s 倍にし、波長が十分短い(r_i > beta)部分空間は変えない。
+
+    導入: 015。
 
     Args:
         scale: 拡張の倍率 s。
@@ -335,6 +387,14 @@ class YaRNScaling(NTKByPartsScaling):
     周波数は ``NTKByPartsScaling`` と同じで、cos・sin に sqrt(1/t) = 0.1 ln(s) + 1 を掛ける
     (``compute_yarn_attention_factor``)。Query・Key の両方がこの倍率になるので、
     Attention の logits は 1/t 倍になる(softmax(q^T k / (t sqrt(d_k))))。
+
+    導入: 015。
+
+    Args:
+        scale: 拡張の倍率 ``s``。
+        original_max_position: 学習時の文脈長 ``L``。
+        alpha: ランプ関数の下側の境界(これ未満の部分空間は完全に補間する)。
+        beta: ランプ関数の上側の境界(これを超える部分空間は補間しない)。
     """
 
     def frequencies_and_factor(self, inverse_frequencies, d_k, base, sequence_length):
@@ -356,6 +416,8 @@ class DynamicScaling(RotaryFrequencyScaling):
     **KV キャッシュとは併用しない。** 系列長が伸びると s が変わり、すべての位置の回転角が
     変わるが、キャッシュ済みの Key は古い s で回転済みのまま残るためである(原論文は、
     RoPE を適用する前の Key をキャッシュすべきだと指摘している)。
+
+    導入: 015。
 
     Args:
         scaling_factory: 倍率 s を受け取り、静的な ``RotaryFrequencyScaling`` を返す callable
@@ -403,6 +465,8 @@ class RotaryPositionEmbedding(QueryKeyPositionalTransform):
         base : 角周波数の基数(既定値 10000)
         m, n : 位置インデックス(m: Query 側、n: Key 側)
         theta_i (i = 0, ..., d_k/2 - 1) : 部分空間 i の角周波数
+
+    導入: 003。
 
     Args:
         d_k: ヘッドあたりの次元。偶数である必要がある。
@@ -529,6 +593,8 @@ class ShawRelativePositionBias(AttentionScoreBias):
         m, n         : 位置インデックス(m: Query 側、n: Key 側)
         w^K          : 学習可能パラメータ、形状 (2 * k_clip + 1, d_k)
 
+    導入: 003。
+
     Args:
         d_k: ヘッドあたりの次元。
         max_relative_position: 最大相対距離 k_clip。これを超える相対距離は
@@ -590,6 +656,8 @@ class T5RelativePositionBias(AttentionScoreBias):
         max_distance  : バケット化の対数スケールが有効な最大距離
         bidirectional : True なら双方向(Encoder の自己注意)、False なら
                         因果的(Decoder の自己注意)なバケット化を行う
+
+    導入: 003。
 
     Args:
         num_heads: ヘッド数 h。
@@ -692,6 +760,8 @@ class ALiBiPositionBias(AttentionScoreBias):
         H    : ヘッド数(num_heads)
         m_h  : ヘッド h の傾き
         m, n : 位置インデックス(m: Query 側、n: Key 側)
+
+    導入: 003。
 
     Args:
         num_heads: ヘッド数 H。

@@ -45,6 +45,8 @@ def train_sequence_task(
 ) -> dict:
     """ステップごとに新しい事例を生成して学習する。
 
+    導入: 023。
+
     Args:
         model: 学習対象(``forward(token_ids) -> logits`` を持つ)。
         make_batch: 乱数の生成器を受け取り ``(inputs, targets)`` を返す関数。``inputs`` は形状
@@ -129,6 +131,15 @@ def teacher_forced_evaluation(
 ) -> dict:
     """正解の履歴を入力に与えたときの、目標が ``IGNORE_INDEX`` でない位置の評価(FP32)。
 
+    導入: 023。
+
+    Args:
+        model: 評価するモデル。
+        inputs: 形状 ``(N, S)`` の入力のトークン。
+        targets: 形状 ``(N, S)`` の目標(損失を掛けない位置は ``IGNORE_INDEX``)。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する事例の数。
+
     Returns:
         ``nll``(負の対数尤度の平均、nats)と ``accuracy``(``argmax`` が目標に一致した位置の割合)。
     """
@@ -162,7 +173,20 @@ def greedy_generate(
     device: torch.device | str,
     batch_size: int = 256,
 ) -> Tensor:
-    """各ステップで文脈全体から次のトークンを貪欲に選んで生成する。形状 ``(N, num_new_tokens)``。"""
+    """各ステップで文脈全体から次のトークンを貪欲に選んで生成する。形状 ``(N, num_new_tokens)``。
+
+    導入: 023。
+
+    Args:
+        model: 生成に使うモデル。
+        prefix: 形状 ``(N, S)`` の与える先頭のトークン。
+        num_new_tokens: 生成するトークン数。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する事例の数。
+
+    Returns:
+        形状 ``(N, num_new_tokens)`` の生成したトークン(CPU)。
+    """
     was_training = model.training
     model.eval()
     chunks = []
@@ -184,6 +208,15 @@ def evaluate_selective_copying(
     batch_size: int = 256,
 ) -> dict:
     """Selective copying の評価。区切りまでを与え、答えを貪欲に生成して正解と比べる。
+
+    導入: 023。
+
+    Args:
+        model: 評価するモデル。
+        tokens: 形状 ``(N, S)`` の事例(入力部分・区切り・答え)。
+        task: 課題の定義(``SelectiveCopyingTask``)。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する事例の数。
 
     Returns:
         ``answers``(生成した答え、形状 ``(N, num_data)``)、``correct``(同じ形の bool)、
@@ -212,6 +245,15 @@ def evaluate_induction_heads(
     batch_size: int = 64,
 ) -> dict:
     """Induction heads の評価。末尾の位置で貪欲に選んだトークンを正解と比べる。
+
+    導入: 023。
+
+    Args:
+        model: 評価するモデル。
+        tokens: 形状 ``(N, S)`` の入力のトークン。
+        answers: 形状 ``(N,)`` の正解のトークン。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する事例の数。
 
     Returns:
         ``predictions``(形状 ``(N,)``)、``correct``(形状 ``(N,)`` の bool)、``accuracy``。

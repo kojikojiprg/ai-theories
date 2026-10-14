@@ -80,6 +80,8 @@ PROMPT_PREFIX = INSTRUCTION_HEADER + "\n"
 class VisualQuestion:
     """画像 1 枚に対する質問 1 個(またはキャプションの事例 1 個)。
 
+    導入: 021。
+
     Attributes:
         image_index: 画像の添字(画像の集合の中での位置)。
         question_type: ``"color"`` / ``"spatial"`` / ``"caption"``(第 1 段階)。
@@ -99,6 +101,15 @@ def spatial_answer(meaning: SceneMeaning, target_is_first: bool) -> str:
     """図形 A(``target_is_first`` なら 1 つ目の図形)が図形 B に対してどこにあるか。
 
     1 つ目の図形は左(左右の配置)または上(上下の配置)にある(正準形、020)。
+
+    導入: 021。
+
+    Args:
+        meaning: シーンの意味。
+        target_is_first: 真なら、図形 A は 1 つ目の図形。
+
+    Returns:
+        ``"left"``・``"right"``・``"above"``・``"below"`` のいずれか。
     """
     if RELATIONS[meaning.relation] == "left of":
         return "left" if target_is_first else "right"
@@ -110,6 +121,14 @@ def build_questions(meanings: Sequence[SceneMeaning]) -> list[VisualQuestion]:
 
     テンプレートは ``(image_index + k) mod 2``(``k`` は図形の添字 0・1)で割り当てる。各画像で
     両方のテンプレートが 1 回ずつ使われるので、どの画像の部分集合でもテンプレートの割合は等しい。
+
+    導入: 021。
+
+    Args:
+        meanings: 画像ごとのシーンの意味。
+
+    Returns:
+        質問のリスト(画像の順、画像ごとに 4 個)。
     """
     questions = []
     for i, m in enumerate(meanings):
@@ -143,7 +162,16 @@ def build_questions(meanings: Sequence[SceneMeaning]) -> list[VisualQuestion]:
 
 def build_caption_examples(meanings: Sequence[SceneMeaning]) -> list[VisualQuestion]:
     """第 1 段階のデータ: 各画像に、指示 ``CAPTION_INSTRUCTION`` と正準形のキャプションの応答を
-    付ける。"""
+    付ける。
+
+    導入: 021。
+
+    Args:
+        meanings: 画像ごとのシーンの意味。
+
+    Returns:
+        キャプションの事例のリスト(画像ごとに 1 個)。
+    """
     return [
         VisualQuestion(i, "caption", CAPTION_INSTRUCTION, caption_text(m), 0)
         for i, m in enumerate(meanings)
@@ -151,12 +179,30 @@ def build_caption_examples(meanings: Sequence[SceneMeaning]) -> list[VisualQuest
 
 
 def format_suffix(question: str) -> str:
-    """視覚トークンの枠の後ろの部分(質問と ``### Response:``)。"""
+    """視覚トークンの枠の後ろの部分(質問と ``### Response:``)。
+
+    導入: 021。
+
+    Args:
+        question: 質問の文字列。
+
+    Returns:
+        視覚トークンの枠の後ろの部分の文字列。
+    """
     return f"\n{question}\n{RESPONSE_HEADER}"
 
 
 def format_visual_response(answer: str) -> str:
-    """応答部分(先頭の空白から終端記号まで)。016 の ``format_response()`` と同じ形。"""
+    """応答部分(先頭の空白から終端記号まで)。016 の ``format_response()`` と同じ形。
+
+    導入: 021。
+
+    Args:
+        answer: 答えの文字列。
+
+    Returns:
+        応答部分の文字列。
+    """
     return f" {answer}\n{END_MARKER}"
 
 
@@ -164,6 +210,14 @@ def language_prior_upper_bound(questions: Sequence[VisualQuestion]) -> float:
     """画像を見ずに質問の文字列だけから答えを決める戦略が、この事例の集合で達成できる正解率の上界。
 
     質問の文字列ごとに、最も多い答えを返す戦略(集合の中で最適)の正解率である。
+
+    導入: 021。
+
+    Args:
+        questions: 質問の事例の集合。
+
+    Returns:
+        画像を見ない最適な戦略の正解率(0 以上 1 以下)。
     """
     by_text: dict[str, Counter] = {}
     for q in questions:
@@ -174,6 +228,8 @@ def language_prior_upper_bound(questions: Sequence[VisualQuestion]) -> float:
 @dataclass(frozen=True)
 class EncodedVisualBatchData:
     """符号化して固定長にそろえた事例の集合(全事例を 1 つのテンソルに持つ)。
+
+    導入: 021。
 
     Attributes:
         token_ids: 形状 ``(n, S)`` の int64。視覚トークンの枠は ``placeholder_id``、右側は
@@ -223,6 +279,20 @@ def encode_visual_examples(
 
     接頭部分・接尾部分・応答部分を別々に符号化して連結する。それぞれの復号が元の文字列と一致する
     ことを確かめる(可逆性)。系列長が ``sequence_length`` を超える事例があれば例外にする。
+
+    導入: 021。
+
+    Args:
+        questions: 符号化する事例。
+        encode: 文字列をトークン ID の列にする関数。
+        decode: トークン ID の列を文字列に戻す関数。
+        num_visual_tokens: 視覚トークンの数。
+        sequence_length: そろえる系列の長さ。
+        placeholder_id: 視覚トークンの位置に置く仮のトークン ID。
+        pad_id: 右パディングに使うトークン ID。
+
+    Returns:
+        符号化した事例のテンソル一式(``EncodedVisualBatchData``)。
     """
     prefix_ids = encode(PROMPT_PREFIX)
     if decode(prefix_ids) != PROMPT_PREFIX:
@@ -273,6 +343,17 @@ def make_step_batches(num_examples: int, num_steps: int, batch_size: int, seed: 
 
     016 の ``make_epoch_batches()`` と同じ規則(``num_examples`` が ``batch_size`` の倍数なら、
     ミニバッチはエポックの境界をまたがない)を、numpy の配列で返す版。
+
+    導入: 021。
+
+    Args:
+        num_examples: 事例の数。
+        num_steps: ステップ数。
+        batch_size: バッチサイズ。
+        seed: 乱数シード。
+
+    Returns:
+        形状 ``(num_steps, batch_size)`` の int64 の添字。
     """
     rng = np.random.default_rng(seed)
     needed = num_steps * batch_size

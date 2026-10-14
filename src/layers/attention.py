@@ -43,6 +43,8 @@ def scaled_dot_product_attention(
 
     Attention(Q, K, V) = softmax(Q K^T / sqrt(d_k) + bias) V
 
+    導入: 001。
+
     Args:
         query: 形状 ``(..., S_q, d_k)`` の Query 行列 Q。
         key: 形状 ``(..., S_k, d_k)`` の Key 行列 K。
@@ -102,6 +104,8 @@ class MultiHeadAttention(nn.Module):
     1 つの ``nn.Linear(d_model, d_model)`` として持ち、射影後に
     ``(B, S, d_model) -> (B, h, S, d_k)`` へ reshape することで
     全ヘッドを 1 回の行列積でまとめて計算する(数学的には等価)。
+
+    導入: 001。
 
     Args:
         d_model: モデルの隠れ次元。``num_heads`` で割り切れる必要がある。
@@ -312,6 +316,8 @@ def create_causal_mask(
     位置 i の Query が位置 j <= i の Key のみを参照できるようにする下三角 bool 行列。
     デコーダの自己注意で未来の情報を見ないようにするために使う。
 
+    導入: 001。
+
     Args:
         seq_len: 系列長 S。
         device: 生成先デバイス。
@@ -324,6 +330,8 @@ def create_causal_mask(
 
 def create_padding_mask(pad_positions: Tensor) -> Tensor:
     """パディングマスクを作る。
+
+    導入: 001。
 
     Args:
         pad_positions: 形状 ``(B, S_k)`` の bool テンソル。

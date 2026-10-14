@@ -42,6 +42,15 @@ def compute_final_hidden_states(model: GPTLanguageModel, token_ids: Tensor) -> T
 
     ``GPTLanguageModel.forward(token_ids)``(``positions=None``・``kv_cache=None``)と同じ手順:
     トークン埋め込み -> 因果マスク付きの ``DecoderBlock`` を ``num_layers`` 段 -> 最終正規化層。
+
+    導入: 017。
+
+    Args:
+        model: 言語モデル(``GPTLanguageModel``)。
+        token_ids: 形状 ``(B, S)`` のトークン ID。
+
+    Returns:
+        最終正規化層の後の隠れ状態 ``(B, S, d_model)``。
     """
     _, seq_len = token_ids.shape
     if seq_len > model.max_sequence_length:
@@ -59,6 +68,8 @@ def compute_final_hidden_states(model: GPTLanguageModel, token_ids: Tensor) -> T
 
 class RewardModel(nn.Module):
     """言語モデルの本体 + スカラーのヘッドによる報酬モデル。
+
+    導入: 017。
 
     Args:
         backbone: 本体にする ``GPTLanguageModel``(SFT 済みの重みを複製して渡す)。語彙への射影
@@ -100,6 +111,17 @@ def score_sequences(
 
     系列を長さの順に並べてからバッチにし(パディングを減らすため)、元の順に戻して返す。
     右パディングは因果マスクにより最終トークンの位置の隠れ状態を変えない。
+
+    導入: 017。
+
+    Args:
+        reward_model: 報酬モデル。
+        sequences: プロンプト + 応答のトークン ID の列の集まり(長さは不揃いでよい)。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する系列の数。
+
+    Returns:
+        形状 ``(len(sequences),)`` の float64 の報酬(``sequences`` と同じ順)。
     """
     was_training = reward_model.training
     reward_model.eval()

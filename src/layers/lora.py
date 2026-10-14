@@ -45,7 +45,18 @@ from torch import Tensor, nn
 
 
 def compute_lora_parameter_count(d_in: int, d_out: int, rank: int) -> int:
-    """1 行列あたりの LoRA の学習可能パラメータ数 r (d_in + d_out) を返す(閉形式)。"""
+    """1 行列あたりの LoRA の学習可能パラメータ数 r (d_in + d_out) を返す(閉形式)。
+
+    導入: 012。
+
+    Args:
+        d_in: 入力の次元。
+        d_out: 出力の次元。
+        rank: 低ランク分解のランク ``r``。
+
+    Returns:
+        1 行列あたりの学習可能パラメータ数 ``r (d_in + d_out)``。
+    """
     return rank * (d_in + d_out)
 
 
@@ -57,6 +68,8 @@ class LoRALinear(nn.Module):
     ``in_features``・``out_features`` 引数で与えるか、ベース層の同名の属性から取得する。
 
     ベース層のパラメータはすべて ``requires_grad=False`` にする(凍結)。
+
+    導入: 012。
 
     Args:
         base_layer: 凍結するベース層(``forward(x)`` を持つモジュール)。
@@ -165,6 +178,8 @@ def apply_lora(
     一致するモジュールである(例: ``("w_q", "w_v")`` は全層の ``self_attn.w_q``・
     ``self_attn.w_v`` に一致する)。A の初期化は PyTorch の大域的な乱数を消費するため、
     再現性が必要な場合は呼び出し前に ``torch.manual_seed`` を呼ぶこと。
+
+    導入: 012。
 
     Args:
         model: 置換対象のモデル(その場で書き換える)。

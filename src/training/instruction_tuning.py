@@ -41,6 +41,8 @@ from src.training.trainer import OptimizerLike, _set_optimizer_learning_rate
 def compute_token_negative_log_likelihoods(logits: Tensor, token_ids: Tensor) -> Tensor:
     """位置 ``j`` の logits で位置 ``j + 1`` のトークンを予測したときの負の対数尤度(nats)。
 
+    導入: 016。
+
     Args:
         logits: 形状 ``(B, S, V)``。
         token_ids: 形状 ``(B, S)``。
@@ -63,6 +65,8 @@ def compute_instruction_tuning_loss(
     include_prompt_loss: bool,
 ) -> dict[str, Tensor]:
     """損失マスクあり・なしの SFT の損失を、応答部分のトークン数 |R| で正規化して返す。
+
+    導入: 016。
 
     Args:
         logits: 形状 ``(B, S, V)``。
@@ -101,6 +105,14 @@ def make_epoch_batches(
     ``batch_size`` の倍数なら、ミニバッチはエポックの境界をまたがず、各エポックで全事例を
     ちょうど 1 回ずつ使う。
 
+    導入: 016。
+
+    Args:
+        num_examples: 事例の数。
+        num_steps: 作るミニバッチの数。
+        batch_size: ミニバッチの大きさ。
+        seed: 乱数シード(``np.random.default_rng(seed)``)。
+
     Returns:
         長さ ``num_steps`` のリスト。各要素は長さ ``batch_size`` の添字のリスト。
     """
@@ -130,6 +142,8 @@ def train_instruction_tuning(
     スケジュールの扱いは ``train_language_model()`` と同じ(クリッピングはグローバルノルムで、
     適用前の勾配ノルムを常に記録する)。勾配ノルムは ``requires_grad`` のパラメータのみから
     計算する。
+
+    導入: 016。
 
     Args:
         model: 学習対象のモデル(``forward(token_ids) -> logits``)。
@@ -218,6 +232,15 @@ def evaluate_instruction_negative_log_likelihood(
 
     事例の順に ``batch_size`` 個ずつ右パディングしてバッチにする(パディングは損失に寄与せず、
     因果マスクにより実トークンの logits も変えない)。
+
+    導入: 016。
+
+    Args:
+        model: 評価するモデル(``GPTLanguageModel``)。
+        examples: 符号化済みの事例(``EncodedInstructionExample``)の列。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する事例の数。
+        pad_token_id: 右パディングに使うトークン ID。
 
     Returns:
         ``response_sum``・``prompt_sum``(事例ごとの負の対数尤度の合計、nats、float64)、

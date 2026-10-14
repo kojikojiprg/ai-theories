@@ -50,6 +50,8 @@ EMBEDDING_PARAMETER_PREFIXES = ("patch_embedding.", "class_token", "position_emb
 class VisionTransformer(nn.Module):
     """Vision Transformer(分類用、[CLS] トークンによる読み出し)。
 
+    導入: 019。
+
     Args:
         image_size: 入力画像の一辺(正方形を想定する)。
         patch_size: パッチサイズ P。
@@ -196,6 +198,14 @@ def count_vit_non_embedding_parameters(model: VisionTransformer) -> int:
     パッチサイズ P を変えるとパッチ埋め込み(P^2 C D + D)と学習可能な位置埋め込み
     ((N + 1) D)のパラメータ数が変わり、位置埋め込みの方式を変えると位置埋め込みの有無が
     変わる。それ以外(Encoder Block・最終正規化・分類ヘッド)は条件によらず同一になる。
+
+    導入: 019。
+
+    Args:
+        model: 数える ``VisionTransformer``。
+
+    Returns:
+        埋め込みを除いたパラメータ数。
     """
     return sum(
         p.numel()

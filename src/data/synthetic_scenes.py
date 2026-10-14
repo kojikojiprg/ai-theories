@@ -68,7 +68,15 @@ FUNCTION_WORDS: tuple[str, ...] = ("a", "left", "of", "above")
 
 @dataclass(frozen=True)
 class SceneMeaning:
-    """シーンの意味。``first``・``second`` は (色の番号, 形の番号)。``first`` が左(上)の図形。"""
+    """シーンの意味。``first``・``second`` は (色の番号, 形の番号)。``first`` が左(上)の図形。
+
+    導入: 020。
+
+    Attributes:
+        relation: 位置関係の番号(``RELATIONS`` の添字)。
+        first: 1 つ目の図形の ``(色の番号, 形の番号)``(左または上の図形)。
+        second: 2 つ目の図形の ``(色の番号, 形の番号)``。
+    """
 
     relation: int
     first: tuple[int, int]
@@ -76,7 +84,16 @@ class SceneMeaning:
 
 
 def caption_text(meaning: SceneMeaning) -> str:
-    """意味から正準形のキャプションを作る(例: ``a red circle left of a blue square``)。"""
+    """意味から正準形のキャプションを作る(例: ``a red circle left of a blue square``)。
+
+    導入: 020。
+
+    Args:
+        meaning: シーンの意味。
+
+    Returns:
+        正準形のキャプションの文字列。
+    """
     (c1, s1), (c2, s2) = meaning.first, meaning.second
     return (
         f"a {COLOR_NAMES[c1]} {SHAPES[s1]} {RELATIONS[meaning.relation]} "
@@ -89,6 +106,14 @@ def caption_meaning(caption: str) -> SceneMeaning:
 
     ``"right of"``・``"below"`` も受け付け、左右・上下を入れ替えた正準形の意味に直す
     (「B right of A」は「A left of B」と同じ意味になる)。同義の言い換えを判定するために使う。
+
+    導入: 020。
+
+    Args:
+        caption: キャプションの文字列。
+
+    Returns:
+        意味(``SceneMeaning``)。
     """
     words = caption.split()
     if words[0] != "a" or "a" not in words[1:]:
@@ -110,12 +135,27 @@ def caption_meaning(caption: str) -> SceneMeaning:
 
 
 def is_valid_meaning(meaning: SceneMeaning) -> bool:
-    """2 つの図形の色も形も異なること(困難な負例が元と異なる文字列になる条件)。"""
+    """2 つの図形の色も形も異なること(困難な負例が元と異なる文字列になる条件)。
+
+    導入: 020。
+
+    Args:
+        meaning: シーンの意味。
+
+    Returns:
+        2 つの図形の色も形も異なれば真。
+    """
     return meaning.first[0] != meaning.second[0] and meaning.first[1] != meaning.second[1]
 
 
 def enumerate_meanings() -> list[SceneMeaning]:
-    """有効な意味をすべて列挙する(関係 -> 1 つ目の図形 -> 2 つ目の図形の辞書式順)。"""
+    """有効な意味をすべて列挙する(関係 -> 1 つ目の図形 -> 2 つ目の図形の辞書式順)。
+
+    導入: 020。
+
+    Returns:
+        有効な意味のリスト(辞書式順)。
+    """
     objects = list(product(range(len(COLOR_NAMES)), range(len(SHAPES))))
     meanings = [
         SceneMeaning(r, a, b) for r in range(len(RELATIONS)) for a in objects for b in objects
@@ -124,13 +164,31 @@ def enumerate_meanings() -> list[SceneMeaning]:
 
 
 def swap_attributes(meaning: SceneMeaning) -> SceneMeaning:
-    """属性の入れ替え: 2 つの図形の色を交換する(形・位置関係はそのまま)。"""
+    """属性の入れ替え: 2 つの図形の色を交換する(形・位置関係はそのまま)。
+
+    導入: 020。
+
+    Args:
+        meaning: 元のシーンの意味。
+
+    Returns:
+        色を交換した意味。
+    """
     (c1, s1), (c2, s2) = meaning.first, meaning.second
     return SceneMeaning(meaning.relation, (c2, s1), (c1, s2))
 
 
 def swap_order(meaning: SceneMeaning) -> SceneMeaning:
-    """順序の入れ替え: 関係語を保ったまま 2 つの図形を交換する。"""
+    """順序の入れ替え: 関係語を保ったまま 2 つの図形を交換する。
+
+    導入: 020。
+
+    Args:
+        meaning: 元のシーンの意味。
+
+    Returns:
+        2 つの図形を交換した意味。
+    """
     return SceneMeaning(meaning.relation, meaning.second, meaning.first)
 
 
@@ -143,6 +201,11 @@ def holdout_pairs() -> frozenset[tuple[int, int]]:
     色 ``i`` に形 ``i mod S`` を対応させる(``i = 0, ..., K - 1``)。K = 8・S = 5 では 40 組のうち
     8 組(20%)になり、各色がちょうど 1 回ずつ ``H`` に入る。各色は残りの S - 1 個の形と、各形は
     少なくとも K - 2 個の色と、学習データで組になる。
+
+    導入: 020。
+
+    Returns:
+        除外する ``(色の番号, 形の番号)`` の組の集合。
     """
     return frozenset((i, i % len(SHAPES)) for i in range(len(COLOR_NAMES)))
 
@@ -152,6 +215,11 @@ class CaptionVocabulary:
 
     語彙は特殊トークン(``<pad>``・``<sot>``・``<eot>``)、機能語、色、形の順に固定する。
     符号化の結果は ``[<sot>, 単語..., <eot>, <pad>...]`` で、長さ ``context_length`` にそろえる。
+
+    導入: 020。
+
+    Args:
+        context_length: 符号化した系列の長さ(``<sot>``・``<eot>`` と ``<pad>`` を含む)。
     """
 
     def __init__(self, context_length: int = 10) -> None:
@@ -199,6 +267,8 @@ class CaptionVocabulary:
 class CaptionUniverse:
     """全キャプションの一覧と、学習用・未見の組み合わせの評価用への分割。
 
+    導入: 020。
+
     Attributes:
         meanings: 有効な意味の全列挙(添字がキャプションの番号)。
         captions: 各意味の正準形のキャプション。
@@ -224,7 +294,16 @@ class CaptionUniverse:
 
 
 def build_caption_universe(vocabulary: CaptionVocabulary) -> CaptionUniverse:
-    """全キャプションを列挙し、未見の組み合わせで分割し、困難な負例の対応表を作る。"""
+    """全キャプションを列挙し、未見の組み合わせで分割し、困難な負例の対応表を作る。
+
+    導入: 020。
+
+    Args:
+        vocabulary: キャプションの語彙(``CaptionVocabulary``)。
+
+    Returns:
+        全キャプション・分割・困難な負例の対応表(``CaptionUniverse``)。
+    """
     meanings = enumerate_meanings()
     captions = [caption_text(m) for m in meanings]
     index = {m: i for i, m in enumerate(meanings)}
@@ -248,6 +327,8 @@ def build_caption_universe(vocabulary: CaptionVocabulary) -> CaptionUniverse:
 @dataclass
 class SceneSet:
     """描画したシーンのまとまり。
+
+    導入: 020。
 
     Attributes:
         images: 形状 ``(num, 3, 32, 32)`` の uint8 の画像。
@@ -301,6 +382,8 @@ def render_scenes(
     左右の配置では 1 つ目の図形の中心が 2 つ目より 14〜17 画素左にあり、上下の差は 3 画素以内。
     上下の配置はこれを転置した配置である。そのため、左右の配置のシーンに「above」は成り立たず、
     キャプションの関係語は配置から一意に決まる。
+
+    導入: 020。
 
     Args:
         universe: ``build_caption_universe()`` の結果。
@@ -370,7 +453,17 @@ def render_scenes(
 
 
 def repeat_caption_ids(caption_ids: np.ndarray, copies: int) -> np.ndarray:
-    """各キャプションを ``copies`` 回ずつ並べた番号の列(同じ番号が連続する)。"""
+    """各キャプションを ``copies`` 回ずつ並べた番号の列(同じ番号が連続する)。
+
+    導入: 020。
+
+    Args:
+        caption_ids: キャプションの番号の列。
+        copies: 各キャプションを並べる回数。
+
+    Returns:
+        各番号を ``copies`` 回ずつ連続して並べた配列。
+    """
     return np.repeat(np.asarray(caption_ids, dtype=np.int64), copies)
 
 
@@ -387,6 +480,8 @@ class DistinctCaptionBatchSampler:
     シーンは ``scene_caption_ids`` に同じ数 ``copies`` ずつ、キャプションの番号順に並んでいることを
     前提とする(``repeat_caption_ids()`` の出力の順)。乱数はすべて CPU の ``generator`` から引き、
     モデルには依存しない。
+
+    導入: 020。
 
     Args:
         scene_caption_ids: 各シーンのキャプションの番号。
@@ -436,5 +531,14 @@ class DistinctCaptionBatchSampler:
 
 
 def normalize_scene_images(images_uint8: Tensor) -> Tensor:
-    """uint8 の画像を [-1, 1] の float32 にする(平均 0.5・標準偏差 0.5 の標準化)。"""
+    """uint8 の画像を [-1, 1] の float32 にする(平均 0.5・標準偏差 0.5 の標準化)。
+
+    導入: 020。
+
+    Args:
+        images_uint8: uint8 の画像。
+
+    Returns:
+        [-1, 1] の float32 の画像(同じ形状)。
+    """
     return images_uint8.float() / 127.5 - 1.0

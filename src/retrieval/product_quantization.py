@@ -116,6 +116,8 @@ from src.retrieval.kmeans import assign_to_nearest, fit_kmeans
 class ProductQuantizer:
     """部分空間ごとの符号帳による量子化器。
 
+    導入: 025。
+
     Args:
         dimension: ``d``(``num_subvectors`` で割り切れること)。
         num_subvectors: ``m``。
@@ -200,6 +202,8 @@ class ProductQuantizer:
 
 class ProductQuantizationIndex:
     """Product Quantization の索引(全件を走査する。転置ファイルとの組み合わせは使わない)。
+
+    導入: 025。
 
     Args:
         quantizer: 学習済みの ``ProductQuantizer``。

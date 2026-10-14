@@ -44,13 +44,16 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 from src.models.text_embedding import TextEmbeddingModel, truncate_and_normalize
-from src.training.classification import (
-    split_weight_decay_parameters,
-    unscale_gradients_and_compute_norm,
-)
-from src.training.optimizer import AdamW
 from src.training.precision import DynamicLossScaler
 from src.training.schedule import compute_warmup_cosine_learning_rate
+from src.training.update_step import (
+    build_weight_decay_split_optimizers,
+    clip_gradients_to_threshold,
+    flag_clipped_steps,
+    step_optimizers_and_update_loss_scale,
+    unscale_gradients_and_compute_norm,
+)
+from src.utils.device import synchronize_device
 
 
 def info_nce_loss(
@@ -62,6 +65,17 @@ def info_nce_loss(
     """in-batch negatives の InfoNCE 損失(query -> passage の方向。``symmetric`` なら両方向の平均)。
 
     埋め込みは L2 正規化済みで、i 番目の query と i 番目の passage が正例の組。
+
+    導入: 024。
+
+    Args:
+        query_embeddings: 形状 ``(N, d)`` の L2 正規化済みの query の埋め込み。
+        passage_embeddings: 形状 ``(N, d)`` の L2 正規化済みの passage の埋め込み。
+        temperature: 温度 ``tau``(内積をこの値で割る)。
+        symmetric: 真なら passage -> query の方向も加えて平均する。
+
+    Returns:
+        損失(形状 ``()``)。
     """
     logits = query_embeddings @ passage_embeddings.t() / temperature
     targets = torch.arange(logits.size(0), device=logits.device)
@@ -79,6 +93,8 @@ def matryoshka_representation_loss(
     weights: Sequence[float] | None = None,
 ) -> tuple[Tensor, Tensor]:
     """Matryoshka Representation Learning の損失 ``sum_m c_m L_m``。
+
+    導入: 024。
 
     Args:
         pooled_queries: 形状 ``(N, d)``。プーリングした **正規化前の** query のベクトル。
@@ -108,13 +124,6 @@ def matryoshka_representation_loss(
     return (weight_tensor * per_dimension).sum(), per_dimension.detach()
 
 
-def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
-
-
 def train_text_embedding(
     model: TextEmbeddingModel,
     token_stream: Tensor,
@@ -136,6 +145,8 @@ def train_text_embedding(
     evaluation_fn: Callable[[nn.Module], dict] | None = None,
 ) -> dict:
     """テキスト埋め込みモデルを、``schedule`` の全ステップ分、対照学習の損失で学習する。
+
+    導入: 024。
 
     Args:
         model: ``TextEmbeddingModel``(``token_stream`` と同じデバイスに置いておく)。
@@ -186,12 +197,9 @@ def train_text_embedding(
     for key in ("article", "query_start", "passage_start"):
         digest.update(np.ascontiguousarray(schedule[key], dtype=np.int64).tobytes())
 
-    decay, no_decay = split_weight_decay_parameters(model)
-    optimizers = [
-        AdamW(decay, lr=peak_learning_rate, weight_decay=weight_decay, foreach=True),
-        AdamW(no_decay, lr=peak_learning_rate, weight_decay=0.0, foreach=True),
-    ]
-    parameters = decay + no_decay
+    optimizers, parameters = build_weight_decay_split_optimizers(
+        model, peak_learning_rate, weight_decay
+    )
     loss_scaler = (
         DynamicLossScaler(init_loss_scale, growth_interval=loss_scale_growth_interval)
         if use_fp16_autocast
@@ -249,22 +257,11 @@ def train_text_embedding(
             parameters, loss_scaler.scale if loss_scaler is not None else None
         )
         # 007 と同じ定義: ノルムが閾値を超えたら threshold / norm 倍する(CPU に読み出さずに行う)
-        clip_coefficient = torch.where(
-            gradient_norm > threshold, threshold / gradient_norm, torch.ones_like(gradient_norm)
-        )
-        torch._foreach_mul_([p.grad for p in parameters if p.grad is not None], clip_coefficient)
+        clip_gradients_to_threshold(parameters, gradient_norm, threshold)
 
-        found_inf = False
-        if loss_scaler is not None:  # FP16 のときのみ、ここで 1 回だけ CPU と同期する
-            found_inf = not bool(torch.isfinite(gradient_norm))
-        if not found_inf:
-            for optimizer in optimizers:
-                optimizer.step()
-        if loss_scaler is not None:
-            history["loss_scale"].append(loss_scaler.scale)
-            loss_scaler.update(found_inf)
-        else:
-            history["loss_scale"].append(1.0)
+        found_inf = step_optimizers_and_update_loss_scale(
+            optimizers, gradient_norm, loss_scaler, history
+        )
 
         with torch.no_grad():
             losses[step - 1] = loss.detach()
@@ -283,18 +280,18 @@ def train_text_embedding(
         history["step_skipped"].append(found_inf)
 
         if evaluation_fn is not None and step in evaluation_steps:
-            _synchronize(device)
+            synchronize_device(device)
             train_seconds += time.time() - start_time
             history["evaluations"][step] = evaluation_fn(model)
             start_time = time.time()
-    _synchronize(device)
+    synchronize_device(device)
     train_seconds += time.time() - start_time
 
     history["loss"] = losses.cpu().tolist()
     history["gradient_norm"] = gradient_norms.cpu().tolist()
-    history["gradient_clip_triggered"] = [
-        g > gradient_clip_threshold for g in history["gradient_norm"]
-    ]
+    history["gradient_clip_triggered"] = flag_clipped_steps(
+        history["gradient_norm"], gradient_clip_threshold
+    )
     history["in_batch_margin"] = margins.cpu().tolist()
     if dimension_losses is not None:
         history["dimension_losses"] = dimension_losses.cpu().numpy()
@@ -323,6 +320,8 @@ def compute_pair_losses(
     バッチごとの難しさでばらつくので、別々のバッチの損失の平均どうしを比べると、区間が短いほど比の
     ばらつきが大きくなる。同じバッチどうしを比べれば、バッチの難しさは打ち消される。学習率 0 の学習
     の訓練損失は、この関数の値と一致する(更新がないため)。
+
+    導入: 024。
 
     Args:
         model: ``TextEmbeddingModel``(``token_stream`` と同じデバイス)。呼び出しの前後で変更しない

@@ -44,6 +44,8 @@ from src.models.vit import VisionTransformer
 class CausalTextTransformer(nn.Module):
     """因果マスクつきのテキスト encoder(CLIP のテキスト側)。
 
+    導入: 020。
+
     Args:
         vocabulary_size: 語彙サイズ。
         context_length: 系列長の上限(学習可能な位置埋め込みの数)。
@@ -108,6 +110,8 @@ class CausalTextTransformer(nn.Module):
 class CLIPDualEncoder(nn.Module):
     """画像 encoder とテキスト encoder を共通の埋め込み空間に射影する二重 encoder。
 
+    導入: 020。
+
     Args:
         vision: 画像 encoder(019 の ``VisionTransformer``。分類ヘッドは置き換える)。
         text: テキスト encoder(``CausalTextTransformer``)。
@@ -158,7 +162,16 @@ class CLIPDualEncoder(nn.Module):
 
 
 def count_parameters_by_part(model: CLIPDualEncoder) -> dict[str, int]:
-    """画像 encoder・テキスト encoder・射影・温度とバイアスのパラメータ数。"""
+    """画像 encoder・テキスト encoder・射影・温度とバイアスのパラメータ数。
+
+    導入: 020。
+
+    Args:
+        model: 数える ``CLIPDualEncoder``。
+
+    Returns:
+        ``{"vision", "text", "projection", "scale_and_bias"}`` の各パラメータ数。
+    """
     parts = {"vision": 0, "text": 0, "projection": 0, "scale_and_bias": 0}
     for name, p in model.named_parameters():
         if name.startswith("vision."):

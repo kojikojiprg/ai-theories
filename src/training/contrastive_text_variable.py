@@ -27,14 +27,17 @@ from torch.nn import functional
 
 from src.models.text_embedding import TextEmbeddingModel, truncate_and_normalize
 from src.models.variable_length import pooled_with_lengths
-from src.training.classification import (
-    split_weight_decay_parameters,
-    unscale_gradients_and_compute_norm,
-)
 from src.training.contrastive_text import info_nce_loss, matryoshka_representation_loss
-from src.training.optimizer import AdamW
 from src.training.precision import DynamicLossScaler
 from src.training.schedule import compute_warmup_cosine_learning_rate
+from src.training.update_step import (
+    build_weight_decay_split_optimizers,
+    clip_gradients_to_threshold,
+    flag_clipped_steps,
+    step_optimizers_and_update_loss_scale,
+    unscale_gradients_and_compute_norm,
+)
+from src.utils.device import synchronize_device
 
 
 def masked_info_nce_loss(
@@ -45,6 +48,17 @@ def masked_info_nce_loss(
     ``ignore[i, j]`` が真なら、query ``i`` の候補から passage ``j`` を除く(対角は偽にする。
     正例は残す)。
     記事単位の定義では、同じ記事の他の組の passage は関連があるので、負例から除く。
+
+    導入: 026。
+
+    Args:
+        query_embeddings: 形状 ``(N, d)`` の L2 正規化済みの query の埋め込み。
+        passage_embeddings: 形状 ``(N, d)`` の L2 正規化済みの passage の埋め込み。
+        temperature: 温度 ``tau``。
+        ignore: 形状 ``(N, N)`` の bool。真の組を負例から除く(対角は偽)。
+
+    Returns:
+        損失(形状 ``()``)。
     """
     logits = query_embeddings @ passage_embeddings.t() / temperature
     logits = logits.masked_fill(ignore, float("-inf"))
@@ -60,7 +74,20 @@ def masked_matryoshka_representation_loss(
     ignore: Tensor,
 ) -> tuple[Tensor, Tensor]:
     """``matryoshka_representation_loss()`` の各次元の項を ``masked_info_nce_loss()``
-    にしたもの。"""
+    にしたもの。
+
+    導入: 026。
+
+    Args:
+        pooled_queries: 形状 ``(N, d)`` の正規化前の query のベクトル。
+        pooled_passages: 形状 ``(N, d)`` の正規化前の passage のベクトル。
+        dimensions: 損失を取る次元の集合(先頭から切り詰める次元)。
+        temperature: 温度 ``tau``。
+        ignore: 形状 ``(N, N)`` の bool。真の組を負例から除く。
+
+    Returns:
+        ``(各次元の損失の等重みの平均, 次元ごとの損失 (len(dimensions),))``。
+    """
     weights = [1.0 / len(dimensions)] * len(dimensions)
     per_dimension = torch.stack(
         [
@@ -77,15 +104,17 @@ def masked_matryoshka_representation_loss(
     return (weight_tensor * per_dimension).sum(), per_dimension.detach()
 
 
-def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
-
-
 def batches_digest(*arrays: np.ndarray) -> str:
-    """組の系列(トークンと長さ)の SHA-256。同じシードの学習で組が揃うことの確認に使う。"""
+    """組の系列(トークンと長さ)の SHA-256。同じシードの学習で組が揃うことの確認に使う。
+
+    導入: 026。
+
+    Args:
+        *arrays: ハッシュする配列(int64 に変換して連結する)。
+
+    Returns:
+        SHA-256 の 16 進文字列。
+    """
     h = hashlib.sha256()
     for a in arrays:
         h.update(np.ascontiguousarray(a, dtype=np.int64).tobytes())
@@ -94,7 +123,19 @@ def batches_digest(*arrays: np.ndarray) -> str:
 
 class VariableBatches:
     """学習の組(``(T, N, L)`` のトークンと ``(T, N)`` の長さ)をデバイスに置き、
-    ステップごとに切り出す。"""
+    ステップごとに切り出す。
+
+    導入: 026。
+
+    Args:
+        query_tokens: 形状 ``(T, N, L_q)``。query のトークン(右側がパディング)。
+        query_lengths: 形状 ``(T, N)``。query の有効な長さ。
+        passage_tokens: 形状 ``(T, N, L_p)``。passage のトークン。
+        passage_lengths: 形状 ``(T, N)``。passage の有効な長さ。
+        device: 置くデバイス。
+        article_ids: 形状 ``(T, N)`` の記事の番号(``mask_same_article`` のときのみ使う)。
+        mask_same_article: 真なら、同じ記事の他の組の passage を負例から除く。
+    """
 
     def __init__(
         self,
@@ -220,17 +261,36 @@ def train_text_embedding_from_batches(
     ``"gradient_clip_triggered"``・``"learning_rate"``・``"loss_scale"``・``"step_skipped"``・
     ``"in_batch_margin"``・``"dimension_losses"``(Matryoshka のとき)・``"evaluations"``・
     ``"data_stream_hash"``・``"train_seconds"``)。
+
+    導入: 026。
+
+    Args:
+        model: 学習する ``TextEmbeddingModel``(``batches`` と同じデバイス)。
+        batches: 全ステップの組(``VariableBatches``)。
+        peak_learning_rate: warmup の後の学習率の最大値。
+        warmup_steps: 線形 warmup のステップ数。
+        min_learning_rate: cosine decay の下限。
+        weight_decay: 重み減衰(行列形の重みのみ)。
+        gradient_clip_threshold: gradient clipping の閾値。
+        temperature: InfoNCE の温度 ``tau``。
+        matryoshka_dimensions: 指定すると、その次元の集合による Matryoshka Representation Learning
+            の損失で学習する(``None`` なら全次元の InfoNCE)。
+        use_fp16_autocast: 真なら FP16 の autocast と動的損失スケーリングを使う(CUDA のみ)。
+        init_loss_scale: 動的損失スケーリングの初期スケール値。
+        loss_scale_growth_interval: スケール値を増やすまでの連続成功ステップ数。
+        evaluation_steps: 学習の途中で ``evaluation_fn`` を呼ぶステップ(更新の後)。
+        evaluation_fn: モデルを受け取り、評価結果の辞書を返す関数。
+
+    Returns:
+        学習の記録の辞書(キーは上の説明のとおり)。
     """
     device = batches.query_tokens.device
     if use_fp16_autocast and device.type != "cuda":
         raise ValueError("use_fp16_autocast は CUDA のときのみ有効にする")
     num_steps, batch_size = batches.num_steps, batches.batch_size
-    decay, no_decay = split_weight_decay_parameters(model)
-    optimizers = [
-        AdamW(decay, lr=peak_learning_rate, weight_decay=weight_decay, foreach=True),
-        AdamW(no_decay, lr=peak_learning_rate, weight_decay=0.0, foreach=True),
-    ]
-    parameters = decay + no_decay
+    optimizers, parameters = build_weight_decay_split_optimizers(
+        model, peak_learning_rate, weight_decay
+    )
     loss_scaler = (
         DynamicLossScaler(init_loss_scale, growth_interval=loss_scale_growth_interval)
         if use_fp16_autocast
@@ -267,21 +327,10 @@ def train_text_embedding_from_batches(
         gradient_norm = unscale_gradients_and_compute_norm(
             parameters, loss_scaler.scale if loss_scaler is not None else None
         )
-        clip_coefficient = torch.where(
-            gradient_norm > threshold, threshold / gradient_norm, torch.ones_like(gradient_norm)
+        clip_gradients_to_threshold(parameters, gradient_norm, threshold)
+        found_inf = step_optimizers_and_update_loss_scale(
+            optimizers, gradient_norm, loss_scaler, history
         )
-        torch._foreach_mul_([p.grad for p in parameters if p.grad is not None], clip_coefficient)
-        found_inf = False
-        if loss_scaler is not None:
-            found_inf = not bool(torch.isfinite(gradient_norm))
-        if not found_inf:
-            for optimizer in optimizers:
-                optimizer.step()
-        if loss_scaler is not None:
-            history["loss_scale"].append(loss_scaler.scale)
-            loss_scaler.update(found_inf)
-        else:
-            history["loss_scale"].append(1.0)
         with torch.no_grad():
             losses[step - 1] = loss.detach()
             gradient_norms[step - 1] = gradient_norm.detach()
@@ -299,17 +348,17 @@ def train_text_embedding_from_batches(
         history["learning_rate"].append(learning_rate)
         history["step_skipped"].append(found_inf)
         if evaluation_fn is not None and step in evaluation_steps:
-            _synchronize(device)
+            synchronize_device(device)
             train_seconds += time.time() - start_time
             history["evaluations"][step] = evaluation_fn(model)
             start_time = time.time()
-    _synchronize(device)
+    synchronize_device(device)
     train_seconds += time.time() - start_time
     history["loss"] = losses.cpu().tolist()
     history["gradient_norm"] = gradient_norms.cpu().tolist()
-    history["gradient_clip_triggered"] = [
-        g > gradient_clip_threshold for g in history["gradient_norm"]
-    ]
+    history["gradient_clip_triggered"] = flag_clipped_steps(
+        history["gradient_norm"], gradient_clip_threshold
+    )
     history["in_batch_margin"] = margins.cpu().tolist()
     if dimension_losses is not None:
         history["dimension_losses"] = dimension_losses.cpu().numpy()
@@ -331,6 +380,20 @@ def compute_pair_losses_from_batches(
     ``train_text_embedding_from_batches()`` と同じ組・同じ損失で、更新を行わずに測る。
     呼び出しの前後で
     モデルのモードを変えない。
+
+    導入: 026。
+
+    Args:
+        model: 評価する ``TextEmbeddingModel``。
+        batches: 組(``VariableBatches``)。
+        steps: 損失を測るステップの番号(0 始まり)。
+        temperature: InfoNCE の温度 ``tau``。
+        matryoshka_dimensions: Matryoshka Representation Learning の次元の集合(``None`` なら全次元)
+            。
+        use_fp16_autocast: 真なら FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        ステップごとの損失(形状 ``(len(steps),)`` の配列)。
     """
     was_training = model.training
     model.eval()

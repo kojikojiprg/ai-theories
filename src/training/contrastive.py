@@ -56,13 +56,14 @@ from torch import Tensor, nn
 from torch.nn import functional
 
 from src.data.synthetic_scenes import DistinctCaptionBatchSampler, normalize_scene_images
-from src.training.classification import (
-    split_weight_decay_parameters,
-    unscale_gradients_and_compute_norm,
-)
-from src.training.optimizer import AdamW
 from src.training.precision import DynamicLossScaler
 from src.training.schedule import compute_warmup_cosine_learning_rate
+from src.training.update_step import (
+    build_weight_decay_split_optimizers,
+    clip_gradients_to_threshold,
+    unscale_gradients_and_compute_norm,
+)
+from src.utils.device import synchronize_device
 
 LOSS_TYPES = ("softmax", "sigmoid", "negclip")
 
@@ -70,7 +71,18 @@ LOSS_TYPES = ("softmax", "sigmoid", "negclip")
 def softmax_contrastive_loss(
     image_embeddings: Tensor, text_embeddings: Tensor, logit_scale: Tensor
 ) -> Tensor:
-    """対称な InfoNCE 損失(CLIP)。埋め込みは L2 正規化済みで、i 番目の画像とテキストが正例の組。"""
+    """対称な InfoNCE 損失(CLIP)。埋め込みは L2 正規化済みで、i 番目の画像とテキストが正例の組。
+
+    導入: 020。
+
+    Args:
+        image_embeddings: 形状 ``(N, d_e)`` の L2 正規化済みの画像の埋め込み。
+        text_embeddings: 形状 ``(N, d_e)`` の L2 正規化済みのテキストの埋め込み。
+        logit_scale: ``log(1 / tau)``(形状 ``()``)。``exp()`` を掛けて内積を拡大する。
+
+    Returns:
+        画像 -> テキストとテキスト -> 画像の交差エントロピーの平均(形状 ``()``)。
+    """
     logits = logit_scale.exp() * image_embeddings @ text_embeddings.t()
     targets = torch.arange(logits.size(0), device=logits.device)
     return 0.5 * (
@@ -81,7 +93,19 @@ def softmax_contrastive_loss(
 def sigmoid_contrastive_loss(
     image_embeddings: Tensor, text_embeddings: Tensor, logit_scale: Tensor, logit_bias: Tensor
 ) -> Tensor:
-    """sigmoid 損失(SigLIP)。全 N^2 組をそれぞれ独立な二値分類として扱い、和を N で割る。"""
+    """sigmoid 損失(SigLIP)。全 N^2 組をそれぞれ独立な二値分類として扱い、和を N で割る。
+
+    導入: 020。
+
+    Args:
+        image_embeddings: 形状 ``(N, d_e)`` の L2 正規化済みの画像の埋め込み。
+        text_embeddings: 形状 ``(N, d_e)`` の L2 正規化済みのテキストの埋め込み。
+        logit_scale: ``log(1 / tau)``(形状 ``()``)。
+        logit_bias: ロジットに加えるバイアス ``b``(形状 ``()``)。
+
+    Returns:
+        全 ``N^2`` 組の二値の損失の和を ``N`` で割った値(形状 ``()``)。
+    """
     logits = logit_scale.exp() * image_embeddings @ text_embeddings.t() + logit_bias
     labels = 2.0 * torch.eye(logits.size(0), device=logits.device) - 1.0
     return -functional.logsigmoid(labels * logits).sum() / logits.size(0)
@@ -102,6 +126,8 @@ def negclip_loss(
     バッチ内の別の正例のキャプションに一致する場合など)は、偽の負例になるので分母から除く(-inf
     にする)。
 
+    導入: 020。
+
     Args:
         image_embeddings: 形状 ``(N, d_e)``。
         text_embeddings: 形状 ``(N, d_e)``(正例のキャプション)。
@@ -111,6 +137,10 @@ def negclip_loss(
         hard_negative_caption_ids: 形状 ``(M,)``。
         hard_negative_mask: 形状 ``(M,)`` の bool(省略可)。False の列(埋め草の列)は、
             全行の分母から除く。除いた列の logits は -inf になるので、損失にも勾配にも寄与しない。
+
+    Returns:
+        損失(形状 ``()``)。画像 -> テキスト方向は困難な負例を加えた分母で、
+        テキスト -> 画像方向は通常の InfoNCE で計算し、平均する。
     """
     n = image_embeddings.size(0)
     scale = logit_scale.exp()
@@ -131,7 +161,17 @@ def negclip_loss(
 
 
 def in_batch_margin(image_embeddings: Tensor, text_embeddings: Tensor) -> Tensor:
-    """バッチ内の画像 -> テキストのマージン(正例の類似度 - 最も類似度の高い負例の類似度)の平均。"""
+    """バッチ内の画像 -> テキストのマージン(正例の類似度 - 最も類似度の高い負例の類似度)の平均。
+
+    導入: 020。
+
+    Args:
+        image_embeddings: 形状 ``(N, d_e)`` の L2 正規化済みの画像の埋め込み。
+        text_embeddings: 形状 ``(N, d_e)`` の L2 正規化済みのテキストの埋め込み。
+
+    Returns:
+        マージンの平均(形状 ``()``)。
+    """
     similarity = image_embeddings @ text_embeddings.t()
     n = similarity.size(0)
     positive = similarity.diagonal()
@@ -154,6 +194,19 @@ def prepare_batch_indices(
 
     ``DistinctCaptionBatchSampler`` を ``num_steps`` 回呼ぶ順序と乱数の消費は、ステップごとに
     呼んでいた 020 の最初の実装と同じなので、バッチの添字の列とそのハッシュも同じになる。
+
+    導入: 020。
+
+    Args:
+        scene_caption_ids: 各シーンのキャプションの番号(``repeat_caption_ids()`` の順)。
+        copies: キャプションあたりのシーンの数。
+        batch_size: バッチサイズ ``N``(学習用のキャプションの数以下)。
+        num_steps: 学習ステップ数。
+        data_seed: バッチの添字を引く CPU の乱数生成器のシード。
+        hard_negative_ids: 規則名 -> 各キャプションの困難な負例のキャプションの番号
+            (NegCLIP のときのみ。``None`` なら使わない)。
+        hard_negative_allowed: 形状 ``(num_captions,)`` の bool。困難な負例として使ってよい
+            キャプション(``None`` ならすべて使う)。
 
     Returns:
         ``"positions"``(形状 ``(num_steps, N)``、シーンの添字)、
@@ -232,6 +285,8 @@ def train_contrastive_model(
 ) -> dict:
     """二重 encoder を ``num_steps`` ステップ、対照学習の損失で学習する。
 
+    導入: 020。
+
     Args:
         model: ``CLIPDualEncoder``(``images`` と同じデバイスに置いておく)。
         images: 形状 ``(num_scenes, 3, 32, 32)`` の uint8 の学習用の画像(GPU 上にあってよい)。
@@ -303,12 +358,9 @@ def train_contrastive_model(
         torch.as_tensor(plan["hard_mask"], device=device) if loss_type == "negclip" else None
     )
 
-    decay, no_decay = split_weight_decay_parameters(model)
-    optimizers = [
-        AdamW(decay, lr=peak_learning_rate, weight_decay=weight_decay, foreach=True),
-        AdamW(no_decay, lr=peak_learning_rate, weight_decay=0.0, foreach=True),
-    ]
-    parameters = decay + no_decay
+    optimizers, parameters = build_weight_decay_split_optimizers(
+        model, peak_learning_rate, weight_decay
+    )
     loss_scaler = (
         DynamicLossScaler(init_loss_scale, growth_interval=loss_scale_growth_interval)
         if use_fp16_autocast
@@ -353,10 +405,7 @@ def train_contrastive_model(
         (loss * scale if scale is not None else loss).backward()
         gradient_norm = unscale_gradients_and_compute_norm(parameters, scale)
         # 007 と同じ定義: ノルムが閾値を超えたら threshold / norm 倍する(CPU に読み出さずに行う)
-        clip_coefficient = torch.where(
-            gradient_norm > threshold, threshold / gradient_norm, torch.ones_like(gradient_norm)
-        )
-        torch._foreach_mul_([p.grad for p in parameters if p.grad is not None], clip_coefficient)
+        clip_gradients_to_threshold(parameters, gradient_norm, threshold)
         with torch.no_grad():
             margin = in_batch_margin(image_embeddings, positive_text)
         return loss.detach(), gradient_norm.detach(), margin
@@ -446,11 +495,11 @@ def train_contrastive_model(
         history["step_skipped"].append(found_inf)
 
         if evaluation_fn is not None and step in evaluation_steps:
-            _synchronize(device)
+            synchronize_device(device)
             train_seconds += time.time() - start
             history["evaluations"][step] = evaluation_fn(model)
             start = time.time()
-    _synchronize(device)
+    synchronize_device(device)
     train_seconds += time.time() - start
     del graph
 
@@ -470,16 +519,20 @@ def train_contrastive_model(
     return history
 
 
-def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
-
-
 @torch.no_grad()
 def encode_images(model: nn.Module, images_uint8: Tensor, batch_size: int = 1024) -> Tensor:
-    """L2 正規化した画像の埋め込み(FP32、評価モード)。"""
+    """L2 正規化した画像の埋め込み(FP32、評価モード)。
+
+    導入: 020。
+
+    Args:
+        model: ``encode_image()`` を持つモデル(``CLIPDualEncoder``)。
+        images_uint8: 形状 ``(n, 3, 32, 32)`` の uint8 の画像。
+        batch_size: 1 回に符号化する画像の数。
+
+    Returns:
+        形状 ``(n, d_e)`` の L2 正規化した埋め込み。
+    """
     was_training = model.training
     model.eval()
     parts = [
@@ -492,7 +545,18 @@ def encode_images(model: nn.Module, images_uint8: Tensor, batch_size: int = 1024
 
 @torch.no_grad()
 def encode_texts(model: nn.Module, token_ids: Tensor, batch_size: int = 4096) -> Tensor:
-    """L2 正規化したテキストの埋め込み(FP32、評価モード)。"""
+    """L2 正規化したテキストの埋め込み(FP32、評価モード)。
+
+    導入: 020。
+
+    Args:
+        model: ``encode_text()`` を持つモデル(``CLIPDualEncoder``)。
+        token_ids: 形状 ``(n, S)`` のキャプションのトークン ID。
+        batch_size: 1 回に符号化するキャプションの数。
+
+    Returns:
+        形状 ``(n, d_e)`` の L2 正規化した埋め込み。
+    """
     was_training = model.training
     model.eval()
     parts = [
@@ -511,6 +575,8 @@ def evaluate_retrieval(
 
     各画像について、候補のキャプション全体とのコサイン類似度を計算し、最大の候補が正解なら正答とする。
     マージンは「正解の類似度 - 正解以外の候補の類似度の最大値」で、正のとき正答になる。
+
+    導入: 020。
 
     Args:
         image_embeddings: 形状 ``(num_images, d_e)``。
@@ -546,6 +612,8 @@ def evaluate_two_alternative(
 ) -> np.ndarray:
     """2 択の正誤: 画像ごとに、正例のキャプションの類似度が負例のキャプションより大きければ正答。
 
+    導入: 020。
+
     Args:
         image_embeddings: 形状 ``(num_images, d_e)``。
         all_text_embeddings: 形状 ``(num_captions, d_e)``(全キャプション)。
@@ -562,5 +630,15 @@ def evaluate_two_alternative(
 
 def modality_gap(image_embeddings: Tensor, text_embeddings: Tensor) -> float:
     """画像の埋め込みの重心とテキストの埋め込みの重心のユークリッド距離(Liang et al., NeurIPS 2022)
-    。"""
+    。
+
+    導入: 020。
+
+    Args:
+        image_embeddings: 形状 ``(n, d_e)`` の画像の埋め込み。
+        text_embeddings: 形状 ``(m, d_e)`` のテキストの埋め込み。
+
+    Returns:
+        2 つの重心のユークリッド距離。
+    """
     return float((image_embeddings.mean(dim=0) - text_embeddings.mean(dim=0)).norm())

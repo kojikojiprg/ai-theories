@@ -60,6 +60,8 @@ class AdamW:
     重み減衰の項 :math:`\\eta \\lambda \\theta_{t-1}` は :math:`\\hat{m}_t`・:math:`\\hat{v}_t`
     を一切経由しない(``torch.optim.AdamW`` と同一の定式化)。
 
+    導入: 007。
+
     Args:
         params: 最適化対象のパラメータ(``nn.Parameter`` のイテラブル)。
         lr: 学習率 η。
@@ -188,6 +190,8 @@ class AdamWithL2Regularization:
     を経由するため、パラメータ群ごとに勾配のスケールが異なると実効的な減衰強度が
     乖離する(``AdamW`` との違いの理論的根拠、``compute_effective_decay_divergence``
     で直接測定する)。
+
+    導入: 007。
 
     Args:
         params: 最適化対象のパラメータ(``nn.Parameter`` のイテラブル)。

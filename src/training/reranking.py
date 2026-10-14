@@ -45,17 +45,29 @@ from torch.nn import functional
 from src.data.reranking import RerankingSchedule
 from src.models.cross_encoder import CrossEncoder
 from src.models.text_embedding import TextEmbeddingModel, truncate_and_normalize
-from src.training.classification import (
-    split_weight_decay_parameters,
-    unscale_gradients_and_compute_norm,
-)
-from src.training.optimizer import AdamW
 from src.training.precision import DynamicLossScaler
 from src.training.schedule import compute_warmup_cosine_learning_rate
+from src.training.update_step import (
+    build_weight_decay_split_optimizers,
+    clip_gradients_to_threshold,
+    flag_clipped_steps,
+    step_optimizers_and_update_loss_scale,
+    unscale_gradients_and_compute_norm,
+)
+from src.utils.device import synchronize_device
 
 
 def softmax_cross_entropy_over_candidates(scores: Tensor) -> Tensor:
-    """形状 ``(B, 1 + n)`` のスコア(0 列目が正例)の softmax 交差エントロピー(query の平均)。"""
+    """形状 ``(B, 1 + n)`` のスコア(0 列目が正例)の softmax 交差エントロピー(query の平均)。
+
+    導入: 025。
+
+    Args:
+        scores: 形状 ``(B, 1 + n)`` の候補のスコア(0 列目が正例)。
+
+    Returns:
+        損失(形状 ``()``)。
+    """
     targets = torch.zeros(scores.size(0), dtype=torch.long, device=scores.device)
     return functional.cross_entropy(scores, targets)
 
@@ -70,6 +82,8 @@ def compute_candidate_scores(
 ) -> Tensor:
     """1 ステップぶんの候補のスコア ``(B, 1 + n)`` を FP32 で返す(温度は dual encoder のみ)。
 
+    導入: 025。
+
     Args:
         model: ``CrossEncoder`` または ``TextEmbeddingModel``。
         kind: ``"cross_encoder"`` または ``"dual_encoder"``。
@@ -77,6 +91,9 @@ def compute_candidate_scores(
         candidates: 形状 ``(B, 1 + n, L_p)``(0 番目が正例)。
         temperature: dual encoder の温度。
         use_fp16_autocast: 真なら本体を FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        形状 ``(B, 1 + n)`` の候補のスコア(FP32)。
     """
     batch, width, passage_length = candidates.shape
     device_type = queries.device.type
@@ -108,7 +125,18 @@ def schedule_tensors(
     schedule: RerankingSchedule, negative_kind: str, device: torch.device
 ) -> tuple[Tensor, Tensor]:
     """学習の組を ``(query の添字 (T, B)、候補の添字 (T, B, 1 + n))`` のテンソルにする(候補の
-    0 番目が正例)。"""
+    0 番目が正例)。
+
+    導入: 025。
+
+    Args:
+        schedule: 学習の組(``RerankingSchedule``)。
+        negative_kind: ``"hard"`` または ``"random"``。
+        device: テンソルを置くデバイス。
+
+    Returns:
+        ``(query の添字 (T, B), 候補の添字 (T, B, 1 + n))``。
+    """
     negatives = schedule.negatives(negative_kind)
     candidates = np.concatenate([schedule.positive[:, :, None], negatives], axis=2)
     return (
@@ -137,6 +165,8 @@ def train_reranker(
     evaluation_fn: Callable[[nn.Module], dict] | None = None,
 ) -> dict:
     """並べ替えモデルを、``schedule`` の全ステップぶん学習する(全パラメータを更新する)。
+
+    導入: 025。
 
     Args:
         model: ``CrossEncoder`` または ``TextEmbeddingModel``(``query_tokens`` と同じデバイス)。
@@ -171,12 +201,9 @@ def train_reranker(
     for array in (schedule.query, schedule.positive, schedule.negatives(negative_kind)):
         digest.update(np.ascontiguousarray(array, dtype=np.int64).tobytes())
 
-    decay, no_decay = split_weight_decay_parameters(model)
-    optimizers = [
-        AdamW(decay, lr=peak_learning_rate, weight_decay=weight_decay, foreach=True),
-        AdamW(no_decay, lr=peak_learning_rate, weight_decay=0.0, foreach=True),
-    ]
-    parameters = decay + no_decay
+    optimizers, parameters = build_weight_decay_split_optimizers(
+        model, peak_learning_rate, weight_decay
+    )
     loss_scaler = (
         DynamicLossScaler(init_loss_scale, growth_interval=loss_scale_growth_interval)
         if use_fp16_autocast
@@ -208,48 +235,30 @@ def train_reranker(
         gradient_norm = unscale_gradients_and_compute_norm(
             parameters, loss_scaler.scale if loss_scaler is not None else None
         )
-        clip_coefficient = torch.where(
-            gradient_norm > threshold, threshold / gradient_norm, torch.ones_like(gradient_norm)
+        clip_gradients_to_threshold(parameters, gradient_norm, threshold)
+        found_inf = step_optimizers_and_update_loss_scale(
+            optimizers, gradient_norm, loss_scaler, history
         )
-        torch._foreach_mul_([p.grad for p in parameters if p.grad is not None], clip_coefficient)
-        found_inf = False
-        if loss_scaler is not None:
-            found_inf = not bool(torch.isfinite(gradient_norm))
-        if not found_inf:
-            for optimizer in optimizers:
-                optimizer.step()
-        if loss_scaler is not None:
-            history["loss_scale"].append(loss_scaler.scale)
-            loss_scaler.update(found_inf)
-        else:
-            history["loss_scale"].append(1.0)
         with torch.no_grad():
             losses[step - 1] = loss.detach()
             gradient_norms[step - 1] = gradient_norm.detach()
         history["learning_rate"].append(learning_rate)
         history["step_skipped"].append(found_inf)
         if evaluation_fn is not None and step in evaluation_steps:
-            _synchronize(device)
+            synchronize_device(device)
             train_seconds += time.time() - start_time
             history["evaluations"][step] = evaluation_fn(model)
             start_time = time.time()
-    _synchronize(device)
+    synchronize_device(device)
     train_seconds += time.time() - start_time
     history["loss"] = losses.cpu().tolist()
     history["gradient_norm"] = gradient_norms.cpu().tolist()
-    history["gradient_clip_triggered"] = [
-        g > gradient_clip_threshold for g in history["gradient_norm"]
-    ]
+    history["gradient_clip_triggered"] = flag_clipped_steps(
+        history["gradient_norm"], gradient_clip_threshold
+    )
     history["data_stream_hash"] = digest.hexdigest()
     history["train_seconds"] = train_seconds
     return history
-
-
-def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize()
-    elif device.type == "mps":
-        torch.mps.synchronize()
 
 
 @torch.no_grad()
@@ -269,6 +278,22 @@ def compute_reranking_losses(
     ``train_reranker()`` と同じ組・同じ損失で、更新を行わずに損失だけを測る。
     学習の最後の区間の訓練損失を、**同じ組での学習前のモデルの損失** と比べるために使う。
     呼び出しの前後でモデルのモードを変えない。
+
+    導入: 025。
+
+    Args:
+        model: 測るモデル(``CrossEncoder`` または ``TextEmbeddingModel``)。
+        kind: ``"cross_encoder"`` または ``"dual_encoder"``。
+        query_tokens: 形状 ``(Q, L_q)``。コーパスの query のトークン。
+        passage_tokens: 形状 ``(P, L_p)``。コーパスの passage のトークン。
+        schedule: 学習の組(``RerankingSchedule``)。
+        negative_kind: ``"hard"`` または ``"random"``。
+        steps: 損失を測るステップの番号(0 始まり)。
+        temperature: dual encoder の温度。
+        use_fp16_autocast: 真なら FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        ステップごとの損失(形状 ``(len(steps),)`` の配列)。
     """
     device = query_tokens.device
     query_ids, candidate_ids = schedule_tensors(schedule, negative_kind, device)
@@ -293,6 +318,18 @@ def build_reranker(
 
     ``"cross_encoder"`` は ``CrossEncoder``(終端の位置の出力へのスカラーのヘッド)、
     ``"dual_encoder"`` は 024 の C5 と同じ構成の ``TextEmbeddingModel``(平均プール・因果マスク)。
+
+    導入: 025。
+
+    Args:
+        kind: ``"cross_encoder"`` または ``"dual_encoder"``。
+        backbone: 本体の ``GPTLanguageModel``。
+        separator_id: cross-encoder が query と passage の間に置く区切りのトークン ID。
+        terminal_id: cross-encoder が列の終端に置くトークン ID。
+        head_init_std: cross-encoder のヘッドの重みの初期化の標準偏差。
+
+    Returns:
+        並べ替えモデル(``nn.Module``)。
     """
     if kind == "cross_encoder":
         return CrossEncoder(backbone, separator_id, terminal_id, head_init_std)

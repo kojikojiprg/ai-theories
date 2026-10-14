@@ -36,10 +36,13 @@ def rank_single_positive(
 ) -> np.ndarray:
     """全件の内積で、各 query の正例(1 つの passage)の順位を求める(同点は正例に不利)。
 
+    導入: 026。
+
     Args:
         query_embeddings: 形状 ``(Q, d)``(単位ベクトル)。
         passage_embeddings: 形状 ``(P, d)``。
         positive: 形状 ``(Q,)``。正例の passage の添字。
+        chunk_size: 1 回に処理する query の数(結果には影響しない)。
     Returns:
         形状 ``(Q,)`` の順位(1 始まり)。
     """
@@ -57,7 +60,19 @@ def rank_single_positive(
 def rerank_single_positive(
     scores: np.ndarray, candidate_ids: np.ndarray, positive: np.ndarray, num_passages: int
 ) -> RerankingResult:
-    """候補のスコアで並べ替えた後の順位と指標(正例は 1 つの passage。同点は正例に不利)。"""
+    """候補のスコアで並べ替えた後の順位と指標(正例は 1 つの passage。同点は正例に不利)。
+
+    導入: 026。
+
+    Args:
+        scores: 形状 ``(Q, K)``。候補のスコア(大きいほど上位)。
+        candidate_ids: 形状 ``(Q, K)``。候補の passage の添字。
+        positive: 形状 ``(Q,)``。正例の passage の添字。
+        num_passages: 索引の passage の数。
+
+    Returns:
+        並べ替えた後の順位と指標(``RerankingResult``)。
+    """
     return rank_reranked_candidates(
         scores,
         candidate_ids,
@@ -85,6 +100,8 @@ def score_candidates_variable(
     組を、列の長さの昇順に並べ替えてバッチにし(パディングの計算を減らす)、結果を元の並びに戻す。
     呼び出しの前後でモデルのモードを変えない。
 
+    導入: 026。
+
     Args:
         model: ``VariableLengthCrossEncoder``。
         query_tokens, query_lengths: 形状 ``(Qn, L_q)`` と ``(Qn,)``(query の表。``query_ids``
@@ -92,6 +109,11 @@ def score_candidates_variable(
         passage_tokens, passage_lengths: 形状 ``(P, L_p)`` と ``(P,)``。
         query_ids: 形状 ``(Q,)``。
         candidate_ids: 形状 ``(Q, K)``。
+        batch_size: 1 回の順伝播の組の数(結果に影響しない)。
+        use_fp16_autocast: 真なら本体を FP16 の autocast で計算する(CUDA のみ)。
+
+    Returns:
+        形状 ``(Q, K)`` のスコア(float32)。
     """
     device = next(model.parameters()).device
     was_training = model.training
@@ -135,11 +157,17 @@ def rank_article_label(
     候補から除く(正解でも不正解でもない)。順位は、最もスコアの高い正解の順位(同点は正解に不利)で、
     Recall@k は上位 k 件に正解が 1 つ以上ある query の割合。
 
+    導入: 026。
+
     Args:
         query_embeddings: 形状 ``(Q, d)``。
         passage_embeddings: 形状 ``(P, d)``。
         query_positions: 形状 ``(Q,)``。各 query の元の passage の、索引の中の位置。
         passage_articles: 形状 ``(P,)``。索引の passage ごとの記事。
+        chunk_size: 1 回に処理する query の数(結果には影響しない)。
+
+    Returns:
+        query ごとの順位と nDCG@10(``RankingResult``)。
     """
     positions = np.asarray(query_positions)
     articles = np.asarray(passage_articles)

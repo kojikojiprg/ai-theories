@@ -48,6 +48,8 @@ from src.retrieval.exact_search import exact_search
 class RerankingSchedule:
     """並べ替えの学習の組(学習の前に全ステップぶんを作る)。
 
+    導入: 025。
+
     Attributes:
         query: 形状 ``(T, B)``。コーパスの query の添字。
         positive: 形状 ``(T, B)``。正例のコーパスの passage の添字。
@@ -92,6 +94,14 @@ def article_passage_ranges(passage_articles: np.ndarray) -> dict[int, tuple[int,
 
     ``build_retrieval_set()`` は記事の昇順に passage を並べるので、同じ記事の passage
     は連続している。
+
+    導入: 025。
+
+    Args:
+        passage_articles: 形状 ``(P,)``。passage ごとの記事の番号(記事の昇順に並んでいる)。
+
+    Returns:
+        ``{記事: (先頭の添字, 末尾の添字 + 1)}``。
     """
     ranges: dict[int, tuple[int, int]] = {}
     start = 0
@@ -115,6 +125,8 @@ def mine_candidate_lists(
     chunk_size: int = 2048,
 ) -> np.ndarray:
     """各 query について、``pool_passages`` だけを対象に全探索し、上位 ``num_candidates``件を返す。
+
+    導入: 025。
 
     Args:
         query_embeddings: 形状 ``(Q, d)``(単位ベクトル。デバイスは問わない)。
@@ -146,6 +158,19 @@ def usable_training_queries(
 
     採掘した第 1 段の上位 ``K_mine`` 件に、query と同じ記事の passage(query の元の passage を除く)が
     1 つ以上ある query が、学習に使える。その同じ記事の passage が、正例の候補になる。
+
+    導入: 025。
+
+    Args:
+        train_queries: 学習用の query の添字。
+        mined_candidates: 形状 ``(len(train_queries), K_mine)``。第 1 段の上位の候補(passage
+            の添字)。
+        query_articles: query ごとの記事の番号。
+        query_sources: query ごとの、元の passage の添字(正例から除く)。
+        passage_articles: passage ごとの記事の番号。
+
+    Returns:
+        形状 ``(len(train_queries),)`` の bool。
     """
     return _positive_candidate_mask(
         train_queries, mined_candidates, query_articles, query_sources, passage_articles
@@ -177,6 +202,8 @@ def sample_reranking_schedule(
     seed: int,
 ) -> RerankingSchedule:
     """学習全体の組を、学習の前に作る(決定的)。
+
+    導入: 025。
 
     Args:
         train_queries: 学習用の記事の query の、コーパスの query の添字(昇順)。
@@ -287,6 +314,16 @@ def encode_articles_with_cache(
     (固定した文の符号化と語彙サイズ)のハッシュで、キーが一致しないキャッシュは読まず、作り直す。
     キャッシュを読んだ場合は、等間隔に選んだ ``num_verified`` 記事を符号化し直して、キャッシュと
     完全に一致することを確かめる。
+
+    導入: 025。
+
+    Args:
+        tokenizer: トークナイザ(``encode()`` と ``vocab_size`` を持つもの)。
+        corpus_text: コーパスの全文。
+        spans: 記事の境界(``locate_wikipedia_article_spans()`` の返り値)。
+        article_ids: 符号化する記事の番号。
+        cache_path: キャッシュのファイルのパス。
+        num_verified: キャッシュを読んだときに、符号化し直して確かめる記事の数。
 
     Returns:
         ``(記事ごとのトークン ID の配列のリスト(使わない記事は None)、キャッシュを読んだか)``。

@@ -61,6 +61,15 @@ def levenshtein_distance(a: str, b: str) -> int:
     で、第 3 項(同じ行の左隣への依存)は、先に第 1・2 項の最小値 ``t_j`` を求めてから
     ``D[i, j] = min_{k <= j} (t_k + (j - k))`` と書ける。これは ``t_k - k`` の累積最小値に
     ``j`` を足したものなので、``np.minimum.accumulate`` で 1 行をまとめて計算できる。
+
+    導入: 017。
+
+    Args:
+        a: 1 つ目の文字列。
+        b: 2 つ目の文字列。
+
+    Returns:
+        編集距離(0 以上の整数)。
     """
     if len(a) < len(b):
         a, b = b, a
@@ -79,7 +88,16 @@ def levenshtein_distance(a: str, b: str) -> int:
 
 
 def extract_response_words(generated_text: str) -> list[str]:
-    """応答の本文(最初の ``###`` より前、なければ全体)を空白で区切った単語の列を返す。"""
+    """応答の本文(最初の ``###`` より前、なければ全体)を空白で区切った単語の列を返す。
+
+    導入: 017。
+
+    Args:
+        generated_text: 生成した応答部分の文字列。
+
+    Returns:
+        単語のリスト。
+    """
     first = generated_text.find(DELIMITER_PREFIX)
     body = generated_text if first == -1 else generated_text[:first]
     return body.split()
@@ -87,6 +105,8 @@ def extract_response_words(generated_text: str) -> list[str]:
 
 def compute_true_reward(generated_text: str, answer: Sequence[str]) -> float:
     """真の報酬 r*(y) = (s(y) + f(y)) / 2 を返す(モジュールの docstring を参照)。
+
+    導入: 017。
 
     Args:
         generated_text: 生成した応答部分の文字列(016 の採点と同じく、指示部分を含まない)。
@@ -103,7 +123,17 @@ def compute_true_reward(generated_text: str, answer: Sequence[str]) -> float:
 
 
 def compute_bradley_terry_probability(reward_difference: np.ndarray, kappa: float) -> np.ndarray:
-    """尺度 kappa の Bradley-Terry モデルの P(y_1 > y_2) = sigma(kappa (r*(y_1) - r*(y_2)))。"""
+    """尺度 kappa の Bradley-Terry モデルの P(y_1 > y_2) = sigma(kappa (r*(y_1) - r*(y_2)))。
+
+    導入: 017。
+
+    Args:
+        reward_difference: 真の報酬の差 ``r*(y_1) - r*(y_2)``(配列)。
+        kappa: ラベルの尺度 ``kappa``。
+
+    Returns:
+        ``y_1`` が選ばれる確率(``reward_difference`` と同じ形状の float64)。
+    """
     z = kappa * np.asarray(reward_difference, dtype=np.float64)
     return 1.0 / (1.0 + np.exp(-z))
 
@@ -121,6 +151,15 @@ def calibrate_label_scale(reward_differences: Sequence[float], target: float = 0
 
     となる(target = 0.75 なら logit は log 3)。差が 0 の組(同点)は kappa によらず確率 0.5
     なので、中央値の計算から除く。学習した報酬モデルの結果は一切使わない。
+
+    導入: 017。
+
+    Args:
+        reward_differences: 真の報酬の差 ``Delta r*`` の列。
+        target: 差の絶対値の中央値で ``y_1`` が選ばれる確率(0.5 より大きく 1 より小さい)。
+
+    Returns:
+        ラベルの尺度 ``kappa``。
     """
     if not 0.5 < target < 1.0:
         raise ValueError(f"target は (0.5, 1) の値である必要がある: {target}")
@@ -138,6 +177,14 @@ def sample_preference_labels(
     rng: np.random.Generator,
 ) -> np.ndarray:
     """組ごとに Bradley-Terry モデルからラベルを抽選する。
+
+    導入: 017。
+
+    Args:
+        first_rewards: 1 つ目の応答の真の報酬の列。
+        second_rewards: 2 つ目の応答の真の報酬の列。
+        kappa: ラベルの尺度 ``kappa``。
+        rng: ラベルの抽選に使う乱数生成器。
 
     Returns:
         bool の配列。True なら 1 つ目の応答が選ばれた(y_w = y_1, y_l = y_2)。同点の組は確率
@@ -158,6 +205,12 @@ def collate_scored_sequences(
     右パディングなので、因果マスクにより実トークンの位置の隠れ状態はパディングの影響を受けない。
     報酬モデル(``src/models/reward_model.py``)は、各系列の最終トークンの位置の隠れ状態から
     スカラーを出す。
+
+    導入: 017。
+
+    Args:
+        sequences: プロンプト + 応答のトークン ID の列の集まり(空でないこと)。
+        pad_token_id: 右パディングに使うトークン ID。
 
     Returns:
         ``(token_ids, last_indices)``。形状は ``(B, S_max)`` と ``(B,)``。
@@ -182,10 +235,19 @@ def sample_preference_label_matrix(
     num_draws: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """組ごとに ``num_draws`` 回、独立に Bradley-Terry モデルからラベルを抽選する(018)。
+    """組ごとに ``num_draws`` 回、独立に Bradley-Terry モデルからラベルを抽選する。
 
     同じ組 ``(x, y_1, y_2)`` を K 回観測したことに相当する。経験的な選好確率
     ``p_hat = (y_1 が選ばれた回数) / K`` は、K 回の抽選が一致しないときに限り (0, 1) の値をとる。
+
+    導入: 018。
+
+    Args:
+        first_rewards: 1 つ目の応答の真の報酬の列。
+        second_rewards: 2 つ目の応答の真の報酬の列。
+        kappa: ラベルの尺度 ``kappa``。
+        num_draws: 組ごとの抽選の回数 ``K``(1 以上)。
+        rng: ラベルの抽選に使う乱数生成器。
 
     Returns:
         形状 ``(N, K)`` の bool の配列。``[i, k]`` が True なら、組 i の k 回目の観測で
@@ -203,10 +265,28 @@ def sample_preference_label_matrix(
 def deterministic_preference_label_matrix(
     first_rewards: Sequence[float], second_rewards: Sequence[float], num_draws: int
 ) -> np.ndarray:
-    """真の報酬の高い方を選好とする決定的なラベルを ``num_draws`` 回重複させる(018)。
+    """真の報酬の高い方を選好とする決定的なラベルを ``num_draws`` 回重複させる。
 
     ``sample_preference_label_matrix()`` で kappa -> 無限大とした極限に相当する。事例数を確率的な
     ラベルの条件と揃えるため、同じラベルを K 回重複させる。
+
+    導入: 018。
+
+    Args:
+        first_rewards: 1 つ目の応答の真の報酬の列。
+        second_rewards: 2 つ目の応答の真の報酬の列。
+        num_draws: ラベルを重複させる回数 ``K``(1 以上)。
+
+    Raises:
+        ValueError: 真の報酬が等しい組(Delta r* = 0)がある場合(決定的なラベルが定まらない)。
+
+    Args:
+        first_rewards: 1 つ目の応答の真の報酬の列。
+        second_rewards: 2 つ目の応答の真の報酬の列。
+        num_draws: ラベルを重複させる回数 ``K``(1 以上)。
+
+    Returns:
+        形状 ``(N, K)`` の bool の配列(``y_1`` の報酬が高ければ真)。
 
     Raises:
         ValueError: 真の報酬が等しい組(Delta r* = 0)がある場合(決定的なラベルが定まらない)。
@@ -222,7 +302,12 @@ def deterministic_preference_label_matrix(
 
 
 def flatten_preference_labels(label_matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """``(N, K)`` のラベルを、組の順・同じ組の中では観測の順の事例の列に展開する(018)。
+    """``(N, K)`` のラベルを、組の順・同じ組の中では観測の順の事例の列に展開する。
+
+    導入: 018。
+
+    Args:
+        label_matrix: 形状 ``(N, K)`` の bool のラベル。
 
     Returns:
         ``(pair_indices, first_chosen)``。長さ ``N K`` の配列で、事例 j は組 ``pair_indices[j]``、
@@ -234,7 +319,17 @@ def flatten_preference_labels(label_matrix: np.ndarray) -> tuple[np.ndarray, np.
 
 
 def normalized_edit_distance(a: str, b: str) -> float:
-    """文字単位の編集距離を長い方の文字数で割った値(018)。両方が空なら 0。値は [0, 1]。"""
+    """文字単位の編集距離を長い方の文字数で割った値(018)。両方が空なら 0。値は [0, 1]。
+
+    導入: 018。
+
+    Args:
+        a: 1 つ目の文字列。
+        b: 2 つ目の文字列。
+
+    Returns:
+        正規化した編集距離(0 以上 1 以下)。
+    """
     longest = max(len(a), len(b))
     return 0.0 if longest == 0 else levenshtein_distance(a, b) / longest
 
@@ -244,13 +339,20 @@ def select_similarity_stratified_pairs(
     distances: Sequence[float],
     fraction: float,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
-    """層ごとに、類似度の近い組・遠い組を同数ずつ選ぶ(018)。
+    """層ごとに、類似度の近い組・遠い組を同数ずつ選ぶ。
 
     各層(``strata_labels`` が等しい組の集合、018 では課題 x ``|Delta r*|`` の区間)の中で、組を
     ``distances``(正規化編集距離)の昇順に並べ(同じ値は元の添字の順)、先頭の ``q`` 個を近い組、
     末尾の ``q`` 個を遠い組とする。``q = floor(n_layer x fraction)``(``n_layer`` は層の大きさ)。
     ``fraction <= 0.5`` なので近い組と遠い組は重ならない。2 つの集合で層ごとの件数が一致するので、
     層を決める量(課題と真の報酬の差)の分布が揃う。
+
+    導入: 018。
+
+    Args:
+        strata_labels: 組ごとの層の識別子(長さ ``N``)。
+        distances: 組ごとの正規化編集距離(長さ ``N``)。
+        fraction: 層ごとに近い組・遠い組として選ぶ割合(0 より大きく 0.5 以下)。
 
     Returns:
         ``(near_indices, far_indices, counts)``。添字は昇順。``counts`` は層ごとの

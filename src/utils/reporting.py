@@ -93,6 +93,8 @@ def dumps_compact_json(obj: Any, indent: int = 2, width: int = 100) -> str:
 
     整形の規則はモジュールの docstring を参照。
 
+    導入: 013。
+
     Args:
         obj: 辞書・配列・スカラーからなるオブジェクト(``NaN``・``Infinity`` は不可)。
         indent: 1 段あたりのインデントの空白数。

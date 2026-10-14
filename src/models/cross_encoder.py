@@ -50,6 +50,8 @@ def build_cross_encoder_inputs(
 ) -> Tensor:
     """query と passage を ``[query] [区切り] [passage] [終端]`` の列に連結する。
 
+    導入: 025。
+
     Args:
         query_tokens: 形状 ``(B, L_q)``。
         passage_tokens: 形状 ``(B, L_p)``(``query_tokens`` と同じ ``B``。組ごとに 1 対 1 に対応)。
@@ -73,6 +75,8 @@ def build_cross_encoder_inputs(
 
 class CrossEncoder(nn.Module):
     """小型 GPT の本体 + 終端の位置の出力へのスカラーのヘッドによる cross-encoder。
+
+    導入: 025。
 
     Args:
         backbone: 本体にする ``GPTLanguageModel``(008 の重みを読み込んだもの)。

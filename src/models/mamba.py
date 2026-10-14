@@ -32,6 +32,8 @@ from src.layers.normalization import RMSNorm
 class MambaLanguageModel(nn.Module):
     """Mamba の自己回帰言語モデル。
 
+    導入: 023。
+
     Args:
         vocabulary_size: 語彙サイズ。
         d_model: モデルの隠れ次元。

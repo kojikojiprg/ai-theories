@@ -33,7 +33,17 @@ from src.training.trainer import OptimizerLike, _set_optimizer_learning_rate
 
 
 def bradley_terry_loss(chosen_rewards: Tensor, rejected_rewards: Tensor) -> Tensor:
-    """Bradley-Terry モデルの負の対数尤度の平均 ``mean(-log sigma(r_w - r_l))``。"""
+    """Bradley-Terry モデルの負の対数尤度の平均 ``mean(-log sigma(r_w - r_l))``。
+
+    導入: 017。
+
+    Args:
+        chosen_rewards: 選好された応答の報酬(形状 ``(B,)``)。
+        rejected_rewards: 選好されなかった応答の報酬(形状 ``(B,)``)。
+
+    Returns:
+        損失の平均(形状 ``()``)。
+    """
     margin = chosen_rewards - rejected_rewards
     return torch.logaddexp(torch.zeros_like(margin), -margin).mean()
 
@@ -53,6 +63,8 @@ def train_reward_model(
     ステップ ``s``(1-indexed)では、``batches[s - 1]`` の組について、選ばれた応答・選ばれなかった
     応答の系列(プロンプト + 応答)を 1 つのバッチにまとめて順伝播し(``2 B`` 系列)、
     ``bradley_terry_loss()`` で 1 回更新する。
+
+    導入: 017。
 
     Args:
         model: 報酬モデル(学習するパラメータは ``requires_grad`` で指定する)。

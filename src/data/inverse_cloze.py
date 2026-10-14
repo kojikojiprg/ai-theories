@@ -51,6 +51,8 @@ _CLOSER_PATTERN = re.compile(r"^[\"')\]’”]+$")
 class SentenceTables:
     """トークン ID ごとの真偽の表(長さは語彙サイズ)。
 
+    導入: 026。
+
     Attributes:
         starts_with_whitespace: テキストが空白または改行で始まる。
         starts_with_newline: テキストが改行で始まる。
@@ -65,7 +67,16 @@ class SentenceTables:
 
 
 def build_sentence_tables(token_texts: Sequence[str | None]) -> SentenceTables:
-    """トークンごとのテキスト(UTF-8 として不正なトークンは ``None``)から表を作る。"""
+    """トークンごとのテキスト(UTF-8 として不正なトークンは ``None``)から表を作る。
+
+    導入: 026。
+
+    Args:
+        token_texts: トークン ID ごとのテキスト(UTF-8 として不正なトークンは ``None``)。
+
+    Returns:
+        文の分割に使う表(``SentenceTables``)。
+    """
     size = len(token_texts)
     whitespace = np.zeros(size, dtype=bool)
     newline = np.zeros(size, dtype=bool)
@@ -85,6 +96,15 @@ def sentence_boundaries(windows: np.ndarray, tables: SentenceTables) -> np.ndarr
     """形状 ``(M, L)`` の窓について、位置 ``t`` の直後で文が終わるかの真偽 ``(M, L)``。
 
     最後の位置は常に真(窓の端は文の端)。
+
+    導入: 026。
+
+    Args:
+        windows: 形状 ``(M, L)`` のトークン ID の窓。
+        tables: 文の分割の表。
+
+    Returns:
+        形状 ``(M, L)`` の bool(位置の直後で文が終わるか)。
     """
     windows = np.asarray(windows)
     rows, length = windows.shape
@@ -107,6 +127,12 @@ def sentence_structure(
     windows: np.ndarray, tables: SentenceTables
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """窓ごとの文の構造。
+
+    導入: 026。
+
+    Args:
+        windows: 形状 ``(M, L)`` のトークン ID の窓。
+        tables: 文の分割の表。
 
     Returns:
         ``(is_start, sentence_length, num_sentences, boundary)``。``is_start`` は形状 ``(M,
@@ -136,6 +162,8 @@ def choose_cloze_sentence(
     preferred_max_tokens: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """窓ごとに、抜く文を一様に選ぶ。
+
+    導入: 026。
 
     Args:
         windows: 形状 ``(M, L)``。
@@ -175,6 +203,13 @@ def remove_span(
 ) -> tuple[np.ndarray, np.ndarray]:
     """窓から ``[start, start + length)`` を抜き、右側を 0 でパディングする。
 
+    導入: 026。
+
+    Args:
+        windows: 形状 ``(M, L)`` のトークン ID の窓。
+        start: 形状 ``(M,)``。抜く区間の先頭の位置。
+        length: 形状 ``(M,)``。抜く区間の長さ。
+
     Returns:
         ``(文脈 (M, L)、文脈の長さ (M,))``。
     """
@@ -193,6 +228,14 @@ def extract_span(
 ) -> tuple[np.ndarray, np.ndarray]:
     """窓から文の先頭 ``query_length`` トークンを切り出し、右側を 0 でパディングする。
 
+    導入: 026。
+
+    Args:
+        windows: 形状 ``(M, L)`` のトークン ID の窓。
+        start: 形状 ``(M,)``。文の先頭の位置。
+        length: 形状 ``(M,)``。文の長さ。
+        query_length: 切り出す長さの上限(query の長さ)。
+
     Returns:
         ``(query (M, query_length)、query の長さ (M,))``。
     """
@@ -205,7 +248,17 @@ def extract_span(
 
 
 def splitmix64_uniform(seed: int, *keys: np.ndarray) -> np.ndarray:
-    """整数のキーから ``[0, 1)`` の乱数を決定的に作る(キーの並びに依らず、要素ごとに決まる)。"""
+    """整数のキーから ``[0, 1)`` の乱数を決定的に作る(キーの並びに依らず、要素ごとに決まる)。
+
+    導入: 026。
+
+    Args:
+        seed: シード。
+        *keys: キーの整数の配列(同じ形状にブロードキャストできるもの)。
+
+    Returns:
+        キーの形状の、``[0, 1)`` の乱数(要素ごとに決まる)。
+    """
     mask = np.uint64(0xFFFFFFFFFFFFFFFF)
     initial = (int(seed) * 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
     state = np.full(np.broadcast(*keys).shape, initial, dtype=np.uint64)
@@ -265,8 +318,18 @@ def pairable_articles(
     最大値は末尾から、``chunk`` 個ずつの窓を見て最初に見つかった対象の窓で決める(多くの記事は
     最初の区間で見つかる)。
 
+    導入: 026。
+
     Args:
+        stream: 学習用の記事を連結したトークン ID(1 次元)。
+        article_starts: 各記事の ``stream`` での先頭の位置。
+        article_token_counts: 各記事のトークン数。
         candidate: 形状 ``(記事の数,)`` の真偽。判定する記事(偽の記事は偽を返す)。
+        passage_length: 窓(passage)の長さ。
+        tables: 文の分割の表。
+        min_query_tokens: 抜く文の最小の長さ。
+        max_removed_tokens: 抜く文の最大の長さ。
+        chunk: 1 回に調べる窓の数。
 
     Returns:
         形状 ``(記事の数,)`` の真偽。
@@ -310,6 +373,8 @@ class ClozePairBatches:
 
     1 つのバッチは ``articles_per_batch`` 個の記事 x ``pairs_per_article`` 組で、同じ記事の組は
     バッチの中で隣り合う(位置 ``pairs_per_article * k + j``)。同じ記事の組の窓は互いに重ならない。
+
+    導入: 026。
 
     Attributes:
         query_tokens: 形状 ``(T, N, L_q)``(右側を 0 でパディング)。
@@ -364,6 +429,8 @@ def sample_cloze_pair_batches(
     ``keep_probability`` で
     その文を文脈に残す(文脈は窓そのもの)。
 
+    導入: 026。
+
     Args:
         stream: 学習用の記事を連結したトークン ID(1 次元)。
         article_starts: 各記事の ``stream`` での先頭の位置。
@@ -380,6 +447,9 @@ def sample_cloze_pair_batches(
         max_attempts: 窓の組を引き直す回数の上限(尽きた記事は記事のすべての窓から選ぶ)。
         eligible_cache: 記事の添字から対象の窓の開始位置への辞書。渡すと、記事のすべての窓から選ぶ
             処理の走査の結果を呼び出しをまたいで使い回す(結果は変わらない。時間だけが変わる)。
+
+    Returns:
+        学習の組(``ClozePairBatches``)。
     """
     weights = np.asarray(article_weights, dtype=np.float64)
     counts = np.asarray(article_token_counts, dtype=np.int64)
@@ -516,6 +586,19 @@ class ClozeIndex:
     ``context_lengths`` は、抜く文を除いた形(索引に入れる形)。
     ``query_tokens``・``query_lengths`` は、
     抜いた文(その passage の query)。正例はその passage だけ(索引の中の位置は ``positive``)。
+
+    導入: 026。
+
+    Attributes:
+        passage_ids: 元の passage の添字(対象の passage だけ、昇順)。
+        context_tokens: 抜く文を除いた passage のトークン(索引に入れる形、右側を 0 でパディング)。
+        context_lengths: ``context_tokens`` の有効な長さ。
+        query_tokens: 抜いた文(query のトークン、右側を 0 でパディング)。
+        query_lengths: ``query_tokens`` の有効な長さ。
+        removed_start: 抜いた文の、passage の中での先頭の位置。
+        removed_length: 抜いた文の長さ。
+        num_excluded: 対象でないために索引に入れなかった passage の数。
+        num_single_sentence: 文が 1 つしかないために除いた passage の数。
     """
 
     passage_ids: np.ndarray
@@ -549,6 +632,21 @@ def build_cloze_index(
     Inverse Cloze Task の
     対象でない passage(文が 2 つ未満、または範囲の文がない)は索引に入れない(除いた形にできない
     passage を、除いていない形で索引に入れると、除いたかどうかが手がかりになる)。
+
+    導入: 026。
+
+    Args:
+        passages: 形状 ``(P, L)``。索引の passage(固定長の窓)のトークン。
+        passage_articles: 形状 ``(P,)``。passage の記事の番号。
+        passage_windows: 形状 ``(P,)``。passage の、記事の中での窓の番号。
+        tables: 文の分割の表。
+        query_length: query の長さの上限。
+        min_query_tokens: 抜く文の最小の長さ。
+        max_removed_tokens: 抜く文の最大の長さ。
+        seed: 抜く文を選ぶ乱数のシード。
+
+    Returns:
+        索引(``ClozeIndex``)。
     """
     uniform = splitmix64_uniform(seed, passage_articles, passage_windows)
     valid, start, length = choose_cloze_sentence(

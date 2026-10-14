@@ -38,7 +38,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
 import torch
 from torch import Tensor
 
@@ -46,6 +45,8 @@ from torch import Tensor
 @dataclass
 class KMeansResult:
     """k-means の結果。
+
+    導入: 025。
 
     Attributes:
         centroids: 形状 ``(K, d)``。最後の更新の後の重心。
@@ -66,6 +67,13 @@ def assign_to_nearest(
     points: Tensor, centroids: Tensor, chunk_size: int = 8192
 ) -> tuple[Tensor, Tensor]:
     """各点を最も近い重心(二乗ユークリッド距離)に割り当てる。
+
+    導入: 025。
+
+    Args:
+        points: 形状 ``(n, d)`` の点。
+        centroids: 形状 ``(K, d)`` の重心。
+        chunk_size: 距離を一度に計算する点の数(結果には影響しない)。
 
     Returns:
         ``(割り当て (n,)、割り当てた重心までの二乗距離 (n,))``。同点は番号の小さい重心
@@ -95,12 +103,17 @@ def fit_kmeans(
 ) -> KMeansResult:
     """Lloyd のアルゴリズムで k-means を学習する(初期化・反復回数・空のクラスタの扱いは冒頭の説明)。
 
+    導入: 025。
+
     Args:
         points: 形状 ``(n, d)`` の浮動小数点のテンソル(``n`` は ``num_clusters`` 以上)。
         num_clusters: ``K``。
         num_iterations: 反復回数(1 回 = 割り当て + 更新)。
         seed: 初期化の乱数シード。
         chunk_size: 距離を一度に計算する点の数(結果には影響しない)。
+
+    Returns:
+        学習結果(``KMeansResult``)。
     """
     n = points.size(0)
     if not 1 <= num_clusters <= n:
@@ -127,11 +140,17 @@ def fit_kmeans(
 
 
 def inertia(points: Tensor, centroids: Tensor, chunk_size: int = 8192) -> float:
-    """点を最も近い重心に割り当てたときの二乗誤差の和 ``J``(FP64 で和をとる)。"""
+    """点を最も近い重心に割り当てたときの二乗誤差の和 ``J``(FP64 で和をとる)。
+
+    導入: 025。
+
+    Args:
+        points: 形状 ``(n, d)`` の点。
+        centroids: 形状 ``(K, d)`` の重心。
+        chunk_size: 距離を一度に計算する点の数(結果には影響しない)。
+
+    Returns:
+        二乗誤差の和 ``J``。
+    """
     _, distances = assign_to_nearest(points, centroids, chunk_size)
     return float(distances.double().sum())
-
-
-def list_sizes(assignments: Tensor, num_clusters: int) -> np.ndarray:
-    """クラスタごとの点の数(形状 ``(K,)``)。"""
-    return torch.bincount(assignments, minlength=num_clusters).cpu().numpy()

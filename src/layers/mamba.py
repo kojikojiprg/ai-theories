@@ -64,6 +64,8 @@ def _at_least_float32(tensor: Tensor) -> Tensor:
 class MambaState(NamedTuple):
     """推論時に受け渡す状態(系列の長さによらない定数サイズ)。
 
+    導入: 023。
+
     Attributes:
         conv_buffer: 因果的な畳み込みの入力の直近 ``K - 1`` 個。形状 ``(batch, d_inner, K - 1)``。
         recurrent_state: 状態空間モデルの状態 ``h``。形状 ``(batch, d_inner, N)``。
@@ -77,6 +79,8 @@ def discretize_state_space(
     delta: Tensor, a: Tensor, b: Tensor, method: str = "zero_order_hold"
 ) -> tuple[Tensor, Tensor]:
     """対角の ``A`` の連続時間の系を離散化する(``Ā`` と ``B̄`` を全時刻ぶん一括で返す)。
+
+    導入: 023。
 
     Args:
         delta: 刻み幅 ``Δ``。形状 ``(batch, length, channels)``(正の値)。
@@ -191,6 +195,8 @@ def selective_scan(
     行う。**計算は ``torch.autocast`` の中でも FP32 以上で行う**(入力が FP16・BF16・FP32 なら FP32、
     FP64 なら FP64)。勾配が不要なとき(推論)は、状態を保存しない素のループで計算する。
 
+    導入: 023。
+
     Args:
         x: 入力。形状 ``(batch, length, channels)``。
         delta: 刻み幅 ``Δ``。形状 ``(batch, length, channels)``。
@@ -240,6 +246,8 @@ def selective_scan_step(
 ) -> tuple[Tensor, Tensor]:
     """1 ステップぶんの更新(推論用)。``selective_scan`` のループ 1 回と同じ計算をする。
 
+    導入: 023。
+
     Args:
         x_t: 形状 ``(batch, channels)``。
         delta_t: 形状 ``(batch, channels)``。
@@ -273,6 +281,8 @@ class MambaBlock(nn.Module):
     入力 ``(batch, length, d_model)`` を線形射影で ``2 * d_inner`` に拡大して 2 つの枝に分け、一方を
     因果的な depthwise の 1 次元畳み込み → SiLU → 状態空間モデル(走査)に通し、他方を SiLU でゲートに
     して要素ごとに掛け、出力の線形射影で ``d_model`` に戻す。
+
+    導入: 023。
 
     Args:
         d_model: モデルの隠れ次元。

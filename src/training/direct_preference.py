@@ -75,6 +75,17 @@ def sequence_log_prob_sums(
     逆伝播が決定的)、その位置だけを語彙へ射影する。``lm_head`` は位置ごとの線形写像なので値は同じで
     (行列積の丸めの範囲で。018 のノートブックで ``gather_response_log_probs()`` の経路と照合する)、
     語彙 V の大きさの中間テンソルが ``S / R`` 分の 1 になる。
+
+    導入: 018。
+
+    Args:
+        model: ``GPTLanguageModel``(LoRA を掛けたものを含む)。
+        token_ids: 形状 ``(B, S)`` のプロンプト + 応答のトークン ID(右パディング)。
+        prompt_lengths: 形状 ``(B,)``。プロンプトの長さ ``P_b``。
+        response_mask: 形状 ``(B, R)`` の bool。応答の有効なトークンの位置。
+
+    Returns:
+        形状 ``(B,)`` の、応答部分の対数確率の和。
     """
     hidden = compute_final_hidden_states(model, token_ids)  # (B, S, d)
     offsets = torch.arange(response_mask.size(1), device=token_ids.device)
@@ -102,6 +113,18 @@ def compute_response_log_prob_sums(
 
     系列を長さの順に並べてからバッチにし(パディングを減らすため)、元の順に戻して返す。
     バッチの組み方は入力だけで決まるので、同じ入力なら同じバッチで計算される(決定的)。
+
+    導入: 018。
+
+    Args:
+        model: ``GPTLanguageModel``。
+        prompts: プロンプトのトークン ID の列の集まり。
+        responses: 同じ順の応答のトークン ID の列の集まり。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する系列の数。
+
+    Returns:
+        形状 ``(len(prompts),)`` の float64 の配列(入力と同じ順)。
     """
     if len(prompts) != len(responses):
         raise ValueError("prompts と responses の長さが一致しない")
@@ -142,6 +165,17 @@ def precompute_reference_log_probs(
     渡すと、同じ鍵の 2 回目以降は計算せずに保存した値の複製を返す。鍵の作り方(参照方策の
     重みのハッシュと入力のハッシュを含めること)は呼び出し側の責任である。
 
+    導入: 018。
+
+    Args:
+        reference: 参照方策のモデル。
+        prompts: プロンプトのトークン ID の列の集まり。
+        responses: 同じ順の応答のトークン ID の列の集まり。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する系列の数。
+        cache: 結果を保存する辞書(``None`` ならキャッシュしない)。
+        cache_key: 参照方策と入力を識別する hashable な値(``None`` ならキャッシュしない)。
+
     Returns:
         ``(values, hit)``。``values`` は float64 の配列、``hit`` はキャッシュから返したか。
     """
@@ -162,23 +196,65 @@ def compute_log_ratio_margin(
     """対数比のマージン ``h = (log pi(y_w) - log pi_ref(y_w)) - (log pi(y_l) - log pi_ref(y_l))``。
 
     形状はいずれも ``(B,)``。
+
+    導入: 018。
+
+    Args:
+        policy_chosen: 方策の選好された応答の対数確率の和(形状 ``(B,)``)。
+        policy_rejected: 方策の選好されなかった応答の対数確率の和。
+        reference_chosen: 参照方策の選好された応答の対数確率の和。
+        reference_rejected: 参照方策の選好されなかった応答の対数確率の和。
+
+    Returns:
+        形状 ``(B,)`` のマージン ``h``。
     """
     return (policy_chosen - reference_chosen) - (policy_rejected - reference_rejected)
 
 
 def dpo_loss(margin: Tensor, beta: float) -> Tensor:
-    """DPO 損失の平均 ``mean(-log sigma(beta h))``(``logaddexp(0, -beta h)`` で計算する)。"""
+    """DPO 損失の平均 ``mean(-log sigma(beta h))``(``logaddexp(0, -beta h)`` で計算する)。
+
+    導入: 018。
+
+    Args:
+        margin: 形状 ``(B,)`` のマージン ``h``。
+        beta: DPO の ``beta``。
+
+    Returns:
+        損失の平均(形状 ``()``)。
+    """
     z = beta * margin
     return torch.logaddexp(torch.zeros_like(z), -z).mean()
 
 
 def ipo_loss(margin: Tensor, tau: float) -> Tensor:
-    """IPO 損失の平均 ``mean((h - 1 / (2 tau))^2)``。"""
+    """IPO 損失の平均 ``mean((h - 1 / (2 tau))^2)``。
+
+    導入: 018。
+
+    Args:
+        margin: 形状 ``(B,)`` のマージン ``h``。
+        tau: IPO の ``tau``。
+
+    Returns:
+        損失の平均(形状 ``()``)。
+    """
     return ((margin - 1.0 / (2.0 * tau)) ** 2).mean()
 
 
 def preference_loss(margin: Tensor, loss_type: str, beta: float) -> Tensor:
-    """``loss_type``(``"dpo"`` または ``"ipo"``)の損失。IPO では ``beta`` を tau として使う。"""
+    """``loss_type``(``"dpo"`` または ``"ipo"``)の損失。IPO では ``beta`` を tau として使う。
+
+    導入: 018。
+
+    Args:
+        margin: 形状 ``(B,)`` のマージン ``h``。
+        loss_type: ``"dpo"`` または ``"ipo"``。
+        beta: DPO の ``beta``(IPO では ``tau`` として使う)。
+
+    Returns:
+        損失の平均(形状 ``()``)。
+    """
     if loss_type == "dpo":
         return dpo_loss(margin, beta)
     if loss_type == "ipo":
@@ -208,6 +284,8 @@ def train_direct_preference(
     かった応答の系列を 1 つのバッチ(``2 B`` 系列)にまとめて方策で順伝播し、応答部分の対数確率の和
     から対数比のマージン ``h`` を求め、``loss_type`` の損失で 1 回更新する。参照方策の対数確率は
     事前計算した値(``reference_chosen``・``reference_rejected``、事例ごと)を使う。
+
+    導入: 018。
 
     Args:
         model: 方策(学習するパラメータは ``requires_grad`` で指定する。018 では LoRA のみ)。
@@ -322,6 +400,16 @@ def compute_ches_statistics(
     すると ``inner - norm_first``、y_2 を選好された応答とすると ``inner - norm_second`` である
     (``ches_from_statistics()``)。
 
+    導入: 018。
+
+    Args:
+        model: ``GPTLanguageModel``。
+        prompts: プロンプトのトークン ID の列の集まり。
+        first: 1 つ目の応答 ``y_1`` のトークン ID の列の集まり。
+        second: 2 つ目の応答 ``y_2`` のトークン ID の列の集まり。
+        device: 計算するデバイス。
+        batch_size: 1 回に処理する系列の数。
+
     Returns:
         ``inner``・``norm_first``・``norm_second``・``length_first``・``length_second``
         (いずれも長さ N の float64 の配列)。
@@ -370,6 +458,16 @@ def ches_from_statistics(
 
     ``first_chosen[i]`` が True なら y_1 を選好された応答とする。``normalized=True`` なら
     長さで正規化した版(Razin et al. の Definition 3)。
+
+    導入: 018。
+
+    Args:
+        statistics: ``compute_ches_statistics()`` の返り値。
+        first_chosen: 形状 ``(N,)`` の bool。真なら ``y_1`` を選好された応答とする。
+        normalized: 真なら長さで正規化した版(Definition 3)。
+
+    Returns:
+        形状 ``(N,)`` の CHES のスコア。
     """
     first_chosen = np.asarray(first_chosen, dtype=bool)
     inner = statistics["inner"]

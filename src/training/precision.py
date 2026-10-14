@@ -26,6 +26,8 @@ class StaticLossScaler:
     全パラメータの勾配も :math:`S` 倍になる(011 理論セクション 3 節の導出)。
     ``unscale_gradients`` で :math:`S` を除して元のスケールに戻す。
 
+    導入: 011。
+
     Args:
         scale: 損失に乗じるスケール値 :math:`S`(2 のべき乗を推奨、011 5 節)。
     """
@@ -70,6 +72,8 @@ class DynamicLossScaler:
     拡大する(011 理論セクション 3 節)。``torch.cuda.amp.GradScaler`` と同じ設計
     (backoff は即時、growth は連続成功ステップ数のカウンタで管理する)だが、
     optimizer ごとの状態管理などは持たない最小限の実装である。
+
+    導入: 011。
 
     Args:
         init_scale: 初期スケール値。
@@ -141,6 +145,8 @@ class MasterWeightOptimizer:
     行う。更新後、master weights を ``model`` のパラメータの dtype へキャストして
     コピーする。これにより、更新量が小さく FP16 の加算では丸め落ちてしまう場合でも
     (011 理論セクション 4 節)、正本である FP32 側には更新が正しく反映される。
+
+    導入: 011。
 
     Args:
         model: FP16 で保持するパラメータを持つモデル。

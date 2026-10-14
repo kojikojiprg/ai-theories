@@ -38,7 +38,19 @@ from src.training.trainer import OptimizerLike, _set_optimizer_learning_rate
 def response_loss(
     model: LlavaStyleModel, token_ids: Tensor, patch_features: Tensor, response_target_mask: Tensor
 ) -> dict[str, Tensor]:
-    """応答部分のトークンの負の対数尤度の平均(逆伝播に使う損失)と、その合計・トークン数。"""
+    """応答部分のトークンの負の対数尤度の平均(逆伝播に使う損失)と、その合計・トークン数。
+
+    導入: 021。
+
+    Args:
+        model: ``LlavaStyleModel``。
+        token_ids: 形状 ``(B, S)`` の指示 + 応答のトークン ID。
+        patch_features: 形状 ``(B, N, d_v)`` の画像のパッチ特徴(凍結した画像 encoder の出力)。
+        response_target_mask: 形状 ``(B, S)`` の bool。応答のトークンを予測する位置。
+
+    Returns:
+        ``{"loss": 平均 (逆伝播に使う), "sum": 合計, "count": トークン数}``。
+    """
     logits, targets = model.response_logits(token_ids, patch_features, response_target_mask)
     # 半精度は FP32 に上げ、FP32・FP64 はそのまま計算する(FP64 の参照実装との比較のため)
     logits = logits.to(torch.promote_types(logits.dtype, torch.float32))
@@ -64,6 +76,8 @@ def train_visual_instruction(
     gradient clipping は ``trainable_parameters`` のグローバルノルムで行い、適用前のノルムを常に
     記録する(016 の ``train_instruction_tuning()`` と同じ規則)。``evaluation_steps`` に含まれる
     ステップの更新の後に ``evaluation_fn(model)`` を呼び、その結果を記録する(途中の評価、診断量)。
+
+    導入: 021。
 
     Args:
         model: ``LlavaStyleModel``。学習しないパラメータは ``requires_grad=False`` にしておく。
@@ -135,7 +149,19 @@ def train_visual_instruction(
 def evaluate_response_negative_log_likelihood(
     model: LlavaStyleModel, data: EncodedVisualBatchData, features: Tensor, batch_size: int = 256
 ) -> dict[str, np.ndarray]:
-    """教師強制で、事例ごとの応答部分の負の対数尤度の合計(nats、float64)とトークン数を返す。"""
+    """教師強制で、事例ごとの応答部分の負の対数尤度の合計(nats、float64)とトークン数を返す。
+
+    導入: 021。
+
+    Args:
+        model: ``LlavaStyleModel``。
+        data: 符号化済みの事例(``EncodedVisualBatchData``)。
+        features: 形状 ``(num_images, N, d_v)`` の画像のパッチ特徴。
+        batch_size: 1 回に処理する事例の数。
+
+    Returns:
+        ``{"sum": 事例ごとの合計 (nats、float64), "count": 事例ごとのトークン数}``。
+    """
     model.eval()
     sums, counts = [], []
     for start in range(0, len(data), batch_size):
@@ -168,6 +194,20 @@ def generate_answers(
 
     ``image_indices`` を与えると、各事例の画像の代わりにその添字の画像の特徴を使う(画像を別の画像に
     差し替えた評価、視覚への依存の前提条件)。
+
+    導入: 021。
+
+    Args:
+        model: ``LlavaStyleModel``。
+        data: 符号化済みの事例(``EncodedVisualBatchData``)。指示部分から生成する。
+        features: 形状 ``(num_images, N, d_v)`` の画像のパッチ特徴。
+        decode: トークン ID の列を文字列に戻す関数。
+        max_new_tokens: 生成するトークン数の上限。
+        image_indices: 各事例が使う画像の添字(``None`` なら ``data`` の画像)。
+        batch_size: 1 回に処理する事例の数。
+
+    Returns:
+        事例ごとの、生成した応答部分の文字列のリスト。
     """
     lengths = data.prompt_lengths.tolist()
     rows = data.token_ids.cpu().tolist()

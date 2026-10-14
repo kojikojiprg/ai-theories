@@ -130,6 +130,14 @@ def compute_nf4_offset(num_bits: int = 4) -> float:
     ``create_normal_map`` の既定値 ``offset=0.9677083`` はこの 2 つの平均
     (k = 4: (1 - 1/30 + 1 - 1/32) / 2 = 0.96770833...)を小数第 7 位で丸めたものである。
     本関数は丸める前の閉形式の値を返す(符号語の導出には丸めた ``NF4_OFFSET`` を使う)。
+
+    導入: 013。
+
+    Args:
+        num_bits: ビット幅 ``k``(NF4 では 4)。
+
+    Returns:
+        最も外側の分位点の確率 ``delta``(丸める前の閉形式の値)。
     """
     levels = 2**num_bits
     return 0.5 * ((1.0 - 1.0 / (2 * (levels - 1))) + (1.0 - 1.0 / (2 * levels)))
@@ -150,6 +158,8 @@ def compute_nf4_codebook(offset: float | None = None) -> Tensor:
     分位点関数は ``torch.special.ndtri``(FP64)で計算する。確率点の等分は bitsandbytes と
     同じく ``torch.linspace`` の FP32 で行い、最後に FP32 へ丸めてから正規化する
     (参照値 ``NF4_CODEBOOK_REFERENCE`` と bit 単位で比較するため、丸めの順序を揃える)。
+
+    導入: 013。
 
     Args:
         offset: 最も外側の分位点の確率。``None`` の場合は ``NF4_OFFSET``。
@@ -172,6 +182,14 @@ def pack_4bit(codes: Tensor) -> Tensor:
 
     偶数番目の要素を下位 4 ビット、奇数番目の要素を上位 4 ビットに置く。要素数が奇数の場合は
     末尾に 0 を 1 個補う(``unpack_4bit`` に元の要素数を渡して取り除く)。
+
+    導入: 013。
+
+    Args:
+        codes: 0〜15 の符号(1 次元の ``uint8``)。
+
+    Returns:
+        2 個を 1 バイトに詰めた 1 次元の ``uint8``(長さ ``ceil(N / 2)``)。
     """
     if codes.dtype != torch.uint8 or codes.dim() != 1:
         raise ValueError("codes は 1 次元の uint8 テンソルである必要がある")
@@ -183,7 +201,17 @@ def pack_4bit(codes: Tensor) -> Tensor:
 
 
 def unpack_4bit(packed: Tensor, num_elements: int) -> Tensor:
-    """``pack_4bit`` の逆変換。先頭 ``num_elements`` 個の符号(``uint8``)を返す。"""
+    """``pack_4bit`` の逆変換。先頭 ``num_elements`` 個の符号(``uint8``)を返す。
+
+    導入: 013。
+
+    Args:
+        packed: ``pack_4bit`` が返した、詰めたバイト列。
+        num_elements: 元の符号の数(末尾の補いを取り除くために使う)。
+
+    Returns:
+        形状 ``(num_elements,)`` の ``uint8`` の符号。
+    """
     low = packed & 0x0F
     high = packed >> 4
     return torch.stack([low, high], dim=1).reshape(-1)[:num_elements]
@@ -232,6 +260,8 @@ class DoubleQuantizedScale:
     ブロックで 8 ビットの absmax 方式により量子化する。逆量子化は
     c_hat = q_2 Delta_2 + mu(Delta_2 は第 2 段のブロックごとの刻み幅)。
 
+    導入: 013。
+
     Attributes:
         codes: 形状 ``(G,)`` の ``uint8``(符号 q_2 + 127)。
         scale: 形状 ``(ceil(G / block_size),)`` の FP32(第 2 段の刻み幅 Delta_2)。
@@ -258,7 +288,17 @@ class DoubleQuantizedScale:
 def double_quantize_scale(
     scale: Tensor, block_size: int = DOUBLE_QUANTIZATION_BLOCK_SIZE
 ) -> DoubleQuantizedScale:
-    """第 1 段のスケールを二重量子化する(平均を引いてから 8 ビット absmax 方式)。"""
+    """第 1 段のスケールを二重量子化する(平均を引いてから 8 ビット absmax 方式)。
+
+    導入: 013。
+
+    Args:
+        scale: 第 1 段のスケール(正の値、形状 ``(G,)``)。
+        block_size: 第 2 段のブロックサイズ ``B_2``。
+
+    Returns:
+        二重量子化した ``DoubleQuantizedScale``。
+    """
     scale = scale.to(torch.float32)
     offset = scale.mean()
     centered = scale - offset
@@ -274,6 +314,8 @@ def double_quantize_scale(
 @dataclass
 class QuantizedWeight:
     """量子化した重み(符号・スケールなど、格納するテンソル一式とメタデータ)。
+
+    導入: 013。
 
     Attributes:
         method: ``"absmax"``・``"zero_point"``・``"nf4"``。
@@ -389,6 +431,8 @@ def quantize_weight(
 ) -> QuantizedWeight:
     """重みを量子化する。
 
+    導入: 013。
+
     Args:
         weight: 量子化するテンソル(チャネル単位の粒度では第 0 次元を出力チャネルとみなす。
             ``nn.Linear.weight`` の形状 ``(d_out, d_in)`` では各行が 1 チャネル)。
@@ -466,6 +510,14 @@ def compute_codebook_thresholds(codebook: Tensor) -> Tensor:
 
     中点は FP64 で計算してから符号語の dtype に丸める(bitsandbytes の ``dQuantizeNF4`` の
     閾値と同じ値になる。FP32 のまま (a + b) / 2 を計算すると、丸めにより 1 ulp ずれることがある)。
+
+    導入: 013。
+
+    Args:
+        codebook: 昇順の符号語(形状 ``(K,)``)。
+
+    Returns:
+        隣り合う符号語の中点(形状 ``(K - 1,)``、符号語と同じ dtype)。
     """
     wide = codebook.to(torch.float64)
     return ((wide[1:] + wide[:-1]) / 2).to(codebook.dtype)
@@ -477,6 +529,15 @@ def nearest_codebook_index(values: Tensor, codebook: Tensor) -> Tensor:
     境界の規則は bitsandbytes の ``dQuantizeNF4`` と同じで、値が閾値より大きければ上側の
     符号語に割り当てる(閾値ちょうどの値は下側の符号語になる)。要素数 N に対して
     O(N log K)(K は符号語の数)。
+
+    導入: 013。
+
+    Args:
+        values: 量子化する値のテンソル。
+        codebook: 昇順の符号語(形状 ``(K,)``)。
+
+    Returns:
+        ``values`` と同じ形状の、最も近い符号語の番号(long)。
     """
     thresholds = compute_codebook_thresholds(codebook).to(values.device)
     return torch.bucketize(values, thresholds, right=False)
@@ -496,6 +557,20 @@ def compute_quantized_storage_bytes(
     - スケール: 二重量子化なしなら scale_bytes G。二重量子化ありなら 1 G(8 ビットの符号)
       + 4 ceil(G / B_2)(第 2 段の FP32 スケール)+ 4(FP32 の平均 mu)
     - ゼロ点: 1 G(``uint8``)
+
+    導入: 013。
+
+    Args:
+        num_elements: 重みの要素数 ``N``。
+        bits: ビット幅(4 または 8)。
+        num_groups: スケールの数(グループ数)``G``。
+        scale_bytes: スケール 1 個のバイト数(二重量子化なしのとき)。
+        zero_point: ゼロ点を格納するか。
+        double_quantization_block_size: 二重量子化の第 2 段のブロックサイズ(``None`` なら
+            二重量子化なし)。
+
+    Returns:
+        格納に要するバイト数。
     """
     if bits not in (4, 8):
         raise ValueError("パック格納の閉形式は 4・8 ビットのみ")
@@ -521,6 +596,19 @@ def compute_effective_bits_per_parameter(
     二重量子化なし: b + s / B。二重量子化あり: b + b_2 / B + s / (B B_2)
     (s はスケールのビット数、b_2 は第 2 段のビット数。N が B B_2 で割り切れ、テンソルごとの
     平均 mu の 32 ビットを無視できる場合の値。QLoRA 第 3 節)。
+
+    導入: 013。
+
+    Args:
+        bits: 符号のビット幅 ``b``。
+        block_size: ブロックサイズ ``B``。
+        scale_bits: スケールのビット数 ``s``。
+        double_quantization_block_size: 第 2 段のブロックサイズ ``B_2``(``None`` なら
+            二重量子化なし)。
+        double_quantization_bits: 第 2 段のビット数 ``b_2``。
+
+    Returns:
+        スケールの格納を含む、1 パラメータあたりの実効ビット数。
     """
     if double_quantization_block_size is None:
         return bits + scale_bits / block_size

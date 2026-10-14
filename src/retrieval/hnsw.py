@@ -77,6 +77,13 @@ def draw_levels_and_insertion_order(
     同じ挿入の順序の先頭``n`` 個(入れ子の部分集合)を、他の索引(転置ファイル・Product
     Quantization)に使うために切り出してある。
 
+    導入: 025。
+
+    Args:
+        num_elements: 要素の数 ``N``。
+        max_connections: 層ごとの最大の接続数 ``M``(``m_L = 1 / ln M``)。
+        seed: 乱数シード。
+
     Returns:
         ``(層の番号 (N,)、挿入の順序 (N,))``。
     """
@@ -89,6 +96,8 @@ def draw_levels_and_insertion_order(
 
 class HierarchicalNavigableSmallWorld:
     """HNSW の索引。
+
+    導入: 025。
 
     Args:
         vectors: 形状 ``(N, d)``。単位ベクトル(``dtype`` で保持する)。挿入するのは ``add()`` で

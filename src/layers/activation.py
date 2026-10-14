@@ -30,6 +30,8 @@ def gelu_exact(x: Tensor) -> Tensor:
     Φ は標準正規分布の累積分布関数(CDF)。誤差関数(error function)
     erf を用いた恒等式 Φ(x) = (1/2) * (1 + erf(x / sqrt(2))) で計算する。
 
+    導入: 004。
+
     Args:
         x: 任意形状の入力テンソル。
 
@@ -49,6 +51,8 @@ def gelu_tanh_approximation(x: Tensor) -> Tensor:
     誤差関数を使わずに済むため、``gelu_exact`` より計算コストが低い
     (原論文発表当時、erf の高速な実装が一部の環境になかったことが動機)。
 
+    導入: 004。
+
     Args:
         x: 任意形状の入力テンソル。
 
@@ -66,6 +70,8 @@ def swish(x: Tensor, beta: float = 1.0) -> Tensor:
 
     β -> ∞ の極限で σ(β * x) がステップ関数に収束するため、Swish は ReLU に収束する
     (負領域で 0、正領域で x)。この極限の様子は 004 の実験 A で数値的に確認する。
+
+    導入: 004。
 
     Args:
         x: 任意形状の入力テンソル。

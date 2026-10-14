@@ -67,6 +67,8 @@ from src.retrieval.kmeans import assign_to_nearest, fit_kmeans
 class InvertedFileIndex:
     """転置ファイルの索引。
 
+    導入: 025。
+
     Args:
         vectors: 形状 ``(N, d)``。単位ベクトル(CPU の float32)。
         num_lists: ``K``。

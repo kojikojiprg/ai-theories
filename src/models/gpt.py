@@ -60,6 +60,8 @@ class GPTLanguageModel(nn.Module):
     (``use_cross_attention=False``)を ``num_layers`` 段 -> 最終正規化層 ->
     出力層(語彙への射影)。
 
+    導入: 006。
+
     Args:
         vocabulary_size: 語彙サイズ V。
         d_model: モデルの隠れ次元。
@@ -413,6 +415,8 @@ def convert_attention_to_grouped_query(
     重み(埋め込み・Feed-Forward Network・正規化層)は変更せずそのままコピーする。
     変更するのは各層の ``w_k``・``w_v``(形状が ``num_heads * d_k`` から
     ``num_key_value_heads * d_k`` へ縮小する)のみである。
+
+    導入: 010。
 
     Args:
         model: 変換元の学習済み ``GPTLanguageModel``(``num_key_value_heads`` が

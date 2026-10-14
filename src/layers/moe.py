@@ -80,6 +80,17 @@ def compute_expert_capacity(
     (Fedus et al., 2.2 節: expert capacity = (tokens per batch / number of experts) x
     capacity factor)。1 個のエキスパートが受け取れる割り当ては高々 T 個(各トークンは同じ
     エキスパートを 2 回選ばない)なので、T を上限とする。
+
+    導入: 022。
+
+    Args:
+        num_tokens: バッチ内のトークン数 ``T``。
+        num_experts: エキスパートの数 ``E``。
+        top_k: トークンあたりに選ぶエキスパートの数 ``k``。
+        capacity_factor: 容量係数。1 なら割り当てが完全に一様なときにちょうど収まる大きさ。
+
+    Returns:
+        エキスパート 1 個の容量(1 以上 ``num_tokens`` 以下の整数)。
     """
     capacity = math.ceil(capacity_factor * top_k * num_tokens / num_experts)
     return max(1, min(capacity, num_tokens))
@@ -94,6 +105,8 @@ def compute_dispatch_slots(
     自分より前にあるものの個数を r として、r < C なら枠 ``expert_index[a] * C + r`` に入る。
     r >= C の割り当ては破棄し、枠の番号を ``E * C``(どのエキスパートにも属さない捨て枠)に
     する。
+
+    導入: 022。
 
     Args:
         expert_index: 形状 ``(A,)`` の LongTensor(割り当てごとのエキスパートの番号。
@@ -124,6 +137,8 @@ class MixtureOfExpertsFeedForward(nn.Module):
     ``renormalize_gates=True`` では、選ばれた k 個の確率の和で割る(Shazeer et al.・
     Lepikhin et al. の top-k のゲート)。k = 1 で和で割るとゲートが恒等的に 1 になり、
     ルーターに勾配が流れなくなるので、その組み合わせは受け付けない。
+
+    導入: 022。
 
     Args:
         d_model: 入出力の次元。
@@ -345,12 +360,28 @@ class MixtureOfExpertsFeedForward(nn.Module):
 
 
 def find_moe_layers(model: nn.Module) -> list[MixtureOfExpertsFeedForward]:
-    """``model`` に含まれる MoE 層を、モジュールの登録順(浅い層から)に返す。"""
+    """``model`` に含まれる MoE 層を、モジュールの登録順(浅い層から)に返す。
+
+    導入: 022。
+
+    Args:
+        model: 探索するモデル。
+
+    Returns:
+        ``MixtureOfExpertsFeedForward`` のリスト(モジュールの登録順)。
+    """
     return [m for m in model.modules() if isinstance(m, MixtureOfExpertsFeedForward)]
 
 
 def set_statistics_tracking(model: nn.Module, enabled: bool) -> None:
-    """``model`` の全 MoE 層の個数の積算を有効 / 無効にし、積算済みの個数を消す。"""
+    """``model`` の全 MoE 層の個数の積算を有効 / 無効にし、積算済みの個数を消す。
+
+    導入: 022。
+
+    Args:
+        model: 対象のモデル。
+        enabled: 真なら、個数の積算を有効にする。
+    """
     for layer in find_moe_layers(model):
         layer.track_statistics = enabled
         layer.reset_statistics()

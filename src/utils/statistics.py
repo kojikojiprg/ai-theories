@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -32,6 +32,8 @@ def compute_mean_to_rms_ratio(hidden_states: Sequence[Tensor]) -> list[float]:
     平均減算(re-centering)を省略したときに失われる情報が小さいことを意味する
     (RMSNorm が平行移動不変性(shift invariance)を失うことが実害になるかどうかの
     検証、理論セクションおよび実験 B・D を参照)。
+
+    導入: 004。
 
     Args:
         hidden_states: 層ごとの隠れ状態のリスト。各要素は形状 ``(..., d_model)``。
@@ -66,6 +68,8 @@ def compute_always_negative_unit_ratio(
     この比率の値を単純に比較する際は、比率そのものではなく、実際に勾配が伝わっているか
     どうか(``compute_gradient_norm_by_unit_group`` 参照)まで確認すること(実験 F)。
 
+    導入: 004。
+
     Args:
         preactivations: 層ごとの活性化前の値のリスト。各要素は形状 ``(N, d_ff)``
             (N は検証データの全トークン数、d_ff は中間層の次元)。
@@ -93,6 +97,8 @@ def compute_gradient_norm_by_unit_group(
     意味が異なるため)。本関数は、常に負のユニットに対応する重み行の勾配ノルムを
     直接測ることで、これを代理指標の比較ではなく直接の検証にする(実験 F)。
     ReLU では常に負のユニットの勾配ノルムがほぼ厳密に 0 になることが期待される。
+
+    導入: 004。
 
     Args:
         weight_grad: 線形層(順伝播ネットワークの 1 層目)の重み勾配、
@@ -126,6 +132,8 @@ def compute_gradient_norm_per_layer(model: nn.Module) -> tuple[list[float], list
     ``model.layer_outputs``(``list[Tensor]``、層順)へ格納しておく必要がある。
     その状態で ``loss.backward()`` を呼んだ後にこの関数を呼ぶ。
 
+    導入: 004。
+
     Args:
         model: ``layer_outputs: list[Tensor]`` 属性を持つモデル
             (各要素は ``retain_grad()`` 済みで、逆伝播後に ``.grad`` を持つ)。
@@ -148,6 +156,8 @@ def compute_fertility(token_count: int, char_count: int) -> float:
     トークンで同じ文字数のテキストを表現できている(語彙サイズに対する圧縮効果が
     高い)ことを意味する。
 
+    導入: 005。
+
     Note:
         原論文の fertility は主に単語単位(1 単語あたりのトークン数)で定義される
         ことが多いが、本リポジトリは日本語(単語境界が表層に現れない言語)を扱うため、
@@ -165,6 +175,8 @@ def compute_fertility(token_count: int, char_count: int) -> float:
 
 def compute_unknown_rate(tokens: Sequence[str], unk_token: str = "<unk>") -> float:
     """トークン列に占める未知語(Out-of-Vocabulary)トークンの割合を計算する。
+
+    導入: 005。
 
     Args:
         tokens: 符号化後のトークン列。
@@ -192,6 +204,8 @@ def compute_chunk_length_statistics(chunks: Sequence[str]) -> dict[str, float]:
     先頭の連続空白(``str.lstrip()`` が除去する、半角空白・タブ・改行を含む
     Unicode の空白文字)を除いた長さについても同じ統計を返す
     (キーに ``_without_leading_whitespace`` を付す)。
+
+    導入: 005。
 
     Args:
         chunks: チャンク(部分文字列)のリスト。
@@ -226,6 +240,8 @@ def compute_exact_match_rate(
 
     自作の Viterbi 分割と sentencepiece 自身の分割結果の比較、および BPE と
     Unigram 言語モデルの分割結果の比較に使う(005 の実験5)。
+
+    導入: 005。
 
     Args:
         sequences_a: 分割結果 A(文の数だけ、部分語シンボル列を並べたもの)。
@@ -271,6 +287,8 @@ def compute_segmentation_agreement_rate(
 
     を返す。$A = B = \\emptyset$(両方とも 1 トークンのみで境界が 1 つも無い)場合は
     $J = 1.0$ とする(空集合どうしは定義上一致とみなす)。
+
+    導入: 005。
 
     Args:
         segmentation_a: 分割結果 A(部分語シンボルのリスト)。
@@ -332,6 +350,8 @@ def compute_character_coverage(
     全ユニーク文字を初期シンボルとして含む(005 の 3.3 節)ため、被覆率は常に 1.0 になる
     (この関数の対照としての振る舞い)。
 
+    導入: 005。
+
     Args:
         vocabulary: 語彙(``BPETokenizer.vocab`` などのシンボル文字列の集合)。
         corpus: 被覆率を測る対象のコーパス。
@@ -369,6 +389,8 @@ def compute_bits_per_byte(total_negative_log_likelihood_nats: float, total_bytes
     006 以降の条件比較(トークナイザ・アーキテクチャの違いなど)で
     perplexity の代わりに用いる。
 
+    導入: 006。
+
     Args:
         total_negative_log_likelihood_nats: 評価対象全体の負の対数尤度の総和(nats)。
         total_bytes: 評価対象の UTF-8 バイト数(``make_evaluation_windows`` の出力を想定)。
@@ -388,6 +410,8 @@ def compute_perplexity(mean_loss_per_token: float) -> float:
     語彙サイズ(トークナイザの粒度)が異なる条件間では比較できない指標である点に注意
     (006 以降でトークナイザ条件をまたいで比較する場合は ``compute_bits_per_byte`` を使う)。
 
+    導入: 006。
+
     Args:
         mean_loss_per_token: トークンあたりの平均損失(nats)。
 
@@ -398,12 +422,14 @@ def compute_perplexity(mean_loss_per_token: float) -> float:
 
 
 def compute_gradient_norm_peak_to_mean_ratio(gradient_norms: Sequence[float]) -> float:
-    """勾配ノルムの時系列から、ピーク(最大値)と平均値の比を計算する(007)。
+    """勾配ノルムの時系列から、ピーク(最大値)と平均値の比を計算する。
 
     006 の実験 H で導入した指標を関数化したもの。この比が大きいほど、学習全体を通じた
     典型的な勾配ノルム(平均)に対して、突発的なスパイクが大きいことを意味する
     (007 主張 1・2a・2b で、正規化方式・学習率が不安定性の誘発にどう効くかを
     比較する診断量として使う)。
+
+    導入: 007。
 
     Args:
         gradient_norms: ステップごとの勾配ノルム(``train_language_model`` の
@@ -417,13 +443,15 @@ def compute_gradient_norm_peak_to_mean_ratio(gradient_norms: Sequence[float]) ->
 
 
 def compute_max_single_step_loss_increase(loss_step_deltas: Sequence[float]) -> float:
-    """訓練損失の単一ステップ上昇幅の最大値を計算する(007)。
+    """訓練損失の単一ステップ上昇幅の最大値を計算する。
 
     ``train_language_model`` の history の ``"loss_step_delta"``(直前ステップとの
     損失の差)から、最大値(最も大きな上昇)を取り出す。全ステップで損失が
     単調に減少・横ばいだった場合、戻り値は 0 以下になる(上昇が一度も無かったことを
     意味する。007 主張 3・4 で、gradient clipping・warmup + cosine スケジュールが
     損失の暴れを抑える効果を測る診断量として使う)。
+
+    導入: 007。
 
     Args:
         loss_step_deltas: ステップごとの損失の差(``train_language_model`` の
@@ -443,6 +471,8 @@ def compute_loss_step_delta_std(loss_step_deltas: Sequence[float]) -> float:
     ような最大値(極値統計)ではなく標準偏差(分布全体の統計量)で捉える。
     先頭要素(比較対象が無いための ``0.0``、``train_language_model``の docstring
     参照)は除外せず含める(``compute_max_single_step_loss_increase()``と同じ扱い)。
+
+    導入: 007。
 
     Args:
         loss_step_deltas: ステップごとの損失の差(``train_language_model`` の
@@ -476,6 +506,8 @@ def compute_effective_decay_divergence(
     v に占める減衰由来の寄与が相対的に大きくなり、群間で :math:`d_i` が乖離する
     (divergence が大きくなる)ことが期待される。
 
+    導入: 007。
+
     Args:
         initial_values: 群ごとの初期値 :math:`\\theta_i^{(0)}`(群の数だけの長さ)。
         final_values: 群ごとの最終値 :math:`\\theta_i^{(T)}`(``initial_values`` と
@@ -506,6 +538,8 @@ def compute_ngram_repetition_rate(token_ids: Sequence[int] | Tensor, n: int) -> 
 
     値が大きいほど、同じ n-gram の繰り返しが多い(退化(degeneration)の兆候、
     Holtzman et al., 2020)ことを意味する。
+
+    導入: 008。
 
     Args:
         token_ids: 生成されたトークン ID の列(``list[int]`` または 1 次元 Tensor)。
@@ -538,6 +572,8 @@ def compute_distinct_n(token_ids: Sequence[int] | Tensor, n: int) -> float:
     ``compute_ngram_repetition_rate`` の余事象(``1 - rep-n``)にあたる量だが、
     「多様性が高いほど値が大きい」向きに揃えた別名の指標として独立に提供する。
 
+    導入: 008。
+
     Args:
         token_ids: 生成されたトークン ID の列(``list[int]`` または 1 次元 Tensor)。
         n: n-gram の長さ(1 以上)。
@@ -568,6 +604,8 @@ def count_non_embedding_parameters(model: nn.Module) -> int:
     ``GPTLanguageModel`` 参照)、共有された重みは 1 回のみ除外する
     (``id()`` によるパラメータの同一性判定)。
 
+    導入: 006。
+
     Args:
         model: ``token_embedding: nn.Embedding`` 属性と ``lm_head: nn.Linear`` 属性を
             持つモデル(``GPTLanguageModel`` を想定)。
@@ -589,7 +627,16 @@ def count_non_embedding_parameters(model: nn.Module) -> int:
 
 @dataclass
 class PowerLawExponentFit:
-    """``fit_power_law_exponent`` の結果。y = coefficient * x^exponent。"""
+    """``fit_power_law_exponent`` の結果。y = coefficient * x^exponent。
+
+    導入: 010。
+
+    Attributes:
+        exponent: べき指数 ``b``。
+        exponent_stderr: べき指数の標準誤差。
+        coefficient: 係数 ``a``。
+        r_squared: 対数空間の決定係数。
+    """
 
     exponent: float
     exponent_stderr: float
@@ -598,7 +645,7 @@ class PowerLawExponentFit:
 
 
 def fit_power_law_exponent(x: Sequence[float], y: Sequence[float]) -> PowerLawExponentFit:
-    """べき乗則 y = a x^b をあてはめ、指数 b とその標準誤差を返す(010)。
+    """べき乗則 y = a x^b をあてはめ、指数 b とその標準誤差を返す。
 
     ``src.scaling.laws.fit_power_law`` と同じ対数空間の線形最小二乗
     (``log y = log a + b log x``)を使うが、実験の判定基準(条件間の指数の差
@@ -614,6 +661,8 @@ def fit_power_law_exponent(x: Sequence[float], y: Sequence[float]) -> PowerLawEx
         \\hat{\\sigma}^2 = \\frac{\\sum_i \\hat{\\varepsilon}_i^2}{n - 2}
 
     を用いる(``\\hat{\\varepsilon}_i`` は対数空間の残差、``n`` はデータ点数)。
+
+    導入: 010。
 
     Args:
         x: 正の実数値の系列(3 点以上、標準誤差の推定に自由度 ``n - 2 >= 1`` が必要)。
@@ -664,6 +713,8 @@ def compute_key_value_cache_memory_bytes(
     d_model に等しいが、Grouped-Query Attention / Multi-Query Attention では
     g < h であるぶん比例して縮小する)に対応する。
 
+    導入: 010。
+
     Args:
         batch_size: バッチサイズ B。
         num_layers: 層数 L。
@@ -687,12 +738,14 @@ def compute_key_value_cache_memory_bytes(
 
 
 def compute_underflow_ratio(tensor: Tensor, dtype: torch.dtype) -> float:
-    """非ゼロ要素のうち、指定した形式へのキャストで 0 になる要素の比率を計算する(011)。
+    """非ゼロ要素のうち、指定した形式へのキャストで 0 になる要素の比率を計算する。
 
     FP16(1・5・10)のように表現範囲(dynamic range)が狭い形式へキャストすると、
     最小非正規数(subnormal)を下回る値が 0 に丸められる(アンダーフロー、underflow)。
     元のテンソルで厳密に 0 だった要素は「新たにアンダーフローした」わけではないため、
     分母から除外する(``compute_exact_zero_ratio`` と役割を分ける)。
+
+    導入: 011。
 
     Args:
         tensor: 元のテンソル(任意の浮動小数点 dtype)。
@@ -711,7 +764,7 @@ def compute_underflow_ratio(tensor: Tensor, dtype: torch.dtype) -> float:
 def compute_relative_rounding_error(
     tensor: Tensor, dtype: torch.dtype, eps: float = 1e-30
 ) -> Tensor:
-    """指定した形式へのキャストのラウンドトリップによる相対誤差を要素ごとに計算する(011)。
+    """指定した形式へのキャストのラウンドトリップによる相対誤差を要素ごとに計算する。
 
     ``tensor`` を ``dtype`` へキャストしたうえで元の dtype へキャストし直し
     (ラウンドトリップ)、元の値との差の絶対値を元の値の絶対値で正規化する。
@@ -724,6 +777,8 @@ def compute_relative_rounding_error(
     (``eps`` は入力の典型的なスケールより十分小さい値を渡すこと)。戻り値は
     ``tensor`` と同じ形状の要素ごとの相対誤差であり、値の大きさに対する相対丸め誤差の
     曲線(実験 A)を作る際は、呼び出し側で値の大きさ別に平均するなど適宜集計する。
+
+    導入: 011。
 
     Args:
         tensor: 元のテンソル(任意の浮動小数点 dtype)。
@@ -739,13 +794,15 @@ def compute_relative_rounding_error(
 
 
 def compute_exact_zero_ratio(tensor: Tensor) -> float:
-    """テンソル内の厳密な 0 の比率を計算する(011)。
+    """テンソル内の厳密な 0 の比率を計算する。
 
     ``compute_underflow_ratio`` が測る「非ゼロからキャストによって 0 になった比率」
     とは異なり、元のテンソル自体に既に含まれる厳密な 0(例えば ReLU 通過後の値、
     または既にアンダーフローした値)の比率を測る。実験 B の診断量として、FP16
     キャスト後のテンソルに対して呼び出すことで「キャスト前から 0 だった要素」と
     「キャストで新たに 0 になった要素」を合わせた全体の 0 の比率を確認する用途を想定する。
+
+    導入: 011。
 
     Args:
         tensor: 対象のテンソル。
@@ -759,7 +816,7 @@ def compute_exact_zero_ratio(tensor: Tensor) -> float:
 
 
 def compute_arithmetic_intensity(flops: float, bytes_moved: float) -> float:
-    """演算強度(arithmetic intensity、FLOPs / バイト)を計算する(010)。
+    """演算強度(arithmetic intensity、FLOPs / バイト)を計算する。
 
     roofline モデル(Williams et al., "Roofline: An Insightful Visual Performance
     Model for Multicore Architectures", CACM 2009)における、ある演算が計算律速
@@ -773,6 +830,8 @@ def compute_arithmetic_intensity(flops: float, bytes_moved: float) -> float:
     演算強度が ``O(1)``(バッチサイズ程度)に留まりメモリ帯域律速になりやすい
     (010 理論セクション 3 節)。
 
+    導入: 010。
+
     Args:
         flops: 対象の演算の浮動小数点演算回数。
         bytes_moved: 対象の演算がメモリから読み書きするバイト数の合計
@@ -785,10 +844,18 @@ def compute_arithmetic_intensity(flops: float, bytes_moved: float) -> float:
 
 
 def compute_excess_kurtosis(values: Tensor | np.ndarray) -> float:
-    """尖度(excess kurtosis)m_4 / m_2^2 - 3 を返す(013)。
+    """尖度(excess kurtosis)m_4 / m_2^2 - 3 を返す。
 
     m_k は平均まわりの k 次の標本モーメント(母集団の定義、偏りの補正はしない)。正規分布では 0、
     ラプラス分布では 3、一様分布では -1.2 になる。FP64 で計算する。
+
+    導入: 013。
+
+    Args:
+        values: 標本(任意の形状。1 次元に並べて使う)。
+
+    Returns:
+        尖度 ``m_4 / m_2^2 - 3``。
     """
     x = np.asarray(
         values.detach().cpu().double().numpy() if isinstance(values, Tensor) else values,
@@ -819,6 +886,15 @@ def compute_spearman_correlation(x: Sequence[float], y: Sequence[float]) -> floa
     """Spearman の順位相関係数(同順位は平均順位、013)。
 
     順位の分散が 0 の場合(全要素が同順位)は定義できないため ``nan`` を返す。
+
+    導入: 013。
+
+    Args:
+        x: 1 つ目の変量の列。
+        y: 2 つ目の変量の列(``x`` と同じ長さ)。
+
+    Returns:
+        順位相関係数(順位の分散が 0 なら ``nan``)。
     """
     rank_x = _average_ranks(np.asarray(x, dtype=np.float64))
     rank_y = _average_ranks(np.asarray(y, dtype=np.float64))
@@ -836,10 +912,12 @@ def compute_stratified_spearman_correlation(
     groups: Sequence[object],
     undefined_value: float | None = None,
 ) -> float:
-    """層別 Spearman 相関: 群ごとの Spearman 相関を群の大きさで重み付けして平均する(013)。
+    """層別 Spearman 相関: 群ごとの Spearman 相関を群の大きさで重み付けして平均する。
 
     交絡因子(013 実験 B では行列の形状)で群に分け、各群の内部でのみ順位相関を取ることで、
     群の間の違いに由来する見かけの相関を除く。
+
+    導入: 013。
 
     Args:
         x, y: 同じ長さの系列。
@@ -875,11 +953,21 @@ def bootstrap_stratified_spearman_correlation(
     undefined_value: float = 0.0,
 ) -> np.ndarray:
     """層内で要素を復元抽出する(群の大きさは保つ)ブートストラップで、層別 Spearman 相関の
-    分布を返す(013)。
+    分布を返す。
 
     各反復で、群ごとに同じ群の要素から群の大きさと同数を復元抽出し、
     ``compute_stratified_spearman_correlation`` を計算する。再標本で群内の順位の分散が 0 に
     なった群は ``undefined_value``(既定 0、帰無仮説の側に寄せる保守的な扱い)を相関とする。
+
+    導入: 013。
+
+    Args:
+        x: 1 つ目の変量の列。
+        y: 2 つ目の変量の列(``x`` と同じ長さ)。
+        groups: 要素ごとの層(群)の識別子。
+        num_resamples: 反復回数。
+        seed: 乱数シード。
+        undefined_value: 再標本で順位の分散が 0 になった群の相関として使う値。
 
     Returns:
         形状 ``(num_resamples,)`` の配列。
@@ -904,6 +992,58 @@ def bootstrap_stratified_spearman_correlation(
     return samples
 
 
+def encode_cluster_labels(clusters: Sequence) -> tuple[np.ndarray, int]:
+    """クラスタの識別子(ハッシュ可能な任意の値)を、出現順の整数の番号に直す。
+
+    導入: 015。
+
+    Args:
+        clusters: 長さ ``n`` の、各単位が属するクラスタの識別子。
+
+    Returns:
+        ``(形状 (n,) の各単位のクラスタの番号, クラスタの数)``。番号は識別子が最初に現れた順。
+    """
+    labels = {c: i for i, c in enumerate(dict.fromkeys(clusters))}
+    return np.array([labels[c] for c in clusters]), len(labels)
+
+
+def iter_bootstrap_weight_chunks(
+    num_draws: int,
+    num_resamples: int,
+    seed: int,
+    chunk_size: int = 500,
+    unit_cluster_index: np.ndarray | None = None,
+) -> Iterator[tuple[int, np.ndarray]]:
+    """復元抽出するブートストラップの、単位ごとの重み(抽出回数)を、反復の塊ごとに返す。
+
+    各反復で ``num_draws`` 個の要素を復元抽出し、各要素の抽出回数を多項分布
+    Multinomial(num_draws, 1 / num_draws) から引く(一様に復元抽出するのと同じ分布)。
+    ``paired_bootstrap_ratio_of_sums()``(要素 = 単位)・
+    ``paired_cluster_bootstrap_ratio_of_sums()``(要素 = クラスタ)・
+    ``src.retrieval.cost_curve.cluster_bootstrap_weights()`` が共通に使う。
+
+    導入: 013。
+
+    Args:
+        num_draws: 1 反復あたりの抽出数(単位の数、またはクラスタの数)。
+        num_resamples: 反復回数。
+        seed: 乱数シード(``np.random.default_rng(seed)``)。
+        chunk_size: 1 回に引く反復の数。
+        unit_cluster_index: 形状 ``(n,)``。各単位が属するクラスタの番号。指定すると、クラスタの
+            抽出回数を単位の重みに展開して返す。``None`` なら抽出回数をそのまま返す。
+
+    Yields:
+        ``(塊の先頭の反復の番号, 形状 (塊の反復の数, 重みの数) の float64 の重み)``。重みの数は、
+        ``unit_cluster_index`` を指定すれば単位の数、しなければ ``num_draws``。
+    """
+    rng = np.random.default_rng(seed)
+    probabilities = np.full(num_draws, 1.0 / num_draws)
+    for start in range(0, num_resamples, chunk_size):
+        size = min(chunk_size, num_resamples - start)
+        counts = rng.multinomial(num_draws, probabilities, size=size).astype(np.float64)
+        yield start, counts if unit_cluster_index is None else counts[:, unit_cluster_index]
+
+
 def paired_bootstrap_ratio_of_sums(
     numerators: np.ndarray,
     denominators: np.ndarray,
@@ -912,18 +1052,21 @@ def paired_bootstrap_ratio_of_sums(
     chunk_size: int = 500,
 ) -> np.ndarray:
     """単位(評価窓など)を復元抽出する対応付きブートストラップで、比 sum(numerator) /
-    sum(denominator) の分布を返す(013)。
+    sum(denominator) の分布を返す。
 
     全条件(``numerators`` の各行)に **同じ再標本** を使う(対応付き)。条件間の差を
     反復ごとに取れば、共通の単位のばらつき(窓ごとの難しさ)が相殺された差の分布になる。
     復元抽出は、各単位の抽出回数を多項分布 Multinomial(n, 1/n) から引くことで行う
     (n 個の添字を一様に復元抽出するのと同じ分布)。
 
+    導入: 013。
+
     Args:
         numerators: 形状 ``(k, n)``(k 条件 × n 単位)または ``(n,)``。
         denominators: 形状 ``(n,)``(全条件で共通、例: 窓ごとの UTF-8 バイト数)。
         num_resamples: 反復回数。
         seed: 乱数シード。
+        chunk_size: 1 回に引く反復の数(結果には影響しない)。
 
     Returns:
         形状 ``(num_resamples, k)``(``numerators`` が 1 次元なら ``(num_resamples,)``)。
@@ -935,12 +1078,9 @@ def paired_bootstrap_ratio_of_sums(
     n = denominators.shape[0]
     if numerators.shape[1] != n:
         raise ValueError("numerators と denominators の単位数が一致しない")
-    rng = np.random.default_rng(seed)
-    probabilities = np.full(n, 1.0 / n)
     out = np.empty((num_resamples, numerators.shape[0]), dtype=np.float64)
-    for start in range(0, num_resamples, chunk_size):
-        size = min(chunk_size, num_resamples - start)
-        counts = rng.multinomial(n, probabilities, size=size).astype(np.float64)  # (size, n)
+    for start, counts in iter_bootstrap_weight_chunks(n, num_resamples, seed, chunk_size):
+        size = counts.shape[0]  # counts: (size, n)
         out[start : start + size] = (counts @ numerators.T) / (counts @ denominators)[:, None]
     return out[:, 0] if squeeze else out
 
@@ -954,7 +1094,7 @@ def paired_cluster_bootstrap_ratio_of_sums(
     chunk_size: int = 500,
 ) -> np.ndarray:
     """クラスタ(記事など)を復元抽出する対応付きブートストラップで、比 sum(numerator) /
-    sum(denominator) の分布を返す(015)。
+    sum(denominator) の分布を返す。
 
     ``paired_bootstrap_ratio_of_sums()`` の単位(評価窓など)を、互いに独立でない単位の
     まとまり(同じ記事から切り出した評価窓など)ごとに復元抽出する版である。反復ごとに
@@ -963,12 +1103,15 @@ def paired_cluster_bootstrap_ratio_of_sums(
     (対応付き)。同じクラスタの単位どうしが相関するとき、単位を独立に復元抽出すると
     比のばらつきを過小に見積もる(擬似反復)ため、独立な単位であるクラスタを復元抽出する。
 
+    導入: 015。
+
     Args:
         numerators: 形状 ``(k, n)``(k 条件 × n 単位)または ``(n,)``。
         denominators: 形状 ``(n,)``(全条件で共通)。
         clusters: 長さ n の、各単位が属するクラスタの識別子(ハッシュ可能な任意の値)。
         num_resamples: 反復回数。
         seed: 乱数シード。
+        chunk_size: 1 回に引く反復の数(結果には影響しない)。
 
     Returns:
         形状 ``(num_resamples, k)``(``numerators`` が 1 次元なら ``(num_resamples,)``)。
@@ -980,28 +1123,24 @@ def paired_cluster_bootstrap_ratio_of_sums(
     n = denominators.shape[0]
     if numerators.shape[1] != n or len(clusters) != n:
         raise ValueError("numerators・denominators・clusters の単位数が一致しない")
-    labels = {c: i for i, c in enumerate(dict.fromkeys(clusters))}
-    cluster_index = np.array([labels[c] for c in clusters])
-    num_clusters = len(labels)
-    rng = np.random.default_rng(seed)
-    probabilities = np.full(num_clusters, 1.0 / num_clusters)
+    cluster_index, num_clusters = encode_cluster_labels(clusters)
     out = np.empty((num_resamples, numerators.shape[0]), dtype=np.float64)
-    for start in range(0, num_resamples, chunk_size):
-        size = min(chunk_size, num_resamples - start)
-        cluster_counts = rng.multinomial(num_clusters, probabilities, size=size).astype(np.float64)
-        counts = cluster_counts[
-            :, cluster_index
-        ]  # (size, n): 各単位の重み = そのクラスタの抽出回数
+    for start, counts in iter_bootstrap_weight_chunks(
+        num_clusters, num_resamples, seed, chunk_size, unit_cluster_index=cluster_index
+    ):
+        size = counts.shape[0]  # counts: (size, n)。各単位の重み = そのクラスタの抽出回数
         out[start : start + size] = (counts @ numerators.T) / (counts @ denominators)[:, None]
     return out[:, 0] if squeeze else out
 
 
 def compute_normalized_entropy(fractions: Sequence[float]) -> float:
-    """割合の分布のエントロピーを、一様分布のエントロピー log(n) で割った値を返す(022)。
+    """割合の分布のエントロピーを、一様分布のエントロピー log(n) で割った値を返す。
 
     H(f) / log(n)、H(f) = -sum_i f_i log f_i(f_i = 0 の項は 0 とする)。一様なら 1、1 つの
     要素に集中していれば 0 になる。MoE(Mixture of Experts)のエキスパートへの負荷の偏りの
     指標に使う。
+
+    導入: 022。
 
     Args:
         fractions: 長さ n の非負の値(和が 1 でなければ、和で割って正規化する)。n = 1 の
@@ -1022,10 +1161,12 @@ def compute_normalized_entropy(fractions: Sequence[float]) -> float:
 
 def compute_normalized_mutual_information(contingency: np.ndarray) -> float:
     """分割表(行: 変数 X の値、列: 変数 Y の値、要素: 個数)から、相互情報量 I(X; Y) を
-    min(H(X), H(Y)) で割った値を返す(022)。
+    min(H(X), H(Y)) で割った値を返す。
 
     X と Y が独立なら 0、一方が他方の関数であれば 1 になる。H(X)・H(Y) のどちらかが 0
     (どちらかの変数が 1 つの値しか取らない)の場合は 0.0 を返す。
+
+    導入: 022。
 
     Args:
         contingency: 形状 ``(n_x, n_y)`` の非負の個数。

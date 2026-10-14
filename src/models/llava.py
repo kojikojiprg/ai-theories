@@ -59,10 +59,15 @@ def vision_patch_features(vision: VisionTransformer, images: Tensor, num_blocks:
     除く。
     画像 encoder は凍結して使うので、勾配を計算しない。
 
+    導入: 021。
+
     Args:
         vision: 019 の ``VisionTransformer``。
         images: 形状 ``(B, C, H, W)`` の float(020 と同じ正規化済みのもの)。
         num_blocks: 通すブロックの数(1 以上 L 以下)。
+
+    Returns:
+        形状 ``(B, N, d_v)`` のパッチトークン(勾配なし)。
     """
     if not 1 <= num_blocks <= len(vision.blocks):
         raise ValueError(f"num_blocks は 1 以上 {len(vision.blocks)} 以下: {num_blocks}")
@@ -74,6 +79,8 @@ def vision_patch_features(vision: VisionTransformer, images: Tensor, num_blocks:
 
 class VisualProjection(nn.Module):
     """視覚特徴を言語モデルの埋め込み空間に写す projection 層。
+
+    導入: 021。
 
     Args:
         in_features: 画像 encoder の隠れ次元 d_v。
@@ -111,6 +118,18 @@ def language_model_hidden_states(
 
     ``GPTLanguageModel.forward()`` の計算のうち、トークン埋め込みの後から最終正規化層までを
     同じ手順で行う(因果マスクは ``kv_cache`` が空のときだけ作る。``forward()`` と同じ規則)。
+
+    導入: 021。
+
+    Args:
+        model: 言語モデル(``GPTLanguageModel``)。
+        embeddings: 形状 ``(B, S, d)`` の埋め込みの列(視覚トークンとテキストの埋め込みを連結
+            したもの)。
+        positions: 位置エンコーディングに渡す位置の番号(``None`` なら既定の連番)。
+        kv_cache: KV キャッシュ(``None`` ならキャッシュなし)。
+
+    Returns:
+        最終正規化層の後の隠れ状態 ``(B, S, d)``。
     """
     _, seq_len, _ = embeddings.shape
     cache_is_empty = kv_cache is None or kv_cache.length == 0
@@ -133,6 +152,8 @@ class LlavaStyleModel(nn.Module):
     画像 encoder は凍結するので、パッチ特徴(``vision_patch_features()`` の出力)は画像ごとに
     一度だけ計算して再利用できる。本クラスは、その特徴から視覚トークンを作り、テキストの
     トークン埋め込みの枠に差し込んで言語モデルに通す。
+
+    導入: 021。
 
     Args:
         language_model: 008 の ``GPTLanguageModel``(LoRA を掛けたものでもよい)。
@@ -214,6 +235,8 @@ def greedy_generate_with_visual_tokens(
     止める)。
     prefill だけを埋め込みの列から行い(視覚トークンを含む)、decode の各ステップは生成したトークンの
     ID から ``GPTLanguageModel.forward()`` で行う。
+
+    導入: 021。
 
     Args:
         model: ``LlavaStyleModel``。

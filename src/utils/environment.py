@@ -85,6 +85,8 @@ def _select_device_type() -> str:
 def describe_execution_environment(device: Any = None) -> dict[str, Any]:
     """実行環境を辞書として返す。どの項目も、取得に失敗しても例外を送出しない。
 
+    導入: 014。
+
     Args:
         device: ノートブックで使用するデバイス(``torch.device`` または文字列)。
             ``None`` の場合は CUDA → MPS → CPU の優先順位で利用可能なものを選ぶ。
@@ -208,8 +210,13 @@ def _format_value(value: Any) -> str:
 def print_execution_environment(device: Any = None) -> dict[str, Any]:
     """実行環境を 1 項目 1 行で印字し、``describe_execution_environment()`` と同じ辞書を返す。
 
+    導入: 014。
+
     Args:
         device: ``describe_execution_environment()`` と同じ。
+
+    Returns:
+        ``describe_execution_environment()`` と同じ辞書。
     """
     environment = describe_execution_environment(device)
     width = max(_display_width(label) for label in _LABELS.values())
@@ -243,7 +250,16 @@ _REQUIREMENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def normalize_distribution_name(name: str) -> str:
-    """PEP 503 の正規化: 小文字にし、``-``・``_``・``.`` の連続を 1 つの ``-`` にする。"""
+    """PEP 503 の正規化: 小文字にし、``-``・``_``・``.`` の連続を 1 つの ``-`` にする。
+
+    導入: 017。
+
+    Args:
+        name: 配布物の名前。
+
+    Returns:
+        正規化した名前。
+    """
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
@@ -254,6 +270,14 @@ def read_requirement_names(path: str | Path) -> set[str]:
     extras(``[...]``)・版の指定を取り除いた先頭の名前を取る。``uv export`` の出力は推移的な依存も
     含み、同じ配布物が環境マーカーの違いで複数行に現れることがある(名前の集合なので 1 つに
     まとまる)。
+
+    導入: 017。
+
+    Args:
+        path: ``requirements.txt`` のパス。
+
+    Returns:
+        正規化した配布物の名前の集合。
     """
     names: set[str] = set()
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -278,6 +302,14 @@ def normalize_version_for_comparison(version: str) -> str:
     - ``+`` より前の部分を小文字にし、``.`` で区切った各要素のうち数字のみから成るものは先頭の 0 を
       取り除く(``"07"`` は ``"7"``、``"0"`` は ``"0"`` のまま)。数字以外を含む要素(``0rc1``・
       ``post0`` など)は変えない。
+
+    導入: 017。
+
+    Args:
+        version: 版の文字列。
+
+    Returns:
+        比べるために正規化した版の文字列。
     """
     version = version.strip()
     if version[:1] in ("v", "V"):
@@ -323,6 +355,8 @@ def check_preloaded_package_versions(
 
     ``requirements_path`` が読めない(または ``None``)の場合は、例外で止めずに ``required`` の
     配布物のみを検査し、その旨を印字する。
+
+    導入: 017。
 
     Args:
         modules: 読み込み済みのモジュールの辞書(既定は ``sys.modules``。確認用に差し替えられる)。

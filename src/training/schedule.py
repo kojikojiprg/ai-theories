@@ -56,6 +56,8 @@ def compute_warmup_cosine_learning_rate(
     cosine decay に入る(``progress`` の分母の ``total_steps - warmup_steps`` が
     ``total_steps`` に一致する)。
 
+    導入: 007。
+
     Args:
         step: 現在のステップ番号(1-indexed)。
         warmup_steps: 線形 warmup に使うステップ数(0 以上)。

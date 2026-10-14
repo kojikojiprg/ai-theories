@@ -78,6 +78,14 @@ def try_decode_byte_level_symbol(symbol: str) -> str | None:
     005 の ``compute_character_coverage``(``src/utils/statistics.py``)で、
     バイトレベル語彙のある要素が特定の 1 文字を単一トークンとして表現できているかを
     判定するために使う。
+
+    導入: 005。
+
+    Args:
+        symbol: バイトレベル BPE の語彙の要素(1 シンボル)。
+
+    Returns:
+        デコードした文字列(失敗したら ``None``)。
     """
     try:
         byte_values = bytes(_UNICODE_TO_BYTE[ch] for ch in symbol)
@@ -133,6 +141,8 @@ def pretokenize(
     """事前分割(pre-tokenization)。BPE のマージはチャンクの内部でのみ行われ、
     チャンクをまたいでは行われない。
 
+    導入: 005。
+
     Args:
         text: 分割対象のテキスト。
         chunk_split_mode:
@@ -160,6 +170,9 @@ def pretokenize(
             対して超線形な BPE の学習・符号化コストが爆発しうる。この上限は
             そのコストの上限を抑えるための計算量対策であり、既定値 ``None``
             (上限なし)では 005 と完全に同一の結果を返す。
+
+    Returns:
+        チャンクのリスト(連結すると元のテキストになる)。
     """
     if chunk_split_mode == "whitespace":
         chunks = _WHITESPACE_CHUNK_RE.findall(text)
@@ -207,6 +220,8 @@ class BPETokenizer:
     符号化(encoding)は学習で得たマージ規則を **学習順に** 適用する。学習
     (``learn_bpe``)は頻度に基づき次のマージ規則を毎回選び直すのに対し、符号化は
     既に確定した規則列を順番に適用するだけであり、学習と符号化は非対称な処理である。
+
+    導入: 005。
 
     Attributes:
         merges: 学習順のマージ規則のリスト(タプル ``(s1, s2)`` の列)。
@@ -331,6 +346,8 @@ def learn_bpe(
     変化したチャンクのみ差分更新する(``pair_index`` によって「どのチャンクが
     どのペアを含むか」を追跡する)。
 
+    導入: 005。
+
     Args:
         text: 学習コーパス全体。
         vocab_size: 目標語彙サイズ V(初期語彙 + マージで生成されるシンボルの
@@ -415,6 +432,12 @@ class BPEIDTokenizer:
     ``BPETokenizer`` をラップする場合は、``sorted(bpe_tokenizer.vocab)`` から通し番号を
     振った辞書を渡せば 006・008 と同一の対応になる(``learn_bpe`` の
     タイブレーク規則により ``vocab`` の内容が同じであれば常に同一の辞書になる)。
+
+    導入: 006。
+
+    Args:
+        bpe_tokenizer: ラップする ``BPETokenizer``。
+        symbol_to_id: シンボル -> 整数 ID の対応。
     """
 
     def __init__(self, bpe_tokenizer: BPETokenizer, symbol_to_id: dict[str, int]) -> None:
@@ -438,6 +461,12 @@ def save_bpe_id_tokenizer_json(tokenizer: BPEIDTokenizer, path: str | Path) -> N
     006・008 がアップロード処理内で直接書き出していたスキーマ(``merges``・``vocab``・
     ``byte_level``・``chunk_split_mode``・``max_chunk_bytes``・``symbol_to_id``)を
     そのまま踏襲する。
+
+    導入: 006。
+
+    Args:
+        tokenizer: 保存する ``BPEIDTokenizer``。
+        path: 書き出す JSON のパス(親ディレクトリは作る)。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -456,6 +485,14 @@ def save_bpe_id_tokenizer_json(tokenizer: BPEIDTokenizer, path: str | Path) -> N
 def load_bpe_id_tokenizer_json(path: str | Path) -> BPEIDTokenizer:
     """``save_bpe_id_tokenizer_json()``(または 006・008 のアップロード処理)が
     書き出した tokenizer.json を読み込み、``BPEIDTokenizer``を再構築する。
+
+    導入: 015。
+
+    Args:
+        path: 読み込む tokenizer.json のパス。
+
+    Returns:
+        再構築した ``BPEIDTokenizer``。
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     bpe = BPETokenizer(
@@ -481,6 +518,8 @@ def load_bpe_id_tokenizer_from_hub(
 
     009 の``load_tokenizer_from_hub_or_retrain()``を一般化したもの(リポジトリ ID・
     ファイル名をハードコードせず引数化し、複数のリポジトリから取得できるようにした)。
+
+    導入: 008。
 
     Args:
         repo_id: 取得元の Hugging Face Hub リポジトリ ID
@@ -530,6 +569,14 @@ def upload_tokenizer_artifact_to_hub(
     そのままアップロードできる)。呼び出し側(``scripts/promote_canonical_tokenizers.py``)
     が``DRY_RUN``・``IN_COLAB``のガードを行った上でのみ呼び出すこと。トークンの取得・
     環境変数への設定はここでは行わない(呼び出し側が用意して渡す)。
+
+    導入: 006。
+
+    Args:
+        repo_id: モデルリポジトリの ID。
+        tokenizer_json_path: アップロードする tokenizer.json のパス。
+        model_card_text: モデルカード(README.md)の本文。
+        token: Hugging Face のトークン(呼び出し側が用意する)。
     """
     from huggingface_hub import HfApi
 
@@ -557,6 +604,8 @@ def viterbi_segment(text: str, vocab: dict[str, float]) -> list[str]:
     (``P(x) = Π_i p(x_i)`` の対数)、最尤分割は「対数確率の和が最大になる分割」を
     求める問題になる。文字位置を頂点、語彙に含まれる部分語を辺とする有向非巡回
     グラフ(分割格子、lattice)の上で、動的計画法(Viterbi)により最良経路を求める。
+
+    導入: 005。
 
     Args:
         text: 分割対象の文字列。SentencePiece の内部表現と揃えるため、呼び出し側で
@@ -611,6 +660,8 @@ class UnigramTokenizer:
     sentencepiece 自身の分割結果と比較することで実装の正しさを検証する
     (005 の実装方針・実験5を参照)。
 
+    導入: 005。
+
     Attributes:
         processor: 学習済み sentencepiece の ``SentencePieceProcessor``。
         vocab: ``{部分語: 対数確率}`` の辞書(特殊トークンを除く)。
@@ -654,6 +705,8 @@ def train_unigram_model(
     実装に委ねる。``normalization_rule_name="identity"`` を指定して NFKC 正規化などを
     無効化し、``UnigramTokenizer.normalize`` による手動の正規化と厳密に一致させる
     (実験5で自作の Viterbi 分割と sentencepiece 自身の分割を公平に比較するため)。
+
+    導入: 005。
 
     Args:
         text: 学習コーパス。

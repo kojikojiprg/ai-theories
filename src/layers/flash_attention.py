@@ -64,6 +64,17 @@ def key_block_end(query_block_end: int, sequence_length_key: int, causal: bool) 
 
     因果マスクでは、ブロック内の最大の Query の位置 ``i1 - 1`` より後ろの Key は全て隠れるので、
     Key のブロックのループをここで打ち切る(完全に隠れるブロックを飛ばす)。
+
+    導入: 014。
+
+    Args:
+        query_block_end: Query のブロックの終端 ``i1``(この位置を含まない)。
+        sequence_length_key: Key の系列長。
+        causal: 因果マスクを使うか。
+
+    Returns:
+        Key のブロックのループを打ち切る位置(この位置を含まない)。因果マスクなら
+        ``min(i1, sequence_length_key)``、そうでなければ ``sequence_length_key``。
     """
     if causal:
         return min(query_block_end, sequence_length_key)
@@ -75,6 +86,16 @@ def query_block_start(key_block_begin: int, block_size_query: int, causal: bool)
 
     因果マスクでは、Query のブロック ``[i0, i1)`` が Key の位置 ``j0`` を参照するのは
     ``i1 - 1 >= j0`` のときだけなので、それより前の Query のブロックを飛ばす。
+
+    導入: 014。
+
+    Args:
+        key_block_begin: Key のブロックの開始位置 ``j0``。
+        block_size_query: Query のブロックの大きさ。
+        causal: 因果マスクを使うか。
+
+    Returns:
+        この Key のブロックを参照しうる最初の Query のブロックの開始位置。因果マスクでなければ 0。
     """
     if causal:
         return (key_block_begin // block_size_query) * block_size_query
@@ -92,6 +113,18 @@ def count_block_pairs(
 
     ``flash_attention_forward()`` と同じ規則(``key_block_end()``)で数える。因果マスクで
     飛ばしたブロックの割合は ``1 - processed / total`` になる。
+
+    導入: 014。
+
+    Args:
+        sequence_length_query: Query の系列長。
+        sequence_length_key: Key の系列長。
+        block_size_query: Query のブロックの大きさ。
+        block_size_key: Key のブロックの大きさ。
+        causal: 因果マスクを使うか。
+
+    Returns:
+        ``(計算するブロックの組の数, 全ブロックの組の数)``。
     """
     _check_block_sizes(block_size_query, block_size_key)
     num_key_blocks = math.ceil(sequence_length_key / block_size_key)
@@ -139,6 +172,8 @@ def flash_attention_forward(
         m_i = m_new
 
     と更新し、最後に O_i = diag(ell_i)^{-1} O~_i、L_i = m_i + log(ell_i) とする。
+
+    導入: 014。
 
     Args:
         query: 形状 ``(batch, heads, N_q, d)``。
@@ -240,6 +275,8 @@ def flash_attention_backward(
 
     を累積する(dK_j・dV_j はブロック j の間 SRAM に保持し、dQ_i は HBM 上で足し込む)。
 
+    導入: 014。
+
     Args:
         query, key, value: 順伝播の入力。
         output: 順伝播の出力 O。
@@ -306,6 +343,8 @@ class FlashAttentionFunction(torch.autograd.Function):
 
     使い方: ``FlashAttentionFunction.apply(query, key, value, block_size_query, block_size_key,
     causal, scale)``(``apply`` はキーワード引数を受け付けないので、位置引数で渡す)。
+
+    導入: 014。
     """
 
     @staticmethod

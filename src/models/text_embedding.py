@@ -63,6 +63,16 @@ def compute_hidden_states(
     ``attention="causal"`` は ``GPTLanguageModel.forward()`` と同じ因果マスク、
     ``"bidirectional"`` はマスクなし。
     位置エンコーディング(RoPE)は、どちらも位置 0 から ``S - 1`` までの連番で与える。
+
+    導入: 024。
+
+    Args:
+        model: 言語モデル(``GPTLanguageModel``)。
+        token_ids: 形状 ``(B, S)`` のトークン ID。
+        attention: ``"causal"`` または ``"bidirectional"``。
+
+    Returns:
+        最終正規化層の後の隠れ状態 ``(B, S, d)``。
     """
     if attention not in ATTENTION_MODES:
         raise ValueError(f"attention は {ATTENTION_MODES} のいずれか: {attention!r}")
@@ -84,6 +94,15 @@ def truncate_and_normalize(pooled: Tensor, dimension: int | None = None) -> Tens
     """正規化前のベクトルの先頭 ``dimension`` 次元を取り出して、L2 正規化する。
 
     ``dimension=None`` なら全次元。切り詰めた後に **再正規化する** (Kusupati et al.)。
+
+    導入: 024。
+
+    Args:
+        pooled: 形状 ``(..., d)`` の正規化前のベクトル。
+        dimension: 取り出す先頭の次元数(``None`` なら全次元)。
+
+    Returns:
+        L2 正規化した形状 ``(..., dimension)`` のテンソル。
     """
     if dimension is not None:
         pooled = pooled[..., :dimension]
@@ -92,6 +111,8 @@ def truncate_and_normalize(pooled: Tensor, dimension: int | None = None) -> Tens
 
 class TextEmbeddingModel(nn.Module):
     """小型 GPT による dual encoder の encoder(query と passage で重みを共有する)。
+
+    導入: 024。
 
     Args:
         backbone: 本体の ``GPTLanguageModel``(008 の重みを読み込んだもの、またはランダム初期化)。
@@ -146,6 +167,8 @@ def encode_tokens(
     positions: Sequence[int] | None = None,
 ) -> dict:
     """固定長のトークン列の集合を FP32 で符号化する(評価用、勾配なし)。
+
+    導入: 024。
 
     Args:
         model: 符号化するモデル(呼び出しの間 ``eval()`` にし、終わったら元の状態に戻す)。

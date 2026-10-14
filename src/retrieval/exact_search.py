@@ -45,6 +45,11 @@ class CostCounter:
 
     索引は種類の異なる計算(重心との比較・走査したベクトル・参照表の作成・表引きなど)を行うので、
     名前ごとに別々に数える。``snapshot()`` で現在の値の辞書を返し、``reset()`` で 0 に戻す。
+
+    導入: 025。
+
+    Args:
+        names: 最初から用意するカウンタの名前。
     """
 
     def __init__(self, names: Iterable[str] = ()) -> None:
@@ -73,6 +78,8 @@ def exact_search(
     counter: CostCounter | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """内積による全探索で、各 query の上位 ``k`` 件(内積の大きい順)を返す。
+
+    導入: 025。
 
     Args:
         queries: 形状 ``(Q, d)``(単位ベクトル)。
@@ -109,13 +116,10 @@ def exact_search(
     return ids, scores
 
 
-def squared_distance_from_similarity(similarity: Tensor | np.ndarray) -> Tensor | np.ndarray:
-    """単位ベクトルの内積から二乗ユークリッド距離 ``2 - 2 x^T y`` を求める。"""
-    return 2.0 - 2.0 * similarity
-
-
 def recall_against_ground_truth(returned: np.ndarray, ground_truth: np.ndarray) -> np.ndarray:
     """各 query の、返した近傍と正解(全探索の上位 ``k`` 件)の一致率(``|返した ∩ 正解| / k``)。
+
+    導入: 025。
 
     Args:
         returned: 形状 ``(Q, k)``。返した近傍の添字(``-1`` は「返せなかった」)。
@@ -140,10 +144,15 @@ def remove_excluded_and_truncate(
     passage が含まれていれば取り除く(含まれていなければ、先頭の ``k`` 件をそのまま使う)。
     全探索の``exact_search(..., excluded=...)`` と同じ候補の集合に揃えるための処理である。
 
+    導入: 025。
+
     Args:
         candidates: 形状 ``(Q, k + 1)``(近い順。足りない場合は ``-1`` で埋める)。
         excluded: 形状 ``(Q,)``。除くベクトルの添字(負の値は「除かない」)。``None`` なら除かない。
         k: 返す件数。
+
+    Returns:
+        形状 ``(Q, k)`` の近傍の添字(足りない場合は ``-1`` で埋める)。
     """
     result = np.full((candidates.shape[0], k), -1, dtype=np.int64)
     for row in range(candidates.shape[0]):
