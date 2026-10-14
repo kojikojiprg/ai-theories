@@ -13,6 +13,11 @@
 5. 学習後の、gradient clipping が発動したステップの判定(``flag_clipped_steps()``)。
 
 各関数は、統合の前のループの中の記述と同じ演算を同じ順序で行う。
+
+検証の範囲: CUDA・FP16 の autocast(自動混合精度)・動的損失スケーリングの経路は、CPU の学習ループでは
+通らない。この経路のうち ``step_optimizers_and_update_loss_scale()`` は、統合の前のコードを写した
+参照実装との比較で確かめた(``scripts/test_src_refactor_equivalence.py``。CPU で、損失スケーリングの
+あり・なしと、非有限の勾配のあり・なしを比べた)。実際の旧コードとの GPU での比較はしていない。
 """
 
 from __future__ import annotations
