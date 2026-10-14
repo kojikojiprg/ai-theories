@@ -247,6 +247,63 @@ def _eligible_window_positions(
     return np.concatenate(found) if found else np.zeros(0, dtype=np.int64)
 
 
+def pairable_articles(
+    stream: np.ndarray,
+    article_starts: np.ndarray,
+    article_token_counts: np.ndarray,
+    candidate: np.ndarray,
+    passage_length: int,
+    tables: SentenceTables,
+    min_query_tokens: int,
+    max_removed_tokens: int,
+    chunk: int = 256,
+) -> np.ndarray:
+    """記事ごとに、重ならない対象の窓の組(2 個)が取れるかを厳密に判定する。
+
+    対象の窓の開始位置の最小値と最大値は、それ自身が組をなす中で最も離れている。したがって、
+    組が取れる必要十分条件は ``最大値 - 最小値 >= passage_length`` である。最小値は記事の先頭から、
+    最大値は末尾から、``chunk`` 個ずつの窓を見て最初に見つかった対象の窓で決める(多くの記事は
+    最初の区間で見つかる)。
+
+    Args:
+        candidate: 形状 ``(記事の数,)`` の真偽。判定する記事(偽の記事は偽を返す)。
+
+    Returns:
+        形状 ``(記事の数,)`` の真偽。
+    """
+    result = np.zeros(len(article_token_counts), dtype=bool)
+    offsets = np.arange(passage_length)[None, :]
+
+    def first_eligible(article: int, from_left: bool) -> int:
+        total = int(article_token_counts[article]) - passage_length + 1
+        base = int(article_starts[article])
+        for first in range(0, total, chunk):
+            block = np.arange(first, min(first + chunk, total))
+            if not from_left:
+                block = total - 1 - block  # 末尾から降順
+            candidate_windows = stream[base + block[:, None] + offsets].astype(np.int64)
+            valid, _, _ = choose_cloze_sentence(
+                candidate_windows,
+                tables,
+                np.zeros(len(block)),
+                min_query_tokens,
+                max_removed_tokens,
+            )
+            if valid.any():
+                return int(block[valid.argmax()])
+        return -1
+
+    for article in np.nonzero(np.asarray(candidate))[0].tolist():
+        if int(article_token_counts[article]) < 2 * passage_length:
+            continue
+        low = first_eligible(article, True)
+        if low < 0:
+            continue
+        high = first_eligible(article, False)
+        result[article] = high - low >= passage_length
+    return result
+
+
 @dataclass
 class ClozePairBatches:
     """Inverse Cloze Task の学習の組(学習の前に全ステップぶんを作る)。
@@ -295,6 +352,7 @@ def sample_cloze_pair_batches(
     keep_probability: float,
     seed: int,
     max_attempts: int = 64,
+    eligible_cache: dict[int, np.ndarray] | None = None,
 ) -> ClozePairBatches:
     """学習の組を作る(決定的)。
 
@@ -319,6 +377,9 @@ def sample_cloze_pair_batches(
         passage_length, query_length, min_query_tokens, max_removed_tokens: 5 節のとおり。
         keep_probability: 抜いた文を文脈に残す確率(原論文は 0.1)。
         seed: 乱数シード。
+        max_attempts: 窓の組を引き直す回数の上限(尽きた記事は記事のすべての窓から選ぶ)。
+        eligible_cache: 記事の添字から対象の窓の開始位置への辞書。渡すと、記事のすべての窓から選ぶ
+            処理の走査の結果を呼び出しをまたいで使い回す(結果は変わらない。時間だけが変わる)。
     """
     weights = np.asarray(article_weights, dtype=np.float64)
     counts = np.asarray(article_token_counts, dtype=np.int64)
@@ -382,7 +443,7 @@ def sample_cloze_pair_batches(
         pending = pending[~accepted]
     exhaustive = 0
     if len(pending):  # 対象の窓の組がまれな記事: 記事のすべての窓から、重ならない対象の窓の組を選ぶ
-        eligible_positions: dict[int, np.ndarray] = {}
+        eligible_positions = eligible_cache if eligible_cache is not None else {}
         for index in pending.tolist():
             article = int(flat_articles[index])
             if article not in eligible_positions:
@@ -396,23 +457,26 @@ def sample_cloze_pair_batches(
                     max_removed_tokens,
                 )
             eligible = eligible_positions[article]
-            chosen: list[int] = []
             if pair_count != 2:
                 raise NotImplementedError(
                     "記事のすべての窓から選ぶ処理は、1 つの記事あたり 2 組のときだけ"
                 )
-            for _ in range(10_000):  # 最初の窓を引き、重ならない相手がいる窓が出るまで引き直す
-                first = int(eligible[int(rng.integers(0, len(eligible)))]) if len(eligible) else -1
-                partners = (
-                    eligible[np.abs(eligible - first) >= passage_length] if first >= 0 else eligible
-                )
-                if len(partners):
-                    chosen = [first, int(partners[int(rng.integers(0, len(partners)))])]
-                    break
-            if len(chosen) < pair_count:
+            # 重ならない相手がいる窓(最小・最大の窓との距離で判定できる)の中から最初の窓を一様に選ぶ
+            has_partner = (
+                (eligible - eligible[:1] >= passage_length)
+                | (eligible[-1:] - eligible >= passage_length)
+                if len(eligible)
+                else np.zeros(0, dtype=bool)
+            )
+            firsts = eligible[has_partner]
+            if len(firsts) == 0:
                 raise RuntimeError(
                     f"記事 {article} から、重ならない対象の窓を {pair_count} 個取れない"
+                    "(pairable_articles() で重みを 0 にしておくこと)"
                 )
+            first = int(firsts[int(rng.integers(0, len(firsts)))])
+            partners = eligible[np.abs(eligible - first) >= passage_length]
+            chosen = [first, int(partners[int(rng.integers(0, len(partners)))])]
             candidate, valid, s, n = draw_valid(np.array([index]), np.array([chosen]))
             assert bool(valid.all())
             windows[index], window_start[index], start[index], length[index] = (
