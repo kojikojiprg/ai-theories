@@ -23,6 +23,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from src.retrieval.evaluation import RankingResult, rank_candidates
 from src.retrieval.reranking import RerankingResult, rank_reranked_candidates
 
 
@@ -118,3 +119,42 @@ def score_candidates_variable(
     finally:
         model.train(was_training)
     return scores.reshape(num_queries, k)
+
+
+@torch.no_grad()
+def rank_article_label(
+    query_embeddings: Tensor,
+    passage_embeddings: Tensor,
+    query_positions: np.ndarray,
+    passage_articles: np.ndarray,
+    chunk_size: int = 512,
+) -> RankingResult:
+    """同じ索引・同じ query で、関連のラベルを記事単位にした順位(024 と同じ定義)。
+
+    正解は、query と同じ記事の、query の元の passage 以外の passage。query の元の passage 自身は
+    候補から除く(正解でも不正解でもない)。順位は、最もスコアの高い正解の順位(同点は正解に不利)で、
+    Recall@k は上位 k 件に正解が 1 つ以上ある query の割合。
+
+    Args:
+        query_embeddings: 形状 ``(Q, d)``。
+        passage_embeddings: 形状 ``(P, d)``。
+        query_positions: 形状 ``(Q,)``。各 query の元の passage の、索引の中の位置。
+        passage_articles: 形状 ``(P,)``。索引の passage ごとの記事。
+    """
+    positions = np.asarray(query_positions)
+    articles = np.asarray(passage_articles)
+    pieces = []
+    for start in range(0, query_embeddings.size(0), chunk_size):
+        end = min(start + chunk_size, query_embeddings.size(0))
+        scores = query_embeddings[start:end].float() @ passage_embeddings.float().t()
+        pieces.append(
+            rank_candidates(
+                scores, articles[positions[start:end]], articles, positions[start:end], chunk_size
+            )
+        )
+    return RankingResult(
+        rank=np.concatenate([p.rank for p in pieces]),
+        ndcg_at_10=np.concatenate([p.ndcg_at_10 for p in pieces]),
+        num_positives=np.concatenate([p.num_positives for p in pieces]),
+        num_candidates=pieces[0].num_candidates,
+    )

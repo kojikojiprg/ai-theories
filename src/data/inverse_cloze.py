@@ -19,7 +19,9 @@ BPE)のトークンは、空白・改行を直後の語の先頭に付ける(例
 
 **Inverse Cloze Task の対象**: 窓の文が 2 つ以上あり、長さが ``[min_query_tokens,
 max_removed_tokens]`` の文が 1 つ
-以上ある窓。抜く文は、その範囲の文から一様に選ぶ。query はその文の先頭 ``query_length`` トークン
+以上ある窓。抜く文は、その範囲の文から一様に選ぶ(query の長さの上限以内に収まる文があれば、
+その中から選び、収まる文がない窓だけ長い文を選んで先頭を切り詰める)。query はその文の先頭
+``query_length`` トークン
 (抜く範囲は文の全体)。文脈は窓から文を抜いた残り(長さは窓の長さ - 文の長さで、可変)。可変長の
 入力は、**右側をパディングして長さの配列を添える**(因果マスクのもとでは、右側のパディングは
 手前の位置の出力に影響しない)。
@@ -131,6 +133,7 @@ def choose_cloze_sentence(
     uniform: np.ndarray,
     min_query_tokens: int,
     max_removed_tokens: int,
+    preferred_max_tokens: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """窓ごとに、抜く文を一様に選ぶ。
 
@@ -140,6 +143,10 @@ def choose_cloze_sentence(
         uniform: 形状 ``(M,)``。``[0, 1)`` の乱数(選ぶ文の決定に使う)。
         min_query_tokens: 抜く文の最小の長さ。
         max_removed_tokens: 抜く文の最大の長さ(文脈が短くなりすぎないように)。
+        preferred_max_tokens: 指定すると、この長さ以下の文(query の長さの上限以内に収まる文)が
+            窓にあれば、その中から選ぶ。収まる文がない窓だけ、より長い文(``max_removed_tokens``
+            以下)
+            から選ぶ(その query は先頭を切り詰める)。``None`` なら優先しない。
 
     Returns:
         ``(valid, start, length)``。``valid`` は形状 ``(M,)``(対象か)。``start``・``length`` は
@@ -150,8 +157,11 @@ def choose_cloze_sentence(
         is_start & (sentence_length >= min_query_tokens) & (sentence_length <= max_removed_tokens)
     )
     eligible_start &= (num_sentences >= 2)[:, None]
+    valid = eligible_start.any(axis=1)
+    if preferred_max_tokens is not None:
+        preferred = eligible_start & (sentence_length <= preferred_max_tokens)
+        eligible_start = np.where(preferred.any(axis=1)[:, None], preferred, eligible_start)
     count = eligible_start.sum(axis=1)
-    valid = count >= 1
     pick = np.minimum((np.asarray(uniform) * count).astype(np.int64), np.maximum(count - 1, 0))
     cumulative = np.cumsum(eligible_start, axis=1)
     chosen = eligible_start & (cumulative == (pick + 1)[:, None])
@@ -238,34 +248,46 @@ def _eligible_window_positions(
 
 
 @dataclass
-class ClozeBatches:
+class ClozePairBatches:
     """Inverse Cloze Task の学習の組(学習の前に全ステップぶんを作る)。
+
+    1 つのバッチは ``articles_per_batch`` 個の記事 x ``pairs_per_article`` 組で、同じ記事の組は
+    バッチの中で隣り合う(位置 ``pairs_per_article * k + j``)。同じ記事の組の窓は互いに重ならない。
 
     Attributes:
         query_tokens: 形状 ``(T, N, L_q)``(右側を 0 でパディング)。
         query_lengths: 形状 ``(T, N)``。
-        passage_tokens: 形状 ``(T, N, L_p)``(文脈。右側を 0 でパディング)。
-        passage_lengths: 形状 ``(T, N)``。
+        context_tokens: 形状 ``(T, N, L_p)``(文脈。右側を 0 でパディング)。
+        context_lengths: 形状 ``(T, N)``。
+        articles: 形状 ``(T, N)``。組の記事の添字。
         kept: 形状 ``(T, N)``。文を文脈に残した組か。
-        num_attempts: 対象の窓が見つかるまでに引いた窓の数の合計(Inverse Cloze Task
-        の対象でない窓を引いた分を含む)。
+        truncated: 形状 ``(T, N)``。抜いた文が query の長さの上限を超え、先頭で切った組か。
+        window_starts: 形状 ``(T, N)``。窓の、記事の先頭からの開始位置。
+        num_attempts: 対象の窓の組が見つかるまでに引いた窓の組の数の合計。
+        num_exhaustive: 引き直しの上限に達し、記事のすべての窓から選んだ組の数。
     """
 
     query_tokens: np.ndarray
     query_lengths: np.ndarray
-    passage_tokens: np.ndarray
-    passage_lengths: np.ndarray
+    context_tokens: np.ndarray
+    context_lengths: np.ndarray
+    articles: np.ndarray
     kept: np.ndarray
+    truncated: np.ndarray
+    window_starts: np.ndarray
     num_attempts: int
     num_exhaustive: int = 0
 
 
-def sample_cloze_batches(
+def sample_cloze_pair_batches(
     stream: np.ndarray,
     article_starts: np.ndarray,
     article_token_counts: np.ndarray,
-    articles: np.ndarray,
+    article_weights: np.ndarray,
     tables: SentenceTables,
+    num_steps: int,
+    articles_per_batch: int,
+    pairs_per_article: int,
     passage_length: int,
     query_length: int,
     min_query_tokens: int,
@@ -273,58 +295,93 @@ def sample_cloze_batches(
     keep_probability: float,
     seed: int,
     max_attempts: int = 64,
-) -> ClozeBatches:
+) -> ClozePairBatches:
     """学習の組を作る(決定的)。
 
-    記事の並びは呼び出し側が与える(``articles``、形状 ``(T, N)``。024 の学習の組の記事の並びと
-    揃えるため)。各記事から、窓(長さ ``passage_length``)を一様な位置で引き、Inverse Cloze Task
-    の対象でなければ
-    引き直す(``max_attempts`` 回まで。尽きたらエラー)。対象の窓から抜く文を一様に選び、確率
-    ``keep_probability`` でその文を文脈に残す(文脈は窓そのもの)。
+    各ステップで、重みに比例する確率で ``articles_per_batch`` 個の記事を非復元抽出する。各記事から、
+    **互いに重ならない** ``pairs_per_article`` 個の窓(長さ ``passage_length``)を一様な位置で引く。
+    窓は Inverse Cloze Task の対象でなければ引き直す(``max_attempts`` 回まで。
+    尽きたら記事のすべての窓から選ぶ)。
+    対象の窓から抜く文を選び(``query_length`` 以内に収まる文を優先する)、確率
+    ``keep_probability`` で
+    その文を文脈に残す(文脈は窓そのもの)。
 
     Args:
         stream: 学習用の記事を連結したトークン ID(1 次元)。
         article_starts: 各記事の ``stream`` での先頭の位置。
         article_token_counts: 各記事のトークン数。
-        articles: 形状 ``(T, N)``。記事の添字。
+        article_weights: 記事を選ぶ重み(重みが 0 の記事は選ばない。選ばれる記事は
+            ``pairs_per_article * passage_length`` トークン以上を要する)。
         tables: 文の分割の表。
-        passage_length, query_length, min_query_tokens, max_removed_tokens: 上の説明のとおり。
+        num_steps: ``T``。
+        articles_per_batch: 1 バッチの記事の数。
+        pairs_per_article: 1 つの記事あたりの組の数(同じバッチに入る)。
+        passage_length, query_length, min_query_tokens, max_removed_tokens: 5 節のとおり。
         keep_probability: 抜いた文を文脈に残す確率(原論文は 0.1)。
         seed: 乱数シード。
     """
-    num_steps, batch = articles.shape
+    weights = np.asarray(article_weights, dtype=np.float64)
+    counts = np.asarray(article_token_counts, dtype=np.int64)
+    if (counts[weights > 0] < pairs_per_article * passage_length).any():
+        raise ValueError("重みが正の記事に、窓を重ならずに取れない短い記事が含まれている")
+    if int((weights > 0).sum()) < articles_per_batch:
+        raise ValueError("組を作れる記事の数がバッチの記事の数より少ない")
+    rng = np.random.default_rng(seed)
+    probabilities = weights / weights.sum()
+    articles = np.stack(
+        [
+            rng.choice(len(counts), size=articles_per_batch, replace=False, p=probabilities)
+            for _ in range(num_steps)
+        ]
+    )
     flat_articles = articles.reshape(-1)
     count = flat_articles.size
-    rng = np.random.default_rng(seed)
-    window_start = np.zeros(count, dtype=np.int64)
-    start = np.zeros(count, dtype=np.int64)
-    length = np.zeros(count, dtype=np.int64)
-    windows = np.zeros((count, passage_length), dtype=np.int64)
-    pending = np.arange(count)
+    pair_count = pairs_per_article
+    window_start = np.zeros((count, pair_count), dtype=np.int64)
+    windows = np.zeros((count, pair_count, passage_length), dtype=np.int64)
+    start = np.zeros((count, pair_count), dtype=np.int64)
+    length = np.zeros((count, pair_count), dtype=np.int64)
     offsets = np.arange(passage_length)[None, :]
+
+    def draw_valid(article_index: np.ndarray, positions: np.ndarray):
+        # positions: (len(article_index), pair_count)。窓が対象か、選んだ文
+        flat_positions = positions.reshape(-1)
+        flat_base = np.repeat(article_starts[flat_articles[article_index]], pair_count)
+        candidate = stream[(flat_base + flat_positions)[:, None] + offsets].astype(np.int64)
+        valid, s, n = choose_cloze_sentence(
+            candidate,
+            tables,
+            rng.random(len(candidate)),
+            min_query_tokens,
+            max_removed_tokens,
+            query_length,
+        )
+        shape = (len(article_index), pair_count)
+        return (
+            candidate.reshape(*shape, -1),
+            valid.reshape(shape),
+            s.reshape(shape),
+            n.reshape(shape),
+        )
+
+    pending = np.arange(count)
     attempts = 0
     for _ in range(max_attempts):
         if len(pending) == 0:
             break
         attempts += len(pending)
-        slack = article_token_counts[flat_articles[pending]] - passage_length
-        if (slack < 0).any():
-            raise ValueError("窓より短い記事が含まれている")
-        positions = (rng.random(len(pending)) * (slack + 1)).astype(np.int64)
-        base = article_starts[flat_articles[pending]] + positions
-        candidate = stream[base[:, None] + offsets].astype(np.int64)
-        valid, s, n = choose_cloze_sentence(
-            candidate, tables, rng.random(len(pending)), min_query_tokens, max_removed_tokens
-        )
-        accepted = pending[valid]
-        windows[accepted] = candidate[valid]
-        window_start[accepted] = positions[valid]
-        start[accepted], length[accepted] = s[valid], n[valid]
-        pending = pending[~valid]
+        slack = counts[flat_articles[pending]] - passage_length
+        positions = (rng.random((len(pending), pair_count)) * (slack + 1)[:, None]).astype(np.int64)
+        ordered = np.sort(positions, axis=1)
+        separated = (np.diff(ordered, axis=1) >= passage_length).all(axis=1)
+        candidate, valid, s, n = draw_valid(pending, positions)
+        accepted = separated & valid.all(axis=1)
+        index = pending[accepted]
+        windows[index], window_start[index] = candidate[accepted], positions[accepted]
+        start[index], length[index] = s[accepted], n[accepted]
+        pending = pending[~accepted]
     exhaustive = 0
-    if len(
-        pending
-    ):  # 対象の窓がまれな記事(座標の列挙など): 記事のすべての窓を調べ、対象の窓から一様に引く
+    if len(pending):  # 対象の窓の組がまれな記事: 記事のすべての窓から、重ならない対象の窓の組を選ぶ
         eligible_positions: dict[int, np.ndarray] = {}
         for index in pending.tolist():
             article = int(flat_articles[index])
@@ -338,35 +395,50 @@ def sample_cloze_batches(
                     min_query_tokens,
                     max_removed_tokens,
                 )
-            positions = eligible_positions[article]
-            if len(positions) == 0:
-                raise RuntimeError(f"記事 {article} に Inverse Cloze Task の対象の窓がない")
-            position = int(positions[int(rng.integers(0, len(positions)))])
-            candidate = stream[
-                article_starts[article] + position + np.arange(passage_length)
-            ].astype(np.int64)[None, :]
-            valid, s_, n_ = choose_cloze_sentence(
-                candidate, tables, rng.random(1), min_query_tokens, max_removed_tokens
-            )
-            assert bool(valid[0])
+            eligible = eligible_positions[article]
+            chosen: list[int] = []
+            if pair_count != 2:
+                raise NotImplementedError(
+                    "記事のすべての窓から選ぶ処理は、1 つの記事あたり 2 組のときだけ"
+                )
+            for _ in range(10_000):  # 最初の窓を引き、重ならない相手がいる窓が出るまで引き直す
+                first = int(eligible[int(rng.integers(0, len(eligible)))]) if len(eligible) else -1
+                partners = (
+                    eligible[np.abs(eligible - first) >= passage_length] if first >= 0 else eligible
+                )
+                if len(partners):
+                    chosen = [first, int(partners[int(rng.integers(0, len(partners)))])]
+                    break
+            if len(chosen) < pair_count:
+                raise RuntimeError(
+                    f"記事 {article} から、重ならない対象の窓を {pair_count} 個取れない"
+                )
+            candidate, valid, s, n = draw_valid(np.array([index]), np.array([chosen]))
+            assert bool(valid.all())
             windows[index], window_start[index], start[index], length[index] = (
                 candidate[0],
-                position,
-                s_[0],
-                n_[0],
+                chosen,
+                s[0],
+                n[0],
             )
             exhaustive += 1
-    kept = rng.random(count) < keep_probability
-    context, context_length = remove_span(windows, start, length)
-    context = np.where(kept[:, None], windows, context)
+    flat_windows = windows.reshape(-1, passage_length)
+    flat_start, flat_length = start.reshape(-1), length.reshape(-1)
+    kept = rng.random(flat_windows.shape[0]) < keep_probability
+    context, context_length = remove_span(flat_windows, flat_start, flat_length)
+    context = np.where(kept[:, None], flat_windows, context)
     context_length = np.where(kept, passage_length, context_length)
-    query, query_len = extract_span(windows, start, length, query_length)
-    return ClozeBatches(
+    query, query_len = extract_span(flat_windows, flat_start, flat_length, query_length)
+    batch = articles_per_batch * pair_count
+    return ClozePairBatches(
         query_tokens=query.reshape(num_steps, batch, query_length),
         query_lengths=query_len.reshape(num_steps, batch),
-        passage_tokens=context.reshape(num_steps, batch, passage_length),
-        passage_lengths=context_length.reshape(num_steps, batch),
+        context_tokens=context.reshape(num_steps, batch, passage_length),
+        context_lengths=context_length.reshape(num_steps, batch),
+        articles=np.repeat(articles, pair_count, axis=1),
         kept=kept.reshape(num_steps, batch),
+        truncated=(flat_length > query_length).reshape(num_steps, batch),
+        window_starts=window_start.reshape(num_steps, batch),
         num_attempts=attempts,
         num_exhaustive=exhaustive,
     )
@@ -416,7 +488,7 @@ def build_cloze_index(
     """
     uniform = splitmix64_uniform(seed, passage_articles, passage_windows)
     valid, start, length = choose_cloze_sentence(
-        passages, tables, uniform, min_query_tokens, max_removed_tokens
+        passages, tables, uniform, min_query_tokens, max_removed_tokens, query_length
     )
     _, _, num_sentences, _ = sentence_structure(passages, tables)
     index = np.nonzero(valid)[0]

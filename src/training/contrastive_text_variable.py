@@ -23,6 +23,7 @@ from collections.abc import Callable, Sequence
 import numpy as np
 import torch
 from torch import Tensor, nn
+from torch.nn import functional
 
 from src.models.text_embedding import TextEmbeddingModel, truncate_and_normalize
 from src.models.variable_length import pooled_with_lengths
@@ -34,6 +35,46 @@ from src.training.contrastive_text import info_nce_loss, matryoshka_representati
 from src.training.optimizer import AdamW
 from src.training.precision import DynamicLossScaler
 from src.training.schedule import compute_warmup_cosine_learning_rate
+
+
+def masked_info_nce_loss(
+    query_embeddings: Tensor, passage_embeddings: Tensor, temperature: float, ignore: Tensor
+) -> Tensor:
+    """in-batch negatives の InfoNCE(query -> passage の方向)で、``ignore`` が真の組を負例から除く。
+
+    ``ignore[i, j]`` が真なら、query ``i`` の候補から passage ``j`` を除く(対角は偽にする。
+    正例は残す)。
+    記事単位の定義では、同じ記事の他の組の passage は関連があるので、負例から除く。
+    """
+    logits = query_embeddings @ passage_embeddings.t() / temperature
+    logits = logits.masked_fill(ignore, float("-inf"))
+    targets = torch.arange(logits.size(0), device=logits.device)
+    return functional.cross_entropy(logits, targets)
+
+
+def masked_matryoshka_representation_loss(
+    pooled_queries: Tensor,
+    pooled_passages: Tensor,
+    dimensions: Sequence[int],
+    temperature: float,
+    ignore: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """``matryoshka_representation_loss()`` の各次元の項を ``masked_info_nce_loss()``
+    にしたもの。"""
+    weights = [1.0 / len(dimensions)] * len(dimensions)
+    per_dimension = torch.stack(
+        [
+            masked_info_nce_loss(
+                truncate_and_normalize(pooled_queries, m),
+                truncate_and_normalize(pooled_passages, m),
+                temperature,
+                ignore,
+            )
+            for m in dimensions
+        ]
+    )
+    weight_tensor = torch.tensor(weights, device=per_dimension.device, dtype=per_dimension.dtype)
+    return (weight_tensor * per_dimension).sum(), per_dimension.detach()
 
 
 def _synchronize(device: torch.device) -> None:
@@ -62,7 +103,12 @@ class VariableBatches:
         passage_tokens: np.ndarray,
         passage_lengths: np.ndarray,
         device: torch.device,
+        article_ids: np.ndarray | None = None,
+        mask_same_article: bool = False,
     ) -> None:
+        if mask_same_article and article_ids is None:
+            raise ValueError("mask_same_article には article_ids が要る")
+        self.mask_same_article = mask_same_article
         self.query_tokens = torch.as_tensor(query_tokens, device=device)
         self.passage_tokens = torch.as_tensor(passage_tokens, device=device)
         self.query_lengths_cpu = np.asarray(query_lengths, dtype=np.int64)
@@ -76,7 +122,29 @@ class VariableBatches:
         self._passage_max = self.passage_lengths_cpu.max(axis=1)
         self._query_full = (self.query_lengths_cpu == self.query_width).all(axis=1)
         self._passage_full = (self.passage_lengths_cpu == self.passage_width).all(axis=1)
-        self.digest = batches_digest(query_tokens, query_lengths, passage_tokens, passage_lengths)
+        self.ignore_masks: Tensor | None = None
+        extra = [np.zeros(1)]
+        if mask_same_article:
+            ids = torch.as_tensor(np.asarray(article_ids), device=device)
+            same = ids[:, :, None] == ids[:, None, :]
+            eye = torch.eye(self.batch_size, dtype=torch.bool, device=device)[None]
+            self.ignore_masks = same & ~eye
+            extra = [np.asarray(article_ids), np.ones(1)]
+        self.digest = batches_digest(
+            query_tokens, query_lengths, passage_tokens, passage_lengths, *extra
+        )
+
+    def ignore(self, index: int) -> Tensor | None:
+        """ステップ ``index`` で、負例から除く組の真偽 ``(N, N)``(除かないなら ``None``)。"""
+        return None if self.ignore_masks is None else self.ignore_masks[index]
+
+    def negatives_per_row(self) -> np.ndarray:
+        """ステップごとの、1 行あたりの負例の数の平均(同じ記事の組を除いた後)。"""
+        if self.ignore_masks is None:
+            return np.full(self.num_steps, self.batch_size - 1, dtype=np.float64)
+        return (
+            (self.batch_size - 1 - self.ignore_masks.sum(dim=2).float().mean(dim=1)).cpu().numpy()
+        )
 
     def step(self, index: int) -> tuple[Tensor, Tensor, bool, Tensor, Tensor, bool]:
         """``(query, query の長さ, query が満長か, passage, passage の長さ, passage が満長か)``。"""
@@ -107,7 +175,20 @@ def _loss(
     pooled_passages: Tensor,
     temperature: float,
     dimensions: Sequence[int] | None,
+    ignore: Tensor | None = None,
 ):
+    if ignore is not None:
+        if dimensions:
+            return masked_matryoshka_representation_loss(
+                pooled_queries, pooled_passages, dimensions, temperature, ignore
+            )
+        loss = masked_info_nce_loss(
+            truncate_and_normalize(pooled_queries),
+            truncate_and_normalize(pooled_passages),
+            temperature,
+            ignore,
+        )
+        return loss, None
     if dimensions:
         return matryoshka_representation_loss(
             pooled_queries, pooled_passages, dimensions, temperature
@@ -178,8 +259,9 @@ def train_text_embedding_from_batches(
         for optimizer in optimizers:
             optimizer.zero_grad()
         pooled_queries, pooled_passages = _embed_pair(model, batches, step - 1, use_fp16_autocast)
+        ignore = batches.ignore(step - 1)
         loss, per_dimension = _loss(
-            pooled_queries, pooled_passages, temperature, matryoshka_dimensions
+            pooled_queries, pooled_passages, temperature, matryoshka_dimensions, ignore
         )
         (loss_scaler.scale_loss(loss) if loss_scaler is not None else loss).backward()
         gradient_norm = unscale_gradients_and_compute_norm(
@@ -207,9 +289,10 @@ def train_text_embedding_from_batches(
             full_passages = truncate_and_normalize(pooled_passages.detach())
             similarity = full_queries @ full_passages.t()
             positive = similarity.diagonal()
-            hardest = similarity.masked_fill(
-                torch.eye(batch_size, dtype=torch.bool, device=device), float("-inf")
-            )
+            excluded = torch.eye(batch_size, dtype=torch.bool, device=device)
+            if ignore is not None:
+                excluded = excluded | ignore
+            hardest = similarity.masked_fill(excluded, float("-inf"))
             margins[step - 1] = (positive - hardest.max(dim=1).values).mean()
             if dimension_losses is not None:
                 dimension_losses[step - 1] = per_dimension
@@ -255,7 +338,13 @@ def compute_pair_losses_from_batches(
     with torch.no_grad():
         for step in steps:
             pooled_queries, pooled_passages = _embed_pair(model, batches, step, use_fp16_autocast)
-            loss, _ = _loss(pooled_queries, pooled_passages, temperature, matryoshka_dimensions)
+            loss, _ = _loss(
+                pooled_queries,
+                pooled_passages,
+                temperature,
+                matryoshka_dimensions,
+                batches.ignore(step),
+            )
             losses.append(loss)
     model.train(was_training)
     return torch.stack(losses).cpu().numpy().astype(np.float64)
