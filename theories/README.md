@@ -54,49 +54,53 @@ Theory of text embeddings and retrieval — the theoretical foundation for the R
 AI エージェントの中で LLM がどう動くかを示す。
 
 ```mermaid
+%%{init: {"theme": "default"}}%%
 flowchart LR
-  subgraph AG["AI エージェント"]
-    direction TB
-    PLAN["計画(未作成)"]:::todo
-    TOOL["ツールの使用(未作成)"]:::todo
-    MEM["記憶(未作成)"]:::todo
-    RET["外部知識の検索<br/>024 テキスト埋め込みと retriever<br/>025 ANN(Approximate Nearest Neighbor)検索とリランキング<br/>026 Inverse Cloze Task"]
+  subgraph ALL[" "]
+    subgraph AG["AI エージェント"]
+      direction TB
+      PLAN["計画(未作成)"]:::planned
+      TOOL["ツールの使用(未作成)"]:::planned
+      MEM["記憶(未作成)"]:::planned
+      RET["外部知識の検索<br/>024 テキスト埋め込みと retriever<br/>025 ANN(Approximate Nearest Neighbor)検索とリランキング<br/>026 Inverse Cloze Task"]
+    end
+    subgraph IN["入力"]
+      direction TB
+      TOK["005 トークナイザ<br/>(テキストのトークン化)"]
+      IMG["019 ViT(Vision Transformer)<br/>020 CLIP(画像とテキストの対照学習)"]
+      CON["021 LLaVA 型の連結<br/>(画像と言語の接続)"]
+    end
+    subgraph LLM["LLM の本体"]
+      direction TB
+      ATT["001 注意機構"]
+      BLK["002 Transformer Block"]
+      POS["003 位置エンコーディングと RoPE<br/>(Rotary Position Embedding)"]
+      NRM["004 正規化と活性化"]
+      LONG["015 長文脈拡張"]
+      MOE["022 MoE(Mixture of Experts)<br/>順伝播ネットワークの置き換え"]
+      SSM["023 状態空間モデルと Mamba<br/>注意機構の置き換え"]
+    end
+    subgraph EFF["推論の効率化"]
+      direction TB
+      KV["010 KV キャッシュ(Key-Value Cache)"]
+      QNT["013 量子化の基礎"]
+      FLA["014 Flash Attention"]
+    end
+    OUT["008 デコーディング戦略<br/>(出力)"]
+    AG --> IN
+    IN --> LLM
+    EFF -.-> LLM
+    LLM --> OUT
+    OUT --> AG
+    ATT --> BLK
+    POS --> ATT
+    NRM --> BLK
+    LONG --> POS
+    MOE -.-> BLK
+    SSM -.-> ATT
+    classDef planned fill:#ffffff,stroke:#999999,stroke-dasharray:5 5,color:#777777
   end
-  subgraph IN["入力"]
-    direction TB
-    TOK["005 トークナイザ<br/>(テキストのトークン化)"]
-    IMG["019 ViT(Vision Transformer)<br/>020 CLIP(画像とテキストの対照学習)"]
-    CON["021 LLaVA 型の連結<br/>(画像と言語の接続)"]
-  end
-  subgraph LLM["LLM の本体"]
-    direction TB
-    ATT["001 注意機構"]
-    BLK["002 Transformer Block"]
-    POS["003 位置エンコーディングと RoPE<br/>(Rotary Position Embedding)"]
-    NRM["004 正規化と活性化"]
-    LONG["015 長文脈拡張"]
-    MOE["022 MoE(Mixture of Experts)<br/>順伝播ネットワークの置き換え"]
-    SSM["023 状態空間モデルと Mamba<br/>注意機構の置き換え"]
-  end
-  subgraph EFF["推論の効率化"]
-    direction TB
-    KV["010 KV キャッシュ(Key-Value Cache)"]
-    QNT["013 量子化の基礎"]
-    FLA["014 Flash Attention"]
-  end
-  OUT["008 デコーディング戦略<br/>(出力)"]
-  AG --> IN
-  IN --> LLM
-  EFF -.-> LLM
-  LLM --> OUT
-  OUT --> AG
-  ATT --> BLK
-  POS --> ATT
-  NRM --> BLK
-  LONG --> POS
-  MOE -.-> BLK
-  SSM -.-> ATT
-  classDef todo stroke-dasharray:5 5,opacity:0.5
+  style ALL fill:#ffffff,stroke:#ffffff
 ```
 
 ### 図 2: モデルを作る流れ / How Models Are Built
@@ -104,49 +108,53 @@ flowchart LR
 事前学習(Pretraining)から、適応(Adaptation)、選好への整合(Preference Alignment)、推論(Inference)へ進む段階に、各トピックを置く。
 
 ```mermaid
+%%{init: {"theme": "default"}}%%
 flowchart LR
-  subgraph PRE["事前学習"]
-    direction TB
-    T5["005 トークナイザ"]
-    P6["006 小型 GPT の事前学習"]
-    P7["007 学習の安定化"]
-    P9["009 スケーリング則"]
-    P11["011 混合精度学習"]
-    PV["019 ViT(Vision Transformer)<br/>020 CLIP(画像とテキストの対照学習)"]
-    PA["022 MoE(Mixture of Experts)<br/>023 状態空間モデルと Mamba"]
-    T5 --> P6
-    P7 --> P6
-    P9 --> P6
-    P11 --> P6
+  subgraph ALL[" "]
+    subgraph PRE["事前学習"]
+      direction TB
+      T5["005 トークナイザ"]
+      P6["006 小型 GPT の事前学習"]
+      P7["007 学習の安定化"]
+      P9["009 スケーリング則"]
+      P11["011 混合精度学習"]
+      PV["019 ViT(Vision Transformer)<br/>020 CLIP(画像とテキストの対照学習)"]
+      PA["022 MoE(Mixture of Experts)<br/>023 状態空間モデルと Mamba"]
+      T5 --> P6
+      P7 --> P6
+      P9 --> P6
+      P11 --> P6
+    end
+    subgraph ADA["適応"]
+      direction TB
+      A12["012 LoRA(Low-Rank Adaptation)"]
+      A13["013 QLoRA(Quantized LoRA)"]
+      A15["015 長文脈拡張"]
+      A16["016 SFT(Supervised Fine-Tuning)"]
+      A21["021 視覚指示チューニング"]
+    end
+    subgraph ALN["選好への整合"]
+      direction TB
+      R17["017 報酬モデルと RLHF<br/>(Reinforcement Learning from Human Feedback)"]
+      R18["018 DPO(Direct Preference Optimization)と IPO(Identity Preference Optimization)"]
+    end
+    subgraph INF["推論"]
+      direction TB
+      I8["008 デコーディング戦略"]
+      I10["010 KV キャッシュ"]
+      I14["014 Flash Attention"]
+    end
+    subgraph EMB["埋め込みの学習"]
+      direction TB
+      E24["024 テキスト埋め込みと retriever<br/>026 Inverse Cloze Task"]
+      E25["025 cross-encoder の学習"]
+    end
+    PRE --> ADA
+    ADA --> ALN
+    ALN --> INF
+    INF -- "008 の重みから" --> EMB
   end
-  subgraph ADA["適応"]
-    direction TB
-    A12["012 LoRA(Low-Rank Adaptation)"]
-    A13["013 QLoRA(Quantized LoRA)"]
-    A15["015 長文脈拡張"]
-    A16["016 SFT(Supervised Fine-Tuning)"]
-    A21["021 視覚指示チューニング"]
-  end
-  subgraph ALN["選好への整合"]
-    direction TB
-    R17["017 報酬モデルと RLHF<br/>(Reinforcement Learning from Human Feedback)"]
-    R18["018 DPO(Direct Preference Optimization)と IPO(Identity Preference Optimization)"]
-  end
-  subgraph INF["推論"]
-    direction TB
-    I8["008 デコーディング戦略"]
-    I10["010 KV キャッシュ"]
-    I14["014 Flash Attention"]
-  end
-  subgraph EMB["埋め込みの学習"]
-    direction TB
-    E24["024 テキスト埋め込みと retriever<br/>026 Inverse Cloze Task"]
-    E25["025 cross-encoder の学習"]
-  end
-  PRE --> ADA
-  ADA --> ALN
-  ALN --> INF
-  INF -- "008 の重みから" --> EMB
+  style ALL fill:#ffffff,stroke:#ffffff
 ```
 
 ## 推奨学習順序 / Recommended Order
