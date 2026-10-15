@@ -1,4 +1,4 @@
-"""タブ 1(文章の生成)の生成ループ。
+"""文章の生成の処理(Gradio に依存しない)。
 
 008 のノートブックにある ``generate_with_filter()`` と同じ手順(top-k・top-p のフィルタを
 温度で割る前の logits にかけ、そのあと softmax からサンプリングする)を、次の 2 点を足して
@@ -15,24 +15,23 @@ top-k・top-p のフィルタ(``top_k_filter``・``top_p_filter``)とビーム�
 ビームサーチは ``src`` の実装が KV キャッシュと逐次の返却に対応していないため、
 結果を最後にまとめて返す。
 
-**計算時間の測り方。** 計時は、デバイスの同期(``synchronize_device``)を取ってから始め、
-終わるときにも同期を取る。途中経過を返している間(呼び出し側が画面を更新している間)は
-計時を止めるので、画面の更新や、ZeroGPU でのプロセス間の受け渡しの時間は含まれない。
+計算時間の測り方は ``lab.core.timing`` を参照。
 """
 
 from __future__ import annotations
 
-import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
+from lab.core.artifacts import LoadedModel
+from lab.core.timing import ComputeClock
+from src.data.tokenizer import BPEIDTokenizer
 from src.generation import beam_search, top_k_filter, top_p_filter
 from src.generation.cache import KeyValueCache
 from src.models.gpt import GPTLanguageModel
-from src.utils.device import synchronize_device
 
 METHOD_GREEDY = "greedy"
 METHOD_TEMPERATURE = "temperature"
@@ -143,25 +142,6 @@ class BeamOutcome:
     compute_seconds: float
 
 
-class _ComputeClock:
-    """計算に使った時間だけを積算する。デバイスの同期を取ってから計る。"""
-
-    def __init__(self, device: torch.device) -> None:
-        self._device = device
-        self._total = 0.0
-        self._mark = 0.0
-
-    def start(self) -> None:
-        synchronize_device(self._device)
-        self._mark = time.perf_counter()
-
-    def stop(self) -> float:
-        """計時を止め、ここまでの積算(秒)を返す。"""
-        synchronize_device(self._device)
-        self._total += time.perf_counter() - self._mark
-        return self._total
-
-
 def select_next_token(
     logits: Tensor, settings: DecodingSettings, generator: torch.Generator | None
 ) -> Tensor:
@@ -205,7 +185,7 @@ def stream_generation(
     was_training = model.training
     model.eval()
     try:
-        clock = _ComputeClock(device)
+        clock = ComputeClock(device)
         clock.start()
         tokens = torch.tensor([prompt_ids], dtype=torch.long, device=device)
         cache = KeyValueCache(model.num_layers) if settings.use_cache else None
@@ -249,7 +229,7 @@ def run_beam_search(
     settings.validate(len(prompt_ids), model.max_sequence_length)
 
     prompt = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-    clock = _ComputeClock(device)
+    clock = ComputeClock(device)
     clock.start()
     results = beam_search(
         model,
@@ -264,3 +244,67 @@ def run_beam_search(
         for sequence, score in results
     )
     return BeamOutcome(candidates, elapsed)
+
+
+@dataclass(frozen=True)
+class GenerationEvent:
+    """画面に渡す生成の途中経過。トークンの ID は文字列に復号してある。
+
+    Attributes:
+        text: 書き出しに続けて表示する本文。
+        num_new_tokens: ここまでに生成したトークン数。
+        compute_seconds: 計算時間(``finished`` のときだけ値を持つ)。
+        finished: 生成が終わったか。
+        waiting_for_beam: ビームサーチを計算中で、結果がまだない(最初の 1 回だけ真)。
+        beam_candidates: ビームサーチの候補(スコアの降順)の ``(スコア, 続きの文字列)``。
+            最後だけ値を持つ。
+    """
+
+    text: str
+    num_new_tokens: int
+    compute_seconds: float | None
+    finished: bool
+    waiting_for_beam: bool = False
+    beam_candidates: tuple[tuple[float, str], ...] = ()
+
+
+def generate_events(
+    loaded: LoadedModel,
+    tokenizer: BPEIDTokenizer,
+    device: torch.device,
+    prompt: str,
+    settings: DecodingSettings,
+    decode: Callable[[list[int]], str] | None = None,
+) -> Iterator[GenerationEvent]:
+    """1 つのデコードの方法で生成し、途中経過(``GenerationEvent``)を返す。
+
+    ``@spaces.GPU`` を付けた関数の中から呼ぶ(GPU の割り当てが済んだ後の計算だけを測る)。
+
+    Raises:
+        ValueError: 設定・入力が生成できないもの(メッセージは画面に表示できる日本語)。
+    """
+    decode = decode or tokenizer.decode
+    prompt_ids = tokenizer.encode(prompt)
+    settings.validate(len(prompt_ids), loaded.max_sequence_length)
+
+    if settings.method == METHOD_BEAM:
+        yield GenerationEvent(prompt, 0, None, False, waiting_for_beam=True)
+        outcome = run_beam_search(loaded.model, prompt_ids, settings, device)
+        candidates = tuple((c.score, decode(list(c.new_token_ids))) for c in outcome.candidates)
+        best = outcome.candidates[0]
+        yield GenerationEvent(
+            prompt + decode(list(best.new_token_ids)),
+            len(best.new_token_ids),
+            outcome.compute_seconds,
+            True,
+            beam_candidates=candidates,
+        )
+        return
+
+    for progress in stream_generation(loaded.model, prompt_ids, settings, device):
+        yield GenerationEvent(
+            prompt + decode(list(progress.new_token_ids)),
+            len(progress.new_token_ids),
+            progress.compute_seconds if progress.finished else None,
+            progress.finished,
+        )

@@ -25,10 +25,18 @@ ai-theories/
 │   ├── 05_vision_language/
 │   ├── 06_architectures/
 │   └── 07_retrieval/
-├── apps/                   # システム構築の実践
-│   ├── README.md           # アプリ一覧・難易度・デプロイ方法の概要
-│   ├── 001_text_generation_playground/
-│   └── 002_rag_app/
+├── apps/                   # システム構築の実践(1 つの統合アプリに、機能を段階的に足す)
+│   ├── README.md           # 機能の一覧・段階の計画・公開方針
+│   └── ai_theories_lab/    # 統合アプリ。そのまま Hugging Face Spaces のリポジトリルートになる
+│       ├── app.py          #   入口。各機能のページを組み立てるだけ
+│       ├── pyproject.toml / uv.lock / requirements.txt / README.md
+│       ├── lab/
+│       │   ├── core/       #   画面に依存しない共通部分(Hub からの読み込み・デバイス・計測)
+│       │   ├── features/   #   機能ごとに service.py(処理)と ui.py(画面)
+│       │   └── ui/         #   共通の画面部品・テーマ・ページの配置
+│       └── tests/
+│           ├── unit/       #   常に走らせる(Hub を使わない)
+│           └── hub/        #   本物の重みを使う。hub の印をつけ、既定では走らせない
 ├── src/                    # theories/・apps/ 双方から再利用する共通モジュール
 │   ├── layers/
 │   ├── models/
@@ -66,19 +74,22 @@ ai-theories/
 
 ### apps/(システム構築の実践)
 
-- 学んだ理論を使って実際に動くシステム(簡単な Web アプリ等)を構築する。
-- 基礎的なもの(自作モデルの推論をブラウザで試せるアプリなど)から応用的なもの(RAG、マルチモーダル対話アプリなど)まで、**難易度順の連番ディレクトリ** で段階的に追加する(例: `001_text_generation_playground`, `002_rag_app`)。
-- `apps/README.md`に、アプリ一覧・難易度・デプロイ方法の概要をまとめる。アプリ追加時はこの README も必ず更新する。
-- 各アプリのディレクトリに`README.md`を配置する(構成は後述)。
+- 学んだ理論を使って実際に動くシステムを、**1 つの Web アプリ(統合アプリ「AI Theories Lab」、`apps/ai_theories_lab/`)に機能を段階的に足していく形** で構築する。番号つきの別々のアプリは作らない。Spaces では 1 つの Space(ZeroGPU 上の Gradio)として公開する。
+- **アプリの段階の計画** は`apps/README.md`に置く(段階 1: 生成・KV キャッシュ・GQA・指示への応答・モデルの中を見る、段階 2: 量子化・長い文脈・バッチ推論と待ち行列の自作・API の層、段階 3: RAG、段階 4: チャットボット、段階 5: エージェント)。「第 1 段階(Claude Code)」(Colab 実行を伴うノートブックの二段階運用)とは別のものである。
+- **アプリの機能は、対応する理論トピックが theories/ にできてから実装する。** 段階 4・5 は、対応するトピックを theories/ に足すまで着手しない。
+- `apps/README.md`に、機能の一覧(機能・段階・使用した理論・状態)、段階の計画、公開方針をまとめる。機能の追加・変更のときは、この README も必ず更新する。
+- アプリのディレクトリに`README.md`を配置する(構成は後述)。
 - `apps/`は`theories/`とは独立したペースで進めてよいが、**使用した理論トピックへの参照は必ず明記** する。
-- 各アプリディレクトリ(例: `apps/001_text_generation_playground/`)は、**そのまま Hugging Face Spaces のリポジトリルートとして扱う**。すなわち、アプリディレクトリ直下に`app.py`・`pyproject.toml`・`uv.lock`・`requirements.txt`・Spaces 用の README(先頭に Spaces 用の YAML メタデータを含む)を配置する。アプリ固有のコードが大きくなる場合は、同じディレクトリ内に分けてよい。
-- **公開先は ZeroGPU 上の Gradio の Space とする。** Hugging Face Spaces では、Gradio・Docker の Space の作成に有料プランが必要になっており、無料の個人アカウントが置けるのは ZeroGPU で動く Gradio の Space(2 つまで)だけであるため。
+- **処理と画面を分ける。** 機能ごとに、処理(`lab/features/<機能>/service.py`)と画面(`ui.py`)を分け、`service.py`は Gradio を import しない(`lab/core/`も同じ)。段階 2 以降で API を足すときや、画面を差し替えるときに、処理の側をそのまま残すためである。`app.py`は入口で、各機能のページを組み立てるだけにする。画面は当面 Gradio とする。
+- **試験は pytest で`tests/`に置く。** `tests/unit/`は常に走らせ、Hub を使わない(乱数の重みの代替アーティファクトを fixture で用意する)。本物の重みを使う試験は`tests/hub/`に置いて`hub`の印をつけ、既定では走らせない(`uv run pytest tests/hub -m hub`)。
+- アプリのディレクトリ(`apps/ai_theories_lab/`)は、**そのまま Hugging Face Spaces のリポジトリルートとして扱う**。すなわち、アプリのディレクトリ直下に`app.py`・`pyproject.toml`・`uv.lock`・`requirements.txt`・Spaces 用の README(先頭に Spaces 用の YAML メタデータを含む)を配置する。アプリ固有のコードは`lab/`、試験は`tests/`に置く。
+- **公開先は ZeroGPU 上の Gradio の Space とする。** Hugging Face Spaces では、Gradio・Docker の Space の作成に有料プランが必要になっており、無料の個人アカウントが置けるのは ZeroGPU で動く Gradio の Space(2 つまで)だけであるため。Space の名前は`ai-theories-lab`を想定する。
   - 無料枠の条件は、メールアドレスが確認済みで、アカウントの作成から 30 日以上が経っていること。閲覧者ごとの 1 日の GPU の利用枠は、未ログイン 2 分・無料アカウント 5 分・PRO 40 分で、最初の利用から 24 時間後にリセットされる(ZeroGPU の公式ドキュメント(https://huggingface.co/docs/hub/spaces-zerogpu)の 2026 年 10 月時点の記載。変わりうる)。
-  - GPU を使う処理は`@spaces.GPU`を付けた関数の中で行う。モデルの読み込みはモジュールの読み込み時に行う(ZeroGPU の推奨)。`import spaces`は、torch など CUDA を使うパッケージより前に行う。
+  - GPU を使う処理は`@spaces.GPU`を付けた関数の中で行う。モデルの読み込みはモジュールの読み込み時に行う(ZeroGPU の推奨)。`import spaces`は、torch など CUDA を使うパッケージより前に行う(`app.py`の先頭と、`lab/__init__.py`)。
   - ローカル(Apple Silicon の MPS(Metal Performance Shaders)または CPU)でも、同じ`app.py`がそのまま動くこと。`@spaces.GPU`は ZeroGPU の外では何もしないので、互換層は置かない。デバイスは CUDA → MPS → CPU の順に自動で選ぶ。
-  - ハードウェア(ZeroGPU)は README の YAML では指定できず、Space の設定で選ぶ。この手順を各アプリの`README.md`に書く。
-- **各アプリは、そのアプリのディレクトリを独立した uv プロジェクト(`pyproject.toml` + `uv.lock`)とする。** `ai-theories`(`src/`)は、**GitHub のコミットを固定した git 依存**(アプリの`pyproject.toml`の`[tool.uv.sources]`の`git`と`rev`)で持ち込み、`from src.layers import ...`の形のまま使う。固定するコミットを更新する手順は、各アプリの`README.md`に書く。
-- デプロイは、`apps/001_text_generation_playground/`ディレクトリの内容を Hugging Face Spaces のリポジトリに push する運用とする(例: Spaces リポジトリを別途 remote として追加し`git subtree push`する、または当該ディレクトリの内容を Spaces 側リポジトリに同期する)。具体的な push 手順は各アプリの`README.md`に記載する。
+  - ハードウェア(ZeroGPU)は README の YAML では指定できず、Space の設定で選ぶ。この手順をアプリの`README.md`に書く。
+- **アプリは、そのディレクトリを独立した uv プロジェクト(`pyproject.toml` + `uv.lock`)とする。** `ai-theories`(`src/`)は、**GitHub のコミットを固定した git 依存**(アプリの`pyproject.toml`の`[tool.uv.sources]`の`git`と`rev`)で持ち込み、`from src.layers import ...`の形のまま使う。固定するコミットを更新する手順は、アプリの`README.md`に書く。`src/`を変えると固定するコミットの更新が要るので、アプリの都合で`src/`を変えるのは、アプリ側で実現できない場合に限る。
+- デプロイは、`apps/ai_theories_lab/`ディレクトリの内容を Hugging Face Spaces のリポジトリに push する運用とする(例: Spaces リポジトリを別途 remote として追加し`git subtree push`する、または当該ディレクトリの内容を Spaces 側リポジトリに同期する)。具体的な push 手順はアプリの`README.md`に記載する。
 - `ai-theories`リポジトリ本体と Spaces 側リポジトリは **別リポジトリ** として扱う。`ai-theories`側は「開発・学習理論との紐付けを管理する場所」、Spaces 側は「公開用の実行環境」という役割分担とする。
 
 ### src/(共通モジュール)
@@ -86,7 +97,7 @@ ai-theories/
 - `layers/`, `models/`, `training/`, `data/`, `utils/`を配置し、`theories/`・`apps/`双方から再利用可能なコードを切り出す。
 - **ファイル名に`001`などの番号を含めない**。通常の Python モジュール命名規則(スネークケース)に従う。
 - `src/`は import される前提のモジュール。`.py`単体の直接実行は基本的に想定しない。
-- ルートの`pyproject.toml`の build-system(hatchling)は、`src/`だけを含むパッケージとして install できるようにするためのもの(`apps/`の各アプリが git 依存で持ち込む)。`theories/`・`apps/`・`scripts/`は含めない。
+- ルートの`pyproject.toml`の build-system(hatchling)は、`src/`だけを含むパッケージとして install できるようにするためのもの(`apps/`のアプリが git 依存で持ち込む)。`theories/`・`apps/`・`scripts/`は含めない。
 
 ### scripts/(リポジトリ運用スクリプト)
 
@@ -485,11 +496,13 @@ ai-theories/
 
 ## アプリ README の内容構成(apps/)
 
-1. **概要** — 何を作るシステムか
-2. **使用した理論** — `theories/`内の該当ノートブックへのリンクと簡単な説明
+統合アプリのディレクトリの`README.md`(Spaces の README を兼ねる。先頭に Spaces 用の YAML メタデータを置く)は、次の構成にする。
+
+1. **概要** — 何を作るシステムか。機能の一覧(機能・段階・使用した理論・状態)
+2. **使用した理論** — 機能ごとに、`theories/`内の該当ノートブックへのリンクと簡単な説明
 3. **システム構成図** — 簡単なテキストまたは図
-4. **使用技術・構成** — バックエンド、フロントエンド、フレームワーク等
-5. **デプロイ手順** — Colab での実行方法、Hugging Face Spaces へのデプロイ手順
+4. **使用技術・構成** — バックエンド、フロントエンド、フレームワーク、ディレクトリの構成等
+5. **デプロイ手順** — 手元での起動、試験の実行、Hugging Face Spaces へのデプロイ手順。Colab での実行方法は、学習・評価を伴う機能がある場合に限って書く
 
 ## 言語ルール
 
@@ -543,7 +556,7 @@ ai-theories/
 - 削る段階には、**学習量(学習ステップ数など)を下げる段階を含めてよい**。その場合、学習量の候補と、それを他の削り方(シード数・水準)とどの順で組み合わせるかの優先順位を、理由とともに本番前に宣言する。
 - 複数のセッションへの分割(「ノートブックの出力管理」節の「複数の Colab セッションに分けて実行するノートブック」)は、新しいトピックでは使わない(こうじさんが明示的に認めた場合を除く)。
 - `apps/`のデモ公開は **Hugging Face Spaces の ZeroGPU 上の Gradio** を基本のデプロイ先とし、**Gradio** を標準 UI フレームワークとする(詳細は「apps/」節)。
-- 依存関係の管理は **uv が唯一の正** (`pyproject.toml` + `uv.lock`。ルートと、`apps/`の各アプリのディレクトリで、それぞれ独立)。`requirements.txt`は uv からの **エクスポート成果物** であり、手で編集しない(詳細は「開発環境・ツール」)。
+- 依存関係の管理は **uv が唯一の正** (`pyproject.toml` + `uv.lock`。ルートと、`apps/`のアプリのディレクトリで、それぞれ独立)。`requirements.txt`は uv からの **エクスポート成果物** であり、手で編集しない(詳細は「開発環境・ツール」)。
 - `theories/`の学習・推論はノートブック上で行う。`.py`ファイル単体の直接実行は想定しない(`src/`は import される前提)。
 - `theories/`配下のノートブックは、Colab セットアップセルで`%cd /content/ai-theories`した後、**リポジトリルート(Colab では`/content/ai-theories`)をカレントディレクトリとして実行される前提** とする。ローカルでは、リポジトリルートで Jupyter を起動して同じ前提を満たす。
 - `src/`からの import は`from src.layers import ...`のように **リポジトリルートからの絶対パスで統一** する。ノートブックの配置場所(`theories/xx_category/`配下)に関わらずこの前提が崩れないよう、セットアップセルの`%cd`を必ず先頭に置く。
@@ -571,7 +584,7 @@ ai-theories/
 
 ### 依存関係管理(uv)
 
-- **uv が依存関係管理の唯一の正**。リポジトリ全体の依存関係は、ルートの`pyproject.toml` + `uv.lock`で管理する。`apps/`の各アプリは、そのアプリのディレクトリの`pyproject.toml` + `uv.lock`で独立に管理する(「Hugging Face Spaces へのデプロイ(apps/)」)。
+- **uv が依存関係管理の唯一の正**。リポジトリ全体の依存関係は、ルートの`pyproject.toml` + `uv.lock`で管理する。`apps/`のアプリは、そのアプリのディレクトリの`pyproject.toml` + `uv.lock`で独立に管理する(「Hugging Face Spaces へのデプロイ(apps/)」)。
 - ローカルでの操作は uv のコマンドのみを使う(`pip install`を直接実行しない):
 
 ```bash
@@ -624,17 +637,17 @@ import torch  # noqa: E402
 
 ### Hugging Face Spaces へのデプロイ(apps/)
 
-Spaces のビルドは uv を前提としないため、**各アプリディレクトリに`requirements.txt`を配置** してビルドに使わせる。各アプリは独立した uv プロジェクトなので、`requirements.txt`はそのアプリのディレクトリで、アプリの`uv.lock`からエクスポートする。
+Spaces のビルドは uv を前提としないため、**アプリのディレクトリに`requirements.txt`を配置** してビルドに使わせる。アプリは独立した uv プロジェクトなので、`requirements.txt`はそのアプリのディレクトリで、アプリの`uv.lock`からエクスポートする。
 
 ```bash
-cd apps/001_text_generation_playground
+cd apps/ai_theories_lab
 uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
 ```
 
 - `--no-dev`は、ruff などの開発用の依存(アプリの`pyproject.toml`の`dev`グループ)を Spaces のビルドに入れないために付ける。
 - この`requirements.txt`も uv からのエクスポート成果物であり、手で編集しない。依存を変えるときは、アプリの`pyproject.toml`を直して`uv lock`した後に、再エクスポートする。
-- `ai-theories`は、`requirements.txt`に`ai-theories @ git+https://github.com/kojikojiprg/ai-theories@<コミット>`の形で入る。ルートの`pyproject.toml`が持つ依存(torch・torchvision・matplotlib など)も Spaces のビルドに入る。版の衝突と、ビルドの大きさへの影響は、各アプリの`README.md`に記録する。
-- **固定するコミットは、GitHub から取得できるものでなければならない。** 作業のブランチのコミットは、そのブランチの削除や squash merge の後に取得できなくなりうるので、`main`に入ったコミットを固定する。
+- `ai-theories`は、`requirements.txt`に`ai-theories @ git+https://github.com/kojikojiprg/ai-theories@<コミット>`の形で入る。ルートの`pyproject.toml`が持つ依存(torch・torchvision・matplotlib など)も Spaces のビルドに入る。版の衝突と、ビルドの大きさへの影響は、アプリの`README.md`に記録する。
+- **固定するコミットは、GitHub から取得できるものでなければならない。** 作業のブランチのコミットは、そのブランチの削除や squash merge の後に取得できなくなりうるので、`main`に入ったコミットを固定する(固定しているコミットを含むブランチは、squash にせず通常の merge で取り込み、そのコミットを`main`の履歴に残す)。
 - **ZeroGPU が対応する版に合わせる。** 公式ドキュメントの記載は、Python が 3.12.12 と 3.10.13、torch が 2.8.0 以降(例として挙がる版は 2.13.0 まで)、Gradio が 4 以上。torch はアプリの`pyproject.toml`で`==`で固定し、`python_version`と`sdk_version`(README の YAML)を、アプリの`pyproject.toml`の Python・Gradio の固定と揃える。
 - `requirements.txt`は、上の Colab の節と同じ理由で`uv pip install --system`を使わず、クローンの外に作った使い捨ての仮想環境に入れて、import できることを確かめる。
 
@@ -847,7 +860,7 @@ Model など、既存のリポジトリが前提とする構造と互換性が�
 - `theories/`の各ノートブックの「理論」セクションの **数式・アルゴリズムを一次情報として** 実装を行う。
 - **新しい理論トピックを追加する、または既存ノートブックの範囲・内容を変更するとき** は、対象ノートブックの追加・修正と`theories/README.md`の学習順序表の行(「何を学ぶか」と判定)・「各トピックの詳細」・「全体像」の図のノードの更新を **同一の作業(同一コミット、または同一の作業セッション内)** で完了させる。`theories/README.md`の更新を後回しにしない。
 - ノートブックの内容(タイトル、扱う範囲、前提知識)を変更した場合、`theories/README.md`側の対応する行・詳細・図のノード、および他トピックの「前提知識」列に矛盾が生じていないかも合わせて確認する。
-- **新しいアプリを追加する、または既存アプリの内容を変更するとき** は、対象ディレクトリの追加・修正と`apps/README.md`のアプリ一覧の更新を **同一の作業(同一コミット、または同一の作業セッション内)** で完了させる。`apps/README.md`の更新を後回しにしない。
+- **アプリに機能を追加する、または既存の機能の内容を変更するとき** は、アプリのディレクトリの追加・修正と`apps/README.md`の機能の一覧の更新を **同一の作業(同一コミット、または同一の作業セッション内)** で完了させる。`apps/README.md`の更新を後回しにしない。機能の追加は、対応する理論トピックが theories/ にできてから行う。
 - 実装後は、**結果や考察を該当セクションに追記** する(`theories/`はノートブックの「結果・考察」、`apps/`は README)。
 - 作業完了の報告時には、`theories/README.md`(または`apps/README.md`)を更新したかどうかを明示的に述べる(更新不要な場合もその理由を述べる)。
 - ノートブック本文(Markdown セル)内で、未作成の他トピックに言及する際は`「(未作成)」`のような注記を付けない。番号のみ、またはリンクなしの番号で言及する(例:「学習の安定化技術は 007 で扱う。」)。未作成トピックの管理は`theories/README.md`の学習順序表(「(未作成 / TBD)」列)に一元化し、ノートブック内では重複して管理しない。対象トピックのノートブックを新規作成したときは、そのノートブックから参照している既存ノートブック側の記述(番号のみの言及)を、作成したノートブックへのリンクに張り替える。

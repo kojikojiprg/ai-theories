@@ -18,7 +18,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from playground.artifacts import LoadedModel
+from lab.core.artifacts import LoadedModel
 from src.data.instruction import (
     END_MARKER,
     SEEN_INSTRUCTIONS,

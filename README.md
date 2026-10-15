@@ -12,15 +12,15 @@ Notebookをまとめた記事は、[Zenn](https://zenn.dev/kojikojiprg/books/ai-
 
 - [`theories/`](./theories/) — LLM/VLM 理論の学習ノートブック(基礎 → 応用の順に整理)  
   Notebooks for learning LLM/VLM theory, organized from foundational to advanced topics.
-- [`apps/`](./apps/) — 学んだ理論を活かしたシステム構築の実践(Web アプリ等)  
-  Hands-on system building (web apps, etc.) that applies the theory learned above.
+- [`apps/`](./apps/) — 学んだ理論を活かしたシステム構築の実践。統合アプリ「AI Theories Lab」に、機能を段階的に足していく  
+  Hands-on system building: a single web app, "AI Theories Lab", to which features are added in stages.
 - `src/` — `theories/`・`apps/`から利用する共通モジュール  
   Shared modules reused by both `theories/` and `apps/`.
 - `scripts/` — 特定のトピック・アプリに紐付かない、リポジトリ運用スクリプト  
   Repository-maintenance scripts not tied to a specific topic or app.
 
-詳細な学習順序・トピック一覧は [`theories/README.md`](./theories/README.md)、アプリ一覧・デプロイ方法は [`apps/README.md`](./apps/README.md) を参照してください。
-See [`theories/README.md`](./theories/README.md) for the recommended learning order and topic list,and [`apps/README.md`](./apps/README.md) for the app list and deployment details.
+詳細な学習順序・トピック一覧は [`theories/README.md`](./theories/README.md)、機能の一覧・段階の計画・デプロイ方法は [`apps/README.md`](./apps/README.md) を参照してください。
+See [`theories/README.md`](./theories/README.md) for the recommended learning order and topic list,and [`apps/README.md`](./apps/README.md) for the feature list, the roadmap and deployment details.
 
 ## 開発環境 / Development Environment
 

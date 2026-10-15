@@ -26,6 +26,7 @@ from pathlib import Path
 import torch
 from huggingface_hub import hf_hub_download
 
+from lab.core.device import select_device
 from src.data.tokenizer import BPEIDTokenizer, load_bpe_id_tokenizer_from_hub
 from src.layers.feedforward import SwiGLUFeedForwardNetwork
 from src.layers.normalization import RMSNorm
@@ -104,19 +105,6 @@ class Resources:
     device: torch.device
     tokenizer: BPEIDTokenizer
     models: dict[str, LoadedModel]
-
-
-def select_device() -> torch.device:
-    """CUDA → MPS(Metal Performance Shaders)→ CPU の順に、使えるデバイスを選ぶ。
-
-    ZeroGPU では、``@spaces.GPU`` の関数の外(モジュールの読み込み時)でも
-    ``torch.cuda.is_available()`` が真になる(CUDA のエミュレーション)。
-    """
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
 
 
 def build_model(config: dict) -> GPTLanguageModel:
