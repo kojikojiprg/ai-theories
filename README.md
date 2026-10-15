@@ -28,4 +28,4 @@ See [`theories/README.md`](./theories/README.md) for the recommended learning or
 - フォーマッタ / リンタ / Formatter & linter: [ruff](https://docs.astral.sh/ruff/)
 - 学習・実験 / Training & experiments:  
   Google Colab 無料枠(T4 GPU など)/ Google Colab free tier (T4 GPU, etc.)
-- デモアプリの公開 / Demo hosting: Hugging Face Spaces(Gradio)
+- デモアプリの公開 / Demo hosting: Hugging Face Spaces の ZeroGPU 上の Gradio / Gradio on Hugging Face Spaces (ZeroGPU)

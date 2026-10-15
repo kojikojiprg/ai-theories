@@ -27,7 +27,7 @@ ai-theories/
 │   └── 07_retrieval/
 ├── apps/                   # システム構築の実践
 │   ├── README.md           # アプリ一覧・難易度・デプロイ方法の概要
-│   ├── 001_simple_chat_app/
+│   ├── 001_text_generation_playground/
 │   └── 002_rag_app/
 ├── src/                    # theories/・apps/ 双方から再利用する共通モジュール
 │   ├── layers/
@@ -67,12 +67,18 @@ ai-theories/
 ### apps/(システム構築の実践)
 
 - 学んだ理論を使って実際に動くシステム(簡単な Web アプリ等)を構築する。
-- 基礎的なもの(自作モデルを推論 API 化したチャット UI など)から応用的なもの(RAG、マルチモーダル対話アプリなど)まで、**難易度順の連番ディレクトリ** で段階的に追加する(例: `001_simple_chat_app`, `002_rag_app`)。
+- 基礎的なもの(自作モデルの推論をブラウザで試せるアプリなど)から応用的なもの(RAG、マルチモーダル対話アプリなど)まで、**難易度順の連番ディレクトリ** で段階的に追加する(例: `001_text_generation_playground`, `002_rag_app`)。
 - `apps/README.md`に、アプリ一覧・難易度・デプロイ方法の概要をまとめる。アプリ追加時はこの README も必ず更新する。
 - 各アプリのディレクトリに`README.md`を配置する(構成は後述)。
 - `apps/`は`theories/`とは独立したペースで進めてよいが、**使用した理論トピックへの参照は必ず明記** する。
-- 各アプリディレクトリ(例: `apps/001_simple_chat_app/`)は、**そのまま Hugging Face Spaces のリポジトリルートとして扱う**。すなわち、アプリディレクトリ直下に`app.py`・`requirements.txt`・Spaces 用の README(先頭に Spaces 用の YAML メタデータを含む)を配置する。
-- デプロイは、`apps/001_simple_chat_app/`ディレクトリの内容を Hugging Face Spaces のリポジトリに push する運用とする(例: Spaces リポジトリを別途 remote として追加し`git subtree push`する、または当該ディレクトリの内容を Spaces 側リポジトリに同期する)。具体的な push 手順は各アプリの`README.md`に記載する。
+- 各アプリディレクトリ(例: `apps/001_text_generation_playground/`)は、**そのまま Hugging Face Spaces のリポジトリルートとして扱う**。すなわち、アプリディレクトリ直下に`app.py`・`pyproject.toml`・`uv.lock`・`requirements.txt`・Spaces 用の README(先頭に Spaces 用の YAML メタデータを含む)を配置する。アプリ固有のコードが大きくなる場合は、同じディレクトリ内に分けてよい。
+- **公開先は ZeroGPU 上の Gradio の Space とする。** Hugging Face Spaces では、Gradio・Docker の Space の作成に有料プランが必要になっており、無料の個人アカウントが置けるのは ZeroGPU で動く Gradio の Space(2 つまで)だけであるため。
+  - 無料枠の条件は、メールアドレスが確認済みで、アカウントの作成から 30 日以上が経っていること。閲覧者ごとの 1 日の GPU の利用枠は、未ログイン 2 分・無料アカウント 5 分・PRO 40 分で、最初の利用から 24 時間後にリセットされる(ZeroGPU の公式ドキュメント(https://huggingface.co/docs/hub/spaces-zerogpu)の 2026 年 10 月時点の記載。変わりうる)。
+  - GPU を使う処理は`@spaces.GPU`を付けた関数の中で行う。モデルの読み込みはモジュールの読み込み時に行う(ZeroGPU の推奨)。`import spaces`は、torch など CUDA を使うパッケージより前に行う。
+  - ローカル(Apple Silicon の MPS(Metal Performance Shaders)または CPU)でも、同じ`app.py`がそのまま動くこと。`@spaces.GPU`は ZeroGPU の外では何もしないので、互換層は置かない。デバイスは CUDA → MPS → CPU の順に自動で選ぶ。
+  - ハードウェア(ZeroGPU)は README の YAML では指定できず、Space の設定で選ぶ。この手順を各アプリの`README.md`に書く。
+- **各アプリは、そのアプリのディレクトリを独立した uv プロジェクト(`pyproject.toml` + `uv.lock`)とする。** `ai-theories`(`src/`)は、**GitHub のコミットを固定した git 依存**(アプリの`pyproject.toml`の`[tool.uv.sources]`の`git`と`rev`)で持ち込み、`from src.layers import ...`の形のまま使う。固定するコミットを更新する手順は、各アプリの`README.md`に書く。
+- デプロイは、`apps/001_text_generation_playground/`ディレクトリの内容を Hugging Face Spaces のリポジトリに push する運用とする(例: Spaces リポジトリを別途 remote として追加し`git subtree push`する、または当該ディレクトリの内容を Spaces 側リポジトリに同期する)。具体的な push 手順は各アプリの`README.md`に記載する。
 - `ai-theories`リポジトリ本体と Spaces 側リポジトリは **別リポジトリ** として扱う。`ai-theories`側は「開発・学習理論との紐付けを管理する場所」、Spaces 側は「公開用の実行環境」という役割分担とする。
 
 ### src/(共通モジュール)
@@ -80,6 +86,7 @@ ai-theories/
 - `layers/`, `models/`, `training/`, `data/`, `utils/`を配置し、`theories/`・`apps/`双方から再利用可能なコードを切り出す。
 - **ファイル名に`001`などの番号を含めない**。通常の Python モジュール命名規則(スネークケース)に従う。
 - `src/`は import される前提のモジュール。`.py`単体の直接実行は基本的に想定しない。
+- ルートの`pyproject.toml`の build-system(hatchling)は、`src/`だけを含むパッケージとして install できるようにするためのもの(`apps/`の各アプリが git 依存で持ち込む)。`theories/`・`apps/`・`scripts/`は含めない。
 
 ### scripts/(リポジトリ運用スクリプト)
 
@@ -535,8 +542,8 @@ ai-theories/
 - 見積もりが予算を超える場合は、まず設計を見直す。本番の実行中に削る必要がある場合は、**削る段階とその順序を本番前に宣言し、見積もりのみから自動で選ぶ**(どの実験の結果も参照しない)。選択は本番の冒頭の見積もりのみから自動で行う。
 - 削る段階には、**学習量(学習ステップ数など)を下げる段階を含めてよい**。その場合、学習量の候補と、それを他の削り方(シード数・水準)とどの順で組み合わせるかの優先順位を、理由とともに本番前に宣言する。
 - 複数のセッションへの分割(「ノートブックの出力管理」節の「複数の Colab セッションに分けて実行するノートブック」)は、新しいトピックでは使わない(こうじさんが明示的に認めた場合を除く)。
-- `apps/`のデモ公開は **Hugging Face Spaces** を基本のデプロイ先とし、**Gradio** を標準 UI フレームワークとする。
-- 依存関係の管理は **uv が唯一の正** (`pyproject.toml` + `uv.lock`)。`requirements.txt`は uv からの **エクスポート成果物** であり、手で編集しない(詳細は「開発環境・ツール」)。
+- `apps/`のデモ公開は **Hugging Face Spaces の ZeroGPU 上の Gradio** を基本のデプロイ先とし、**Gradio** を標準 UI フレームワークとする(詳細は「apps/」節)。
+- 依存関係の管理は **uv が唯一の正** (`pyproject.toml` + `uv.lock`。ルートと、`apps/`の各アプリのディレクトリで、それぞれ独立)。`requirements.txt`は uv からの **エクスポート成果物** であり、手で編集しない(詳細は「開発環境・ツール」)。
 - `theories/`の学習・推論はノートブック上で行う。`.py`ファイル単体の直接実行は想定しない(`src/`は import される前提)。
 - `theories/`配下のノートブックは、Colab セットアップセルで`%cd /content/ai-theories`した後、**リポジトリルート(Colab では`/content/ai-theories`)をカレントディレクトリとして実行される前提** とする。ローカルでは、リポジトリルートで Jupyter を起動して同じ前提を満たす。
 - `src/`からの import は`from src.layers import ...`のように **リポジトリルートからの絶対パスで統一** する。ノートブックの配置場所(`theories/xx_category/`配下)に関わらずこの前提が崩れないよう、セットアップセルの`%cd`を必ず先頭に置く。
@@ -564,7 +571,7 @@ ai-theories/
 
 ### 依存関係管理(uv)
 
-- **uv が依存関係管理の唯一の正**。リポジトリ全体の依存関係は`pyproject.toml` + `uv.lock`で管理する。
+- **uv が依存関係管理の唯一の正**。リポジトリ全体の依存関係は、ルートの`pyproject.toml` + `uv.lock`で管理する。`apps/`の各アプリは、そのアプリのディレクトリの`pyproject.toml` + `uv.lock`で独立に管理する(「Hugging Face Spaces へのデプロイ(apps/)」)。
 - ローカルでの操作は uv のコマンドのみを使う(`pip install`を直接実行しない):
 
 ```bash
@@ -617,16 +624,19 @@ import torch  # noqa: E402
 
 ### Hugging Face Spaces へのデプロイ(apps/)
 
-Spaces のビルドは uv を前提としないため、**各アプリディレクトリに`requirements.txt`を配置** してビルドに使わせる。
+Spaces のビルドは uv を前提としないため、**各アプリディレクトリに`requirements.txt`を配置** してビルドに使わせる。各アプリは独立した uv プロジェクトなので、`requirements.txt`はそのアプリのディレクトリで、アプリの`uv.lock`からエクスポートする。
 
 ```bash
-uv export --format requirements-txt --no-hashes --no-dev --no-emit-project > apps/001_simple_chat_app/requirements.txt
+cd apps/001_text_generation_playground
+uv export --format requirements-txt --no-hashes --no-dev --no-emit-project -o requirements.txt
 ```
 
-- `--no-dev`は、ruff などの開発用の依存(`pyproject.toml`の`dev`グループ)を Spaces のビルドに入れないために付ける。
-
-- この`requirements.txt`も uv からのエクスポート成果物。アプリ固有の依存を追加した場合は`uv add`後に再エクスポートする。
-- アプリの依存が全体と大きく異なる場合は、アプリディレクトリを独立した uv プロジェクト(そのディレクトリの`pyproject.toml` + `uv.lock`)にしてから同様にエクスポートしてよい。
+- `--no-dev`は、ruff などの開発用の依存(アプリの`pyproject.toml`の`dev`グループ)を Spaces のビルドに入れないために付ける。
+- この`requirements.txt`も uv からのエクスポート成果物であり、手で編集しない。依存を変えるときは、アプリの`pyproject.toml`を直して`uv lock`した後に、再エクスポートする。
+- `ai-theories`は、`requirements.txt`に`ai-theories @ git+https://github.com/kojikojiprg/ai-theories@<コミット>`の形で入る。ルートの`pyproject.toml`が持つ依存(torch・torchvision・matplotlib など)も Spaces のビルドに入る。版の衝突と、ビルドの大きさへの影響は、各アプリの`README.md`に記録する。
+- **固定するコミットは、GitHub から取得できるものでなければならない。** 作業のブランチのコミットは、そのブランチの削除や squash merge の後に取得できなくなりうるので、`main`に入ったコミットを固定する。
+- **ZeroGPU が対応する版に合わせる。** 公式ドキュメントの記載は、Python が 3.12.12 と 3.10.13、torch が 2.8.0 以降(例として挙がる版は 2.13.0 まで)、Gradio が 4 以上。torch はアプリの`pyproject.toml`で`==`で固定し、`python_version`と`sdk_version`(README の YAML)を、アプリの`pyproject.toml`の Python・Gradio の固定と揃える。
+- `requirements.txt`は、上の Colab の節と同じ理由で`uv pip install --system`を使わず、クローンの外に作った使い捨ての仮想環境に入れて、import できることを確かめる。
 
 ### フォーマッタ・リンタ(ruff)
 

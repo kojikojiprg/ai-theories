@@ -1,0 +1,38 @@
+[project]
+name = "text-generation-playground"
+version = "0.1.0"
+description = "ai-theories の小型 GPT で文章の生成と指示への応答を試す Gradio アプリ(Hugging Face Spaces の ZeroGPU 向け)"
+readme = "README.md"
+# ZeroGPU が対応する Python は 3.12.12 と 3.10.13(公式ドキュメント)。README.md の python_version と揃える。
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "ai-theories",
+    # README.md の sdk_version と一致させる(Spaces は sdk_version の Gradio を入れる)。
+    "gradio==6.30.0",
+    "spaces>=0.51.3",
+    # ZeroGPU が対応する版(公式ドキュメントは 2.8.0 以降を挙げ、2.13.0 を例に載せている)。
+    # ai-theories が要求する torchvision>=0.28.0 とも整合する(torchvision 0.28.0 は torch 2.13.0 と対)。
+    "torch==2.13.0",
+]
+
+[tool.uv]
+# このディレクトリのコードはアプリであってライブラリではない。ビルドはしない。
+package = false
+
+[tool.uv.sources]
+# ai-theories は GitHub のコミットを固定して持ち込む。更新の手順は README.md の「ai-theories の版の更新」を参照。
+ai-theories = { git = "https://github.com/kojikojiprg/ai-theories", rev = "07368dafee39e088bcb2df98a267f0c4d0e3e5ab" }
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+# ルートの設定(行の長さ・規則)を引き継ぎ、このディレクトリを first-party の探索の起点にする。
+extend = "../../pyproject.toml"
+src = ["."]
+
+[tool.ruff.lint.isort]
+# playground(このアプリのコード)と src(ai-theories)を、サードパーティと分けて並べる。
+known-first-party = ["playground", "src"]
