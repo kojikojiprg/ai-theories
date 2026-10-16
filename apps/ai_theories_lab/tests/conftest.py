@@ -13,12 +13,13 @@ from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
+import gradio as gr
 import huggingface_hub.constants as hf_constants
 import pytest
 
 from lab.core.artifacts import Resources, load_resources
 from tests.stand_in import build_stand_in_artifacts
-from tests.zero_gpu import GpuApp, build_app_recording_gpu
+from tests.zero_gpu import GpuApp, build_app_recording_gpu, build_app_simulating_zero_gpu
 
 
 @pytest.fixture(scope="session")
@@ -47,6 +48,12 @@ def resources(stand_in_hub: Path) -> Resources:
 def gpu_app(resources: Resources) -> GpuApp:
     """``@gpu`` を付けた関数を記録しながら組み立てたアプリ(``app.py`` と同じ構成)。"""
     return build_app_recording_gpu(resources)
+
+
+@pytest.fixture(scope="session")
+def simulated_app(resources: Resources) -> gr.Blocks:
+    """すべての ``@gpu`` の関数が ZeroGPU と同じ受け渡しを通り、呼ばれた順を記録するアプリ。"""
+    return build_app_simulating_zero_gpu(resources)
 
 
 @pytest.fixture(scope="session")

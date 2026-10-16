@@ -17,6 +17,7 @@ from lab.features.instruction.service import (
     TASK_NAMES,
     TEMPLATE_UNSEEN,
     InstructionOutcome,
+    check_instruction_request,
     instruction_choices,
     parse_words,
     random_words,
@@ -105,20 +106,33 @@ def build_page(resources: Resources) -> None:
     """指示への応答のページを、``gr.Tab`` の中に組み立てる。"""
 
     @gpu(duration=INSTRUCTION_GPU_SECONDS)
+    def answer_instruction_on_gpu(
+        task: str, instruction: str, words: tuple[str, ...]
+    ) -> InstructionOutcome:
+        """検査済みの指示に、``sft-synthetic`` のモデルが貪欲法で答える(計算だけを行う)。"""
+        return respond(
+            resources.models["sft-synthetic"],
+            resources.tokenizer,
+            resources.device,
+            task,
+            instruction,
+            words,
+        )
+
     def answer_instruction(task: str, instruction: str, words_text: str) -> tuple[str, str]:
-        """合成課題の指示に、``sft-synthetic`` のモデルが貪欲法で答える。"""
+        """合成課題の指示に答える。入力の検査(GPU を使わない)を先に行い、誤りは ``gr.Error``。"""
         try:
             parsed = parse_words(words_text)
-            outcome = respond(
+            check_instruction_request(
                 resources.models["sft-synthetic"],
                 resources.tokenizer,
-                resources.device,
                 task,
                 instruction,
                 parsed.words,
             )
         except ValueError as error:
             raise gr.Error(str(error)) from error
+        outcome = answer_instruction_on_gpu(task, instruction, parsed.words)
         report = format_instruction_outcome(task, instruction, outcome)
         if parsed.warnings:
             report += "\n" + "\n".join(f"> 注意: {warning}" for warning in parsed.warnings) + "\n"

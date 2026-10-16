@@ -88,7 +88,7 @@ def test_generation_streams_the_same_text_through_the_simulated_boundary(
     SIMULATED_CALLS.clear()
     (text, stats, details), updates = _generate(simulated, method)
     (expected_text, _, expected_details), _ = _generate(direct, method)
-    assert SIMULATED_CALLS == ["generate_text"]
+    assert SIMULATED_CALLS == ["generate_text_on_gpu"]
     assert text.startswith(PROMPT)
     assert "毎秒" in stats
     assert updates >= 2  # 逐次表示(ビームサーチは、計算中と最後の 2 回)
@@ -124,7 +124,7 @@ def test_compare_gives_the_same_texts_through_the_simulated_boundary(
     SIMULATED_CALLS.clear()
     text_a, stats_a, _, text_b, stats_b, _ = compare(simulated)
     expected_a, _, _, expected_b, _, _ = compare(direct)
-    assert SIMULATED_CALLS == ["compare_methods"]
+    assert SIMULATED_CALLS == ["compare_methods_on_gpu"]
     assert (text_a, text_b) == (expected_a, expected_b)
     assert "毎秒" in stats_a
     assert "毎秒" in stats_b
@@ -142,7 +142,7 @@ def test_the_instruction_answer_is_the_same_through_the_simulated_boundary(
 
     SIMULATED_CALLS.clear()
     assert answer(simulated) == answer(direct)
-    assert SIMULATED_CALLS == ["answer_instruction"]
+    assert SIMULATED_CALLS == ["answer_instruction_on_gpu"]
 
 
 def _picture(plot: dict[str, str]) -> str:
@@ -164,7 +164,7 @@ def test_inspection_state_survives_the_simulated_boundary(
     SIMULATED_CALLS.clear()
     plot, _, probability_html, rows, summary = _analyze_and_render(simulated)
     expected_plot, _, expected_html, expected_rows, expected_summary = _analyze_and_render(direct)
-    assert SIMULATED_CALLS == ["run_model"]
+    assert SIMULATED_CALLS == ["run_model_on_gpu"]
     assert (probability_html, rows, summary) == (expected_html, expected_rows, expected_summary)
     assert _picture(plot) == _picture(expected_plot)
 
@@ -191,10 +191,14 @@ def test_reselecting_after_the_analysis_does_not_call_the_gpu_function(
     assert len(shown) == 3
 
 
-def test_an_error_message_reaches_the_client_through_the_simulated_boundary(
+def test_an_error_message_reaches_the_client_without_calling_the_gpu_function(
     simulated: Client,
 ) -> None:
-    """境界を越えて届くのは ``gr.Error`` のメッセージ。新しいセッションには、解析の結果がない。"""
+    """入力の誤りは、``@gpu`` の関数に入る前に ``gr.Error`` になる(GPU の関数は呼ばれない)。
+
+    新しいセッションには、トークン分割の結果がない。
+    """
+    SIMULATED_CALLS.clear()
     fresh = Client(simulated.src, verbose=False)
     with pytest.raises(Exception, match="先にトークン分割"):
         fresh.predict(api_name="/inspect_model")
@@ -202,3 +206,4 @@ def test_an_error_message_reaches_the_client_through_the_simulated_boundary(
         simulated.predict(
             "", "main", True, METHOD_GREEDY, 1.0, 40, 0.9, 2, 1.0, 8, 3, api_name="/generate_text"
         )
+    assert SIMULATED_CALLS == []

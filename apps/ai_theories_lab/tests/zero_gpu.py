@@ -250,11 +250,8 @@ class GpuApp:
     gpu_functions: dict[str, GpuFunction]
 
     def handler(self, name: str) -> Callable[..., Any]:
-        """画面のイベントに結び付けられた関数を、名前で取り出す(同名が 2 つあればエラー)。"""
-        found = [bf.fn for bf in self.demo.fns.values() if bf.fn and bf.name == name]
-        assert len(found) >= 1, f"イベントに結び付けられた関数 {name} がない"
-        assert all(f is found[0] for f in found), f"{name} という名前の別々の関数が複数ある"
-        return found[0]
+        """画面のイベントに結び付けられた関数を、名前で取り出す。"""
+        return find_handler(self.demo, name)
 
     def handlers_reading_state(self) -> set[str]:
         """入力に ``gr.State`` を含むイベントの関数の名前。"""
@@ -263,6 +260,14 @@ class GpuApp:
             for bf in self.demo.fns.values()
             if bf.fn and any(isinstance(c, gr.State) for c in bf.inputs)
         }
+
+
+def find_handler(demo: gr.Blocks, name: str) -> Callable[..., Any]:
+    """画面のイベントに結び付けられた関数を、名前で取り出す(同名の別の関数が 2 つあればエラー)。"""
+    found = [bf.fn for bf in demo.fns.values() if bf.fn and bf.name == name]
+    assert len(found) >= 1, f"イベントに結び付けられた関数 {name} がない"
+    assert all(f is found[0] for f in found), f"{name} という名前の別々の関数が複数ある"
+    return found[0]
 
 
 def feature_ui_modules() -> list[ModuleType]:
@@ -316,7 +321,7 @@ SIMULATED_CALLS: list[str] = []
 """``build_app_simulating_zero_gpu`` のアプリで、GPU の関数が呼ばれた順の名前(試験が数える)。"""
 
 
-def _simulated_zero_gpu(
+def simulated_zero_gpu(
     task: Callable[..., Any] | None = None, *, duration: float | None = None, **_: Any
 ) -> Callable[..., Any]:
     """ZeroGPU の受け渡しを手元で再現する ``@gpu``。実行は同じプロセスで行う。
@@ -344,6 +349,8 @@ def _simulated_zero_gpu(
                 try:
                     for index, item in enumerate(function(*args, **kwargs)):
                         yield assert_transferable(item, f"{name} の yield[{index}]")
+                except AssertionError:  # 受け渡しの検査の失敗は、試験の失敗として見せる
+                    raise
                 except Exception as error:
                     raise convert(error) from None
 
@@ -355,6 +362,8 @@ def _simulated_zero_gpu(
             args, kwargs = assert_transferable((args, kwargs), f"{name} の引数")
             try:
                 return assert_transferable(function(*args, **kwargs), f"{name} の戻り値")
+            except AssertionError:
+                raise
             except Exception as error:
                 raise convert(error) from None
 
@@ -365,7 +374,7 @@ def _simulated_zero_gpu(
 
 def build_app_simulating_zero_gpu(resources: Resources) -> gr.Blocks:
     """すべての ``@gpu`` の関数が、ZeroGPU と同じ受け渡しを通るアプリを組み立てる。"""
-    return build_app_with_gpu(resources, lambda module_name: _simulated_zero_gpu)
+    return build_app_with_gpu(resources, lambda module_name: simulated_zero_gpu)
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +392,11 @@ PLAIN_ANNOTATION_NAMES = frozenset(
         "dict",
         "Tokenization",
         "ModelAnalysis",
+        "DecodingSettings",
     }
 )
-"""``@gpu`` を付けた関数の引数に使ってよい型の注釈の名前。"""
+"""``@gpu`` を付けた関数の引数に使ってよい型の注釈の名前(Python の組み込みの型と、このアプリの
+データクラス)。"""
 FORBIDDEN_ANNOTATION_NAMES = frozenset(
     {
         "Module",
@@ -410,7 +421,10 @@ MODEL_RUNNER_NAMES = frozenset(
         "greedy_generate_until_stop",
     }
 )
-MODEL_ATTRIBUTES = frozenset({"models", "model"})
+MODEL_ATTRIBUTES = frozenset({"model"})
+"""モデルの本体(``LoadedModel.model``)を直接使うことを示す属性。``resources.models`` は、
+設定の読み取り(``max_sequence_length`` など)にも使うので、対象にしない
+(モデルを動かす関数の呼び出しは、名前で見る)。"""
 
 
 def is_gpu_decorator(node: ast.expr) -> bool:
@@ -450,6 +464,8 @@ def _annotation_names(annotation: ast.AST) -> list[str]:
     if isinstance(annotation, ast.Constant):
         if isinstance(annotation.value, str):  # 引用符で囲んだ注釈
             return _annotation_names(ast.parse(annotation.value, mode="eval").body)
+        if annotation.value is Ellipsis:  # tuple[str, ...] の省略記号
+            return []
         return ["None"] if annotation.value is None else [repr(annotation.value)]
     names: list[str] = []
     for child in ast.iter_child_nodes(annotation):
@@ -530,10 +546,10 @@ def model_users_outside_gpu(
 
     touches = {f.name for f in functions if runs_model_directly(f)}
     changed = True
-    while changed:  # 「モデルを動かす関数を呼ぶ関数」も、モデルを動かす
-        changed = False
+    while changed:  # 「@gpu でない、モデルを動かす関数」を呼ぶ関数も、モデルを動かす
+        changed = False  # (@gpu の関数を呼ぶのは構わない。それが正しい使い方)
         for name in names - touches:
-            if any(name in callers[callee] for callee in touches):
+            if any(name in callers[callee] for callee in touches if not is_gpu[callee]):
                 touches.add(name)
                 changed = True
 
@@ -545,3 +561,33 @@ def model_users_outside_gpu(
         return all(covered(caller, (*path, name)) for caller in callers[name])
 
     return sorted(name for name in touches if not covered(name))
+
+
+CHECK_CALL_PREFIXES = ("check_", "parse_", "validate")
+"""入力の検査の関数の名前の始まり(``check_generation_request``・``parse_words``・
+``settings.validate`` など)。"""
+
+
+def checks_inside_gpu_functions(tree: ast.AST) -> list[str]:
+    """``@gpu`` を付けた関数の本体にある、入力の検査らしい文を列挙する。
+
+    入力の検査は、``@gpu`` の関数に入る前に、画面のイベントの関数で行う(誤った入力で ZeroGPU の
+    利用枠を使わないため)。``@gpu`` の関数は計算だけを行うので、本体に ``raise``・``try``・
+    検査の関数の呼び出しを書かない。見つけた文は ``関数名:行番号: 内容`` の形で返す。
+    """
+    found = []
+    for function in gpu_functions_in(tree):
+        for node in ast.walk(function):
+            if node is function:
+                continue
+            where = f"{function.name}:{getattr(node, 'lineno', function.lineno)}"
+            if isinstance(node, ast.Raise):
+                found.append(f"{where}: raise")
+            elif isinstance(node, ast.Try):
+                found.append(f"{where}: try")
+            elif isinstance(node, ast.Call):
+                called = node.func
+                name = called.id if isinstance(called, ast.Name) else getattr(called, "attr", "")
+                if name.startswith(CHECK_CALL_PREFIXES):
+                    found.append(f"{where}: {name}()")
+    return found

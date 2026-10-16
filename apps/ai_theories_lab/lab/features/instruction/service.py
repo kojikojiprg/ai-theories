@@ -142,6 +142,30 @@ class InstructionOutcome:
     num_new_tokens: int
 
 
+def check_instruction_request(
+    loaded: LoadedModel,
+    tokenizer: BPEIDTokenizer,
+    task: str,
+    instruction: str,
+    words: tuple[str, ...],
+) -> tuple[str, list[int]]:
+    """GPU を使わずに判定できる入力の検査を行い、プロンプトとそのトークン ID を返す。
+
+    ``@spaces.GPU`` の関数に入る前に呼ぶ(誤った入力で ZeroGPU の利用枠を使わないため)。
+    ``respond`` も、同じ検査を最初に行う。入力の単語の検査は ``parse_words`` が行う。
+
+    Raises:
+        ValueError: 指示文が一覧にない、またはプロンプトが長すぎる場合
+            (メッセージは画面に表示できる日本語)。
+    """
+    template_kind_of(task, instruction)  # 一覧にない指示文は例外にする
+    prompt = format_prompt(instruction, words)
+    prompt_ids = tokenizer.encode(prompt)
+    if len(prompt_ids) + MAX_NEW_TOKENS > loaded.max_sequence_length:
+        raise ValueError("指示が長すぎます。単語を減らしてください。")
+    return prompt, prompt_ids
+
+
 def respond(
     loaded: LoadedModel,
     tokenizer: BPEIDTokenizer,
@@ -151,12 +175,8 @@ def respond(
     words: tuple[str, ...],
 ) -> InstructionOutcome:
     """指示を組み立て、貪欲法で終端記号まで生成して、016 と同じ基準で採点する。"""
-    template_kind_of(task, instruction)  # 一覧にない指示文は例外にする
+    prompt, prompt_ids = check_instruction_request(loaded, tokenizer, task, instruction, words)
     answer = apply_task(task, words)
-    prompt = format_prompt(instruction, words)
-    prompt_ids = tokenizer.encode(prompt)
-    if len(prompt_ids) + MAX_NEW_TOKENS > loaded.max_sequence_length:
-        raise ValueError("指示が長すぎます。単語を減らしてください。")
 
     (generated,) = greedy_generate_until_stop(
         loaded.model,

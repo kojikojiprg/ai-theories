@@ -268,6 +268,22 @@ class GenerationEvent:
     beam_candidates: tuple[tuple[float, str], ...] = ()
 
 
+def check_generation_request(
+    loaded: LoadedModel, tokenizer: BPEIDTokenizer, prompt: str, settings: DecodingSettings
+) -> list[int]:
+    """GPU を使わずに判定できる入力の検査を行い、書き出しのトークン ID を返す。
+
+    ``@spaces.GPU`` の関数に入る前に呼ぶ(誤った入力で ZeroGPU の利用枠を使わないため)。
+    ``generate_events`` も、同じ検査を最初に行う。
+
+    Raises:
+        ValueError: 設定・入力が生成できないもの(メッセージは画面に表示できる日本語)。
+    """
+    prompt_ids = tokenizer.encode(prompt)
+    settings.validate(len(prompt_ids), loaded.max_sequence_length)
+    return prompt_ids
+
+
 def generate_events(
     loaded: LoadedModel,
     tokenizer: BPEIDTokenizer,
@@ -284,8 +300,7 @@ def generate_events(
         ValueError: 設定・入力が生成できないもの(メッセージは画面に表示できる日本語)。
     """
     decode = decode or tokenizer.decode
-    prompt_ids = tokenizer.encode(prompt)
-    settings.validate(len(prompt_ids), loaded.max_sequence_length)
+    prompt_ids = check_generation_request(loaded, tokenizer, prompt, settings)
 
     if settings.method == METHOD_BEAM:
         yield GenerationEvent(prompt, 0, None, False, waiting_for_beam=True)

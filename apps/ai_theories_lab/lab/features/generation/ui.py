@@ -20,6 +20,7 @@ from lab.features.generation.service import (
     METHOD_TOP_P,
     DecodingSettings,
     GenerationEvent,
+    check_generation_request,
     generate_events,
 )
 from lab.ui.layout import Page
@@ -152,26 +153,51 @@ def build_settings(
 
 
 def build_page(resources: Resources) -> None:
-    """文章の生成のページを、``gr.Tab`` の中に組み立てる。"""
+    """文章の生成のページを、``gr.Tab`` の中に組み立てる。
+
+    画面のイベントの関数(``generate_text``・``compare_methods``)は、GPU を使わずに判定できる
+    入力の検査を先に行い、誤りなら ``gr.Error`` にする。検査を通った入力だけを、``@gpu`` を付けた
+    関数(``*_on_gpu``。計算だけを行う)に渡す。誤った入力で ZeroGPU の利用枠を使わないため。
+    """
     main = resources.models["main"]
     device = resources.device.type
+
+    def check_inputs(model_key: str, prompt: str, *settings_list: DecodingSettings) -> None:
+        """入力の検査(GPU を使わない)。誤りは ``gr.Error``。"""
+        try:
+            for settings in settings_list:
+                check_generation_request(
+                    resources.models[model_key], resources.tokenizer, prompt, settings
+                )
+        except ValueError as error:
+            raise gr.Error(str(error)) from error
 
     def run(
         model_key: str, prompt: str, settings: DecodingSettings, label: str
     ) -> Iterator[tuple[str, str, str]]:
-        try:
-            for event in generate_events(
-                resources.models[model_key],
-                resources.tokenizer,
-                resources.device,
-                prompt,
-                settings,
-            ):
-                yield describe_event(event, label, device)
-        except ValueError as error:
-            raise gr.Error(str(error)) from error
+        for event in generate_events(
+            resources.models[model_key], resources.tokenizer, resources.device, prompt, settings
+        ):
+            yield describe_event(event, label, device)
 
     @gpu(duration=GENERATION_GPU_SECONDS)
+    def generate_text_on_gpu(
+        prompt: str, model_key: str, settings: DecodingSettings
+    ) -> Iterator[tuple[str, str, str]]:
+        """検査済みの入力で、書き出しの続きを生成する(逐次表示)。"""
+        yield from run(model_key, prompt, settings, "生成結果")
+
+    @gpu(duration=COMPARISON_GPU_SECONDS)
+    def compare_methods_on_gpu(
+        prompt: str, model_key: str, settings_a: DecodingSettings, settings_b: DecodingSettings
+    ) -> Iterator[tuple[str, str, str, str, str, str]]:
+        """検査済みの入力で、デコードの方法 2 つを順に(同じ入力・同じシードで)生成して並べる。"""
+        state = {"a": ("", "", ""), "b": ("", "", "")}
+        for side, settings in (("a", settings_a), ("b", settings_b)):
+            for described in run(model_key, prompt, settings, f"方法 {side.upper()}"):
+                state[side] = described
+                yield (*state["a"], *state["b"])
+
     def generate_text(
         prompt: str,
         model_key: str,
@@ -197,9 +223,9 @@ def build_page(resources: Resources) -> None:
             max_new_tokens,
             seed,
         )
-        yield from run(model_key, prompt, settings, "生成結果")
+        check_inputs(model_key, prompt, settings)
+        yield from generate_text_on_gpu(prompt, model_key, settings)
 
-    @gpu(duration=COMPARISON_GPU_SECONDS)
     def compare_methods(
         prompt: str,
         model_key: str,
@@ -217,9 +243,8 @@ def build_page(resources: Resources) -> None:
         """同じ入力・同じシード・同じ設定で、デコードの方法 2 つを順に生成して並べる。"""
         if method_a == method_b:
             raise gr.Error("比べる 2 つのデコードの方法を、別のものにしてください。")
-        state = {"a": ("", "", ""), "b": ("", "", "")}
-        for side, method in (("a", method_a), ("b", method_b)):
-            settings = build_settings(
+        settings_a, settings_b = (
+            build_settings(
                 method,
                 use_cache,
                 temperature,
@@ -230,9 +255,10 @@ def build_page(resources: Resources) -> None:
                 max_new_tokens,
                 seed,
             )
-            for described in run(model_key, prompt, settings, f"方法 {side.upper()}"):
-                state[side] = described
-                yield (*state["a"], *state["b"])
+            for method in (method_a, method_b)
+        )
+        check_inputs(model_key, prompt, settings_a, settings_b)  # 2 つとも、生成の前に検査する
+        yield from compare_methods_on_gpu(prompt, model_key, settings_a, settings_b)
 
     gr.Markdown(GENERATION_MARKDOWN)
     with gr.Row():

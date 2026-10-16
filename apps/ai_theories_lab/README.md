@@ -144,15 +144,16 @@ ZeroGPU の外(手元の MPS や CPU)では`@spaces.GPU`が何もしないので
 
 - **引数と戻り値は、Python の値と numpy 配列だけにする。** GPU 上のテンソル、モデル、トークナイザは渡さない。`gr.State`に入る値(`Tokenization`・`ModelAnalysis`)も同じ。`analyze()`は、計算の最後に`.cpu().numpy()`で CPU の値にしてから返す。
 - **モデルとトークナイザは、起動時に読み込んだものを、関数の中で参照する。** 引数では渡さない。
-- **入力の誤りは、`@spaces.GPU`の関数の中でも`gr.Error`にする。** ZeroGPU が画面にメッセージごと返すのは`gr.Error`だけで、それ以外の例外は、クラス名だけの「ZeroGPU worker error」になる。
+- **入力の検査(GPU を使わずに判定できるもの)は、`@spaces.GPU`の関数に入る前に行う。** 誤った入力で ZeroGPU の利用枠を使わないためである。画面のイベントの関数(`generate_text`・`compare_methods`・`answer_instruction`・`run_model`)が、`service.py`の検査の関数(`check_generation_request`・`parse_words`・`check_instruction_request`・`check_analysis_request`)を呼び、誤りを`gr.Error`に変えてから、検査を通った入力だけを、`@spaces.GPU`を付けた関数(`generate_text_on_gpu`・`compare_methods_on_gpu`・`answer_instruction_on_gpu`・`run_model_on_gpu`。計算だけを行う)に渡す。`@spaces.GPU`の関数の中で起きた例外は、`gr.Error`以外ではメッセージが届かず、クラス名だけの「ZeroGPU worker error」になる。比べる 2 つのデコードの方法は、どちらも生成の前に検査する。
 - **層・ヘッド・位置・語の選び直しは、`gr.State`の値だけで表示を作り直し、モデルを動かさない。** モデルを動かす関数には、`@spaces.GPU`が要る。
 
 `tests/unit/`の次の試験が確かめます。pickle の呼び出しだけでは、`torch.nn.Module`も CPU 以外のテンソルも例外にならず、検出できません。手元には GPU のテンソルが出てこないので、型の **許可リスト** で調べます(Python の値・numpy 配列・`lab.`のデータクラスとその入れ物。このアプリでは、CPU 上のテンソルも許さない)。
 
-- `test_zero_gpu_values.py`: 検査器が違反する値を見つけること(検出力)、`service.py`の関数と`@spaces.GPU`の関数の引数・戻り値・yield のすべてが許可リストに合い、ZeroGPU と同じ経路(`ForkingPickler`)で往復しても同じ値になること、引数の型にモデル・トークナイザがないこと、モデルが起動時に読み込んだものであること、入力の誤りが`gr.Error`として届くこと。
+- `test_zero_gpu_values.py`: 検査器が違反する値を見つけること(検出力)、`service.py`の関数と`@spaces.GPU`の関数の引数・戻り値・yield のすべてが許可リストに合い、ZeroGPU と同じ経路(`ForkingPickler`)で往復しても同じ値になること、引数の型にモデル・トークナイザがないこと、モデルが起動時に読み込んだものであること、`gr.Error`がメッセージごと往復すること。
+- `test_input_checks.py`: 入力の検査の関数(`service.py`の`check_*`)が、計算の関数(`generate_events`・`respond`・`analyze`)と同じメッセージで誤りを知らせること。
 - `test_zero_gpu_state.py`: 「解析する」の引数と結果を往復させた後で、層・ヘッド・位置・語を選び直した表示が、往復の前と同じであること。選び直しがモデルを動かさないこと。
 - `test_zero_gpu_simulated.py`: すべての`@spaces.GPU`の関数が往復を通るアプリを組み立て、`gradio_client`から、往復を通さないアプリと同じ手順で呼んで、出力が一致すること。解析の後の選び直しで、GPU の関数が呼ばれないこと。
-- `test_architecture.py`: `@spaces.GPU`の関数の引数の注釈にモデル・トークナイザがないこと、モデルを動かす関数が`@spaces.GPU`の関数かその補助であること、機能のコードがモデルを読み込まない・デバイスへ移さないこと、`app.py`が起動時にモデルを読み込むこと。
+- `test_architecture.py`: 誤った入力(10 通り)では`@spaces.GPU`の関数が呼ばれず、正しい入力では 1 回だけ呼ばれること、`@spaces.GPU`の関数の本体に`raise`・`try`・検査の関数の呼び出しがないこと、`@spaces.GPU`の関数の引数の注釈にモデル・トークナイザがないこと、モデルを動かす関数が`@spaces.GPU`の関数かその補助であること、機能のコードがモデルを読み込まない・デバイスへ移さないこと、`app.py`が起動時にモデルを読み込むこと。
 
 **これらの試験が確かめるのは、受け渡す値の型と往復までです。** 別のプロセスと本物の GPU は使っていないので、本物の ZeroGPU 上の動作(GPU の割り当て・待ち行列・利用枠・本物の CUDA のテンソルを`.cpu()`した結果)は、デプロイの後に確かめる必要があります。
 
@@ -180,7 +181,7 @@ uv run pytest                        # tests/unit/ だけ。Hub を使わず、�
 uv run pytest tests/hub -m hub       # tests/hub/。Hub の本物のアーティファクトで走る(ネットワークが要る)
 ```
 
-- `tests/unit/`の確認: 読み込み(3 ブランチを同時に載せる)・貪欲法で KV キャッシュの有無が一致・`GPTLanguageModel.generate()`および`beam_search()`との一致・008 の`generate_with_filter()`との一致・計測に画面の更新の待ちが含まれないこと・入力の検証・指示の組み立てと採点・`gradio_client`から`app.py`を呼ぶ確認・トークン分割と BPE の結合の過程が`encode_chunk()`と一致すること・注意の重みの取り出しの一致(上の 3 つ)・画面の表示用の整形・構成の規約(`service.py`が Gradio を import しない、`spaces`が torch より先に import される)・ZeroGPU のプロセス境界を越える値(上の「ZeroGPU のプロセス境界を越える値」)。重みが乱数なので、**生成の中身やモデルの性能は何も確かめられません。**
+- `tests/unit/`の確認: 読み込み(3 ブランチを同時に載せる)・貪欲法で KV キャッシュの有無が一致・`GPTLanguageModel.generate()`および`beam_search()`との一致・008 の`generate_with_filter()`との一致・計測に画面の更新の待ちが含まれないこと・入力の検証・指示の組み立てと採点・`gradio_client`から`app.py`を呼ぶ確認・トークン分割と BPE の結合の過程が`encode_chunk()`と一致すること・注意の重みの取り出しの一致(上の 3 つ)・画面の表示用の整形・構成の規約(`service.py`が Gradio を import しない、`spaces`が torch より先に import される)・入力の検査の関数・ZeroGPU のプロセス境界を越える値と、入力の検査の位置(上の「ZeroGPU のプロセス境界を越える値」)。重みが乱数なので、**生成の中身やモデルの性能は何も確かめられません。**
 - `tests/hub/`の確認: チェックポイントの SHA-256(017・010 のノートブックの記録との一致)、設定が 010 の`PROD_CONFIG`と一致、合成課題の完全一致率(見たことのあるテンプレートが 0.5 以上、未見のテンプレートが基準値 0.25 未満)、退化の例で貪欲法の 4-gram 重複率が top-p より高いこと、本物のトークナイザと本物の重みでの、注意の重みの取り出しの一致。
 
 ### 5.3 Hugging Face Spaces(ZeroGPU)へのデプロイ

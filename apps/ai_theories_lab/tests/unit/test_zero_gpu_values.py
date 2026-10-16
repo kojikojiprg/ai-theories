@@ -8,10 +8,13 @@ ZeroGPU では、``@spaces.GPU`` を付けた関数が別のプロセスで動�
 
 1. 検査器の検出力(違反する値を見つけること)。
 2. ``service.py`` の関数のうち、``@gpu`` の関数から呼ぶものの戻り値(生成器は yield のすべて)。
-3. ``@gpu`` を付けた関数そのものの、引数・戻り値・yield。
+3. ``@gpu`` を付けた関数(``*_on_gpu``)そのものの、引数・戻り値・yield。
 4. ``@gpu`` を付けた関数の引数の型に、モデルやトークナイザがないこと。
-5. ``@gpu`` を付けた関数が、起動時に読み込んだモデルを関数の中で参照していること。
-6. 例外: 画面に出すメッセージが境界を越えること(``gr.Error`` だけがメッセージごと届く)。
+5. 画面のイベントの関数が、起動時に読み込んだモデルを関数の中で参照していること。
+6. ``gr.Error`` がメッセージごと境界を越えること。
+
+入力の検査は ``@gpu`` の関数の外(画面のイベントの関数)で行う。誤った入力で ``@gpu`` の関数が
+呼ばれないことは、``test_architecture.py`` で確かめる。
 """
 
 from __future__ import annotations
@@ -45,11 +48,15 @@ from lab.features.generation.service import (
     run_beam_search,
     stream_generation,
 )
-from lab.features.generation.ui import EXAMPLE_PROMPTS
 from lab.features.inspection import ui as inspection_ui
 from lab.features.inspection.service import ModelAnalysis, Tokenization, analyze, tokenize
 from lab.features.instruction import ui as instruction_ui
-from lab.features.instruction.service import TASK_NAMES, instruction_choices, respond
+from lab.features.instruction.service import (
+    TASK_NAMES,
+    InstructionOutcome,
+    instruction_choices,
+    respond,
+)
 from src.data.tokenizer import BPEIDTokenizer
 from src.models.gpt import GPTLanguageModel
 from tests.stand_in import TRAINING_SENTENCES
@@ -61,6 +68,15 @@ from tests.zero_gpu import (
     cross_process_boundary,
     find_violations,
     gpu_function_names_in_source,
+)
+from tests.zero_gpu_cases import (
+    GENERATOR_HANDLERS,
+    GPU_FUNCTION_OF,
+    PROMPT,
+    comparison_arguments,
+    generation_arguments,
+    inspection_arguments,
+    instruction_arguments,
 )
 
 # ---------------------------------------------------------------------------
@@ -202,32 +218,6 @@ def test_the_comparison_detects_a_difference_after_the_round_trip() -> None:
 # ---------------------------------------------------------------------------
 # 2. service.py の関数の戻り値(@gpu の関数から呼ぶもの)
 # ---------------------------------------------------------------------------
-PROMPT = EXAMPLE_PROMPTS[0]
-
-
-def _generation(**overrides: Any) -> dict[str, Any]:
-    """``generate_text`` の引数(スライダー・数値欄は float で届くので、そのとおりにする)。"""
-    return {
-        "prompt": PROMPT,
-        "model_key": "main",
-        "use_cache": True,
-        "method": METHOD_GREEDY,
-        "temperature": 1.0,
-        "top_k": 40.0,
-        "top_p": 0.9,
-        "beam_size": 2.0,
-        "length_penalty": 1.0,
-        "max_new_tokens": 6.0,
-        "seed": 0.0,
-    } | overrides
-
-
-def _comparison(**overrides: Any) -> dict[str, Any]:
-    arguments = _generation(method_a=METHOD_GREEDY, method_b=METHOD_TOP_P) | overrides
-    arguments.pop("method")
-    return arguments
-
-
 @pytest.mark.parametrize(
     ("method", "use_cache"),
     [(method, True) for method in DECODING_METHODS] + [(METHOD_GREEDY, False)],
@@ -307,97 +297,67 @@ def test_the_analysis_holds_only_numpy_arrays_and_python_numbers(resources: Reso
 
 
 # ---------------------------------------------------------------------------
-# 3. @gpu を付けた関数の引数・戻り値・yield
+# 3. @gpu を付けた関数(*_on_gpu)の引数・戻り値・yield
 # ---------------------------------------------------------------------------
-GENERATOR_FUNCTIONS = {"generate_text", "compare_methods"}
+WORDS = ("cat", "dog", "house", "tree")
 
 
-def _inspection_arguments(resources: Resources) -> dict[str, Any]:
-    return {"tokenization": tokenize(resources.tokenizer, TRAINING_SENTENCES[0])}
+def _decoding(method: str, **overrides: Any) -> DecodingSettings:
+    return DecodingSettings(method=method, max_new_tokens=6, beam_size=2, **overrides)
 
 
-def _instruction_arguments(task: str, kind: str, words_text: str) -> dict[str, Any]:
-    return {
-        "task": task,
-        "instruction": instruction_choices(task, kind)[0],
-        "words_text": words_text,
-    }
-
-
-SUCCESS_CASES: list[Any] = [
+GPU_CASES: list[Any] = [
     *(
         pytest.param(
-            "generate_text", lambda r, m=method: _generation(method=m), id=f"generate_text-{method}"
+            "generate_text_on_gpu",
+            lambda r, m=method: {"prompt": PROMPT, "model_key": "main", "settings": _decoding(m)},
+            id=f"generate_text-{method}",
         )
         for method in DECODING_METHODS
     ),
     pytest.param(
-        "generate_text",
-        lambda r: _generation(model_key="gqa", use_cache=False),
+        "generate_text_on_gpu",
+        lambda r: {
+            "prompt": PROMPT,
+            "model_key": "gqa",
+            "settings": _decoding(METHOD_GREEDY, use_cache=False),
+        },
         id="generate_text-gqa-no-cache",
     ),
-    pytest.param("compare_methods", lambda r: _comparison(), id="compare_methods-greedy-top_p"),
     pytest.param(
-        "compare_methods",
-        lambda r: _comparison(method_a=METHOD_BEAM, method_b=METHOD_TOP_K),
-        id="compare_methods-beam-top_k",
+        "compare_methods_on_gpu",
+        lambda r: {
+            "prompt": PROMPT,
+            "model_key": "main",
+            "settings_a": _decoding(METHOD_GREEDY),
+            "settings_b": _decoding(METHOD_TOP_P),
+        },
+        id="compare-greedy-top_p",
     ),
     pytest.param(
-        "answer_instruction",
-        lambda r: _instruction_arguments("reverse", "seen", "cat dog house tree"),
+        "compare_methods_on_gpu",
+        lambda r: {
+            "prompt": PROMPT,
+            "model_key": "main",
+            "settings_a": _decoding(METHOD_BEAM),
+            "settings_b": _decoding(METHOD_TOP_K),
+        },
+        id="compare-beam-top_k",
+    ),
+    pytest.param(
+        "answer_instruction_on_gpu",
+        lambda r: {"task": "reverse", "instruction": SEEN_REVERSE, "words": WORDS},
         id="answer_instruction-seen",
     ),
     pytest.param(
-        "answer_instruction",
-        lambda r: _instruction_arguments("rotate_left", "unseen", "cat, dog house"),
+        "answer_instruction_on_gpu",
+        lambda r: {"task": "rotate_left", "instruction": UNSEEN_ROTATE_LEFT, "words": WORDS[:3]},
         id="answer_instruction-unseen",
     ),
-    pytest.param("run_model", _inspection_arguments, id="run_model"),
+    pytest.param("run_model_on_gpu", inspection_arguments, id="run_model"),
 ]
-
-ERROR_CASES: list[Any] = [
-    pytest.param("generate_text", lambda r: _generation(prompt=""), "空です", id="empty-prompt"),
-    pytest.param(
-        "generate_text", lambda r: _generation(max_new_tokens=0.0), "1 以上", id="zero-tokens"
-    ),
-    pytest.param(
-        "generate_text", lambda r: _generation(prompt="word " * 400), "長すぎ", id="long-prompt"
-    ),
-    pytest.param(
-        "compare_methods",
-        lambda r: _comparison(method_a=METHOD_TOP_P, method_b=METHOD_TOP_P),
-        "別のもの",
-        id="same-methods",
-    ),
-    pytest.param("compare_methods", lambda r: _comparison(prompt=""), "空です", id="empty-compare"),
-    pytest.param(
-        "answer_instruction",
-        lambda r: _instruction_arguments("reverse", "seen", "cat dog"),
-        "単語は",
-        id="too-few-words",
-    ),
-    pytest.param(
-        "answer_instruction",
-        lambda r: (
-            _instruction_arguments("reverse", "seen", "cat dog house tree")
-            | {"instruction": "Do something with the words."}
-        ),
-        "テンプレート",
-        id="unlisted-instruction",
-    ),
-    pytest.param("run_model", lambda r: {"tokenization": None}, "先にトークン分割", id="no-state"),
-    pytest.param(
-        "run_model",
-        lambda r: {
-            "tokenization": dataclasses.replace(
-                tokenize(r.tokenizer, TRAINING_SENTENCES[0]),
-                pieces=tokenize(r.tokenizer, TRAINING_SENTENCES[0]).pieces * 20,
-            )
-        },
-        "トークン数",
-        id="too-many-tokens",
-    ),
-]
+SEEN_REVERSE = instruction_choices("reverse", "seen")[0]
+UNSEEN_ROTATE_LEFT = instruction_choices("rotate_left", "unseen")[0]
 
 
 def _consume(result: Any) -> list[Any]:
@@ -411,17 +371,25 @@ def test_every_gpu_function_has_a_case_below(gpu_app: GpuApp) -> None:
     """``@gpu`` を足したら、この試験の表にも足す(足さないと、境界を越える値が調べられない)。"""
     in_source = gpu_function_names_in_source()
     assert set(gpu_app.gpu_functions) == in_source
-    assert {param.values[0] for param in SUCCESS_CASES} == in_source
-    assert {param.values[0] for param in ERROR_CASES} == in_source
+    assert {param.values[0] for param in GPU_CASES} == in_source
+    assert set(GPU_FUNCTION_OF.values()) == in_source
 
 
-def test_every_gpu_function_is_the_function_the_event_calls(gpu_app: GpuApp) -> None:
-    for name, record in gpu_app.gpu_functions.items():
-        assert gpu_app.handler(name) is record.function, name
-        assert inspect.isgeneratorfunction(record.function) == (name in GENERATOR_FUNCTIONS), name
+def test_every_event_function_calls_its_gpu_function_and_streams_like_it(gpu_app: GpuApp) -> None:
+    """画面のイベントの関数は ``@gpu`` の関数とは別で、逐次表示(生成器)かどうかが一致する。
+
+    Gradio は、イベントの関数が生成器のときだけ逐次表示にする。イベントの関数が生成器でなければ、
+    ``@gpu`` の関数が生成器でも、最後にまとめて表示される。
+    """
+    for handler_name, gpu_name in GPU_FUNCTION_OF.items():
+        handler = gpu_app.handler(handler_name)
+        gpu_function = gpu_app.gpu_functions[gpu_name].function
+        assert handler is not gpu_function, handler_name
+        assert inspect.isgeneratorfunction(handler) == (handler_name in GENERATOR_HANDLERS)
+        assert inspect.isgeneratorfunction(gpu_function) == (handler_name in GENERATOR_HANDLERS)
 
 
-@pytest.mark.parametrize(("name", "make_arguments"), SUCCESS_CASES)
+@pytest.mark.parametrize(("name", "make_arguments"), GPU_CASES)
 def test_gpu_function_arguments_and_outputs_cross_the_boundary(
     resources: Resources, gpu_app: GpuApp, name: str, make_arguments: Callable[..., Any]
 ) -> None:
@@ -429,45 +397,33 @@ def test_gpu_function_arguments_and_outputs_cross_the_boundary(
     sent = assert_transferable(make_arguments(resources), f"{name} の引数")
     outputs = _consume(function(**sent))
 
-    if name == "generate_text":
+    if name == "generate_text_on_gpu":
         assert len(outputs) >= 2
         assert all(len(o) == 3 and all(type(v) is str for v in o) for o in outputs)
         assert outputs[-1][0].startswith(PROMPT)
-    elif name == "compare_methods":
+    elif name == "compare_methods_on_gpu":
         assert len(outputs) >= 2
         assert all(len(o) == 6 and all(type(v) is str for v in o) for o in outputs)
-    elif name == "answer_instruction":
-        ((prompt, report),) = outputs
-        assert type(prompt) is str
-        assert type(report) is str
-        assert "正解" in report
+    elif name == "answer_instruction_on_gpu":
+        (outcome,) = outputs
+        assert isinstance(outcome, InstructionOutcome)
+        assert outcome.answer
     else:
         (analysis,) = outputs
         assert isinstance(analysis, ModelAnalysis)
         assert analysis.token_ids == sent["tokenization"].token_ids
 
 
-@pytest.mark.parametrize(("name", "make_arguments", "message"), ERROR_CASES)
-def test_gpu_function_errors_keep_their_message_across_the_boundary(
-    resources: Resources,
-    gpu_app: GpuApp,
-    name: str,
-    make_arguments: Callable[..., Any],
-    message: str,
-) -> None:
+def test_gradio_error_keeps_its_message_across_the_boundary() -> None:
     """ZeroGPU は、``gr.Error`` だけをメッセージごと画面に返す(``wrappers.py`` の
-    ``exception_result``)。それ以外の例外は、クラス名だけの「ZeroGPU worker error」になり、
-    日本語の説明が失われる。``@gpu`` の関数の中で起こりうる入力の誤りは、すべて
-    ``gr.Error`` にする。
+    ``exception_result``)。それ以外の例外は、クラス名だけの「ZeroGPU worker error」になる。
+    入力の誤りは ``@gpu`` の関数の外で ``gr.Error`` にするが、``gr.Error`` が往復しても
+    メッセージが変わらないことは、境界を越える値の性質として確かめておく。
     """
-    function = gpu_app.gpu_functions[name].function
-    sent = assert_transferable(make_arguments(resources), f"{name} の引数")
-    with pytest.raises(gr.Error) as caught:
-        _consume(function(**sent))
-    assert message in caught.value.message
-    received = cross_process_boundary(caught.value)
+    error = gr.Error("書き出しが空です。英語の文を入力してください。")
+    received = cross_process_boundary(error)
     assert isinstance(received, gr.Error)
-    assert received.message == caught.value.message
+    assert received.message == error.message
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +437,8 @@ ALLOWED_ARGUMENT_TYPES: tuple[type, ...] = (
     type(None),
     Tokenization,
     ModelAnalysis,
+    DecodingSettings,
+    InstructionOutcome,
 )
 
 
@@ -538,7 +496,7 @@ def test_the_signature_check_finds_models_tokenizers_and_unlisted_types(
 
 
 # ---------------------------------------------------------------------------
-# 5. 起動時に読み込んだモデルを、関数の中で参照する
+# 5. 起動時に読み込んだモデルを、画面のイベントの関数の中で参照する
 # ---------------------------------------------------------------------------
 def _spy(monkeypatch: pytest.MonkeyPatch, module: ModuleType, name: str) -> list[tuple[Any, ...]]:
     """``module.name`` を、呼ばれたときの位置引数を記録して元の関数へ渡すものに差し替える。"""
@@ -553,7 +511,7 @@ def _spy(monkeypatch: pytest.MonkeyPatch, module: ModuleType, name: str) -> list
     return calls
 
 
-def test_gpu_functions_use_the_models_loaded_at_startup(
+def test_event_functions_use_the_models_loaded_at_startup(
     resources: Resources, gpu_app: GpuApp, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """モデル・トークナイザ・デバイスは、引数ではなく、起動時の ``Resources`` から引く。"""
@@ -561,14 +519,14 @@ def test_gpu_functions_use_the_models_loaded_at_startup(
     respond_calls = _spy(monkeypatch, instruction_ui, "respond")
     analyze_calls = _spy(monkeypatch, inspection_ui, "analyze")
 
-    _consume(gpu_app.gpu_functions["generate_text"].function(**_generation(model_key="gqa")))
-    _consume(gpu_app.gpu_functions["compare_methods"].function(**_comparison()))
+    _consume(gpu_app.handler("generate_text")(**generation_arguments(model_key="gqa")))
+    _consume(gpu_app.handler("compare_methods")(**comparison_arguments()))
     _consume(
-        gpu_app.gpu_functions["answer_instruction"].function(
-            **_instruction_arguments("reverse", "seen", "cat dog house tree")
+        gpu_app.handler("answer_instruction")(
+            **instruction_arguments("reverse", "seen", "cat dog house tree")
         )
     )
-    _consume(gpu_app.gpu_functions["run_model"].function(**_inspection_arguments(resources)))
+    _consume(gpu_app.handler("run_model")(**inspection_arguments(resources)))
 
     assert len(generate_calls) == 3  # generate_text が 1 回、compare_methods が 2 回
     assert generate_calls[0][0] is resources.models["gqa"]

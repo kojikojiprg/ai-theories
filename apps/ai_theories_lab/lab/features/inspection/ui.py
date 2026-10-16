@@ -24,6 +24,7 @@ from lab.features.inspection.service import (
     PositionView,
     Tokenization,
     analyze,
+    check_analysis_request,
     describe_position,
     readable_symbol,
     select_attention,
@@ -262,14 +263,17 @@ def build_page(resources: Resources) -> None:
         )
 
     @gpu(duration=INSPECTION_GPU_SECONDS)
+    def run_model_on_gpu(tokenization: Tokenization) -> ModelAnalysis:
+        """検査済みのトークン列をモデルに 1 回通す(GPU を使う処理は、ここだけ)。"""
+        return analyze(main, resources.device, tokenization.token_ids)
+
     def run_model(tokenization: Tokenization | None) -> ModelAnalysis:
-        """トークン列をモデルに 1 回通す(GPU を使う処理は、ここだけ)。"""
-        if tokenization is None:
-            raise gr.Error("先にトークン分割を実行してください。")
+        """「解析する」の本体。入力の検査(GPU を使わない)を先に行い、誤りは ``gr.Error``。"""
         try:
-            return analyze(main, resources.device, tokenization.token_ids)
+            checked = check_analysis_request(tokenization)
         except ValueError as error:
             raise gr.Error(str(error)) from error
+        return run_model_on_gpu(checked)
 
     def render_attention(
         analysis: ModelAnalysis | None, tokenization: Tokenization | None, layer: int, head: str

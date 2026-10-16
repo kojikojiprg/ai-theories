@@ -61,7 +61,7 @@ def states(resources: Resources, gpu_app: GpuApp) -> dict[str, Any]:
     """
     tokenization = tokenize(resources.tokenizer, TEXT)
     sent = assert_transferable(tokenization, "tokenization(引数)")
-    produced = gpu_app.handler("run_model")(sent)
+    produced = gpu_app.gpu_functions["run_model_on_gpu"].function(sent)
     received = assert_transferable(produced, "analysis(戻り値)")
     return {
         "before": (produced, tokenization),
@@ -181,10 +181,12 @@ def test_no_reselection_handler_uses_the_gpu(gpu_app: GpuApp) -> None:
 
 
 def test_every_non_gpu_handler_that_reads_a_state_is_covered_above(gpu_app: GpuApp) -> None:
-    """``gr.State`` を入力に取るイベントのうち、``@gpu`` でないものは、この試験の対象と一致する。
+    """``gr.State`` を入力に取るイベントの関数は、選び直しの 4 つと ``run_model`` だけ。
 
+    ``run_model`` は入力の検査をして ``@gpu`` の関数(``run_model_on_gpu``)を呼ぶだけの関数で、
+    モデルは動かさない。``@gpu`` の関数が ``gr.State`` を直接受け取るのは、``run_model_on_gpu``。
     新しい選び直しの処理を足したら、ここと上の試験に足す(足さないと失敗する)。
     """
     readers = gpu_app.handlers_reading_state()
-    assert readers - set(gpu_app.gpu_functions) == RESELECTION_HANDLERS
-    assert readers & set(gpu_app.gpu_functions) == {"run_model"}
+    assert readers == RESELECTION_HANDLERS | {"run_model"}
+    assert readers.isdisjoint(gpu_app.gpu_functions)  # イベントに結び付くのは、検査をする関数の側

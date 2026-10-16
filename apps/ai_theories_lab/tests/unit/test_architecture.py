@@ -1,20 +1,31 @@
 """構成の規約: 処理(``service.py``)と画面(``ui.py``)の分離、``spaces`` の import の順序、
-ZeroGPU の関数の引数・モデルの読み込みの場所・GPU を使う関数の範囲。"""
+ZeroGPU の関数の引数・モデルの読み込みの場所・GPU を使う関数の範囲・入力の検査の位置
+(誤った入力では ``@spaces.GPU`` の関数が呼ばれない)。"""
 
 from __future__ import annotations
 
 import ast
+import inspect
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import gradio as gr
 import pytest
 
+from lab.core.artifacts import Resources
 from tests.zero_gpu import (
+    SIMULATED_CALLS,
+    checks_inside_gpu_functions,
+    find_handler,
     gpu_function_names_in_source,
     model_users_outside_gpu,
+    simulated_zero_gpu,
     unsafe_gpu_parameters,
 )
+from tests.zero_gpu_cases import GPU_FUNCTION_OF, INVALID_CASES, VALID_CASES
 
 APP_DIR = Path(__file__).resolve().parents[2]
 SERVICE_FILES = sorted((APP_DIR / "lab" / "features").glob("*/service.py"))
@@ -92,12 +103,7 @@ def _ui_tree(path: Path) -> ast.Module:
 
 def test_the_ui_files_exist_and_use_the_gpu_decorator() -> None:
     assert {p.parent.name for p in UI_FILES} == {"generation", "inspection", "instruction"}
-    assert gpu_function_names_in_source() == {
-        "generate_text",
-        "compare_methods",
-        "answer_instruction",
-        "run_model",
-    }
+    assert gpu_function_names_in_source() == set(GPU_FUNCTION_OF.values())
 
 
 @pytest.mark.parametrize("path", UI_FILES, ids=lambda p: p.parent.name)
@@ -262,3 +268,120 @@ def test_no_feature_code_loads_a_model_or_moves_one_to_a_device(path: Path) -> N
             assert called.attr not in MODEL_LOADING_CALLS, (
                 f"{path.name}: .{called.attr}() を呼んでいる"
             )
+
+
+# ---------------------------------------------------------------------------
+# ZeroGPU: 入力の検査は、@gpu の関数に入る前に行う(誤った入力で利用枠を使わない)
+#
+# 画面のイベントの関数(generate_text・compare_methods・answer_instruction・run_model)が、
+# GPU を使わずに判定できる入力の検査を行い、誤りなら gr.Error にする。検査を通った入力だけを、
+# @gpu を付けた関数(*_on_gpu。計算だけを行う)に渡す。
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("path", UI_FILES, ids=lambda p: p.parent.name)
+def test_gpu_functions_only_compute_and_do_not_check_inputs(path: Path) -> None:
+    """``@gpu`` の関数の本体に、``raise``・``try``・検査の関数の呼び出しを書かない。"""
+    assert checks_inside_gpu_functions(_ui_tree(path)) == []
+
+
+def test_the_check_for_checks_inside_gpu_functions_finds_the_mistakes() -> None:
+    source = """
+@gpu(duration=10)
+def computes_only(tokenization):
+    return analyze(model, device, tokenization.token_ids)
+
+@gpu
+def raises(text):
+    if not text:
+        raise gr.Error("空です")
+    return text
+
+@spaces.GPU
+def catches(text):
+    try:
+        return respond(text)
+    except ValueError as error:
+        return str(error)
+
+@gpu
+def validates(settings, loaded, tokenizer, prompt):
+    settings.validate(3, 256)
+    check_generation_request(loaded, tokenizer, prompt, settings)
+    return parse_words(prompt)
+
+def not_a_gpu_function(text):
+    if not text:
+        raise gr.Error("空です")
+"""
+    found = checks_inside_gpu_functions(ast.parse(source))
+    assert [item.split(":")[0] for item in found].count("computes_only") == 0
+    assert [item.split(":")[0] for item in found].count("not_a_gpu_function") == 0
+    kinds = {(item.split(":")[0], item.split(": ")[1]) for item in found}
+    assert kinds == {
+        ("raises", "raise"),
+        ("catches", "try"),
+        ("validates", "validate()"),
+        ("validates", "check_generation_request()"),
+        ("validates", "parse_words()"),
+    }
+
+
+def test_the_gpu_call_counter_counts_a_gpu_function_that_fails_at_once() -> None:
+    """検査が ``@gpu`` の関数の中に残っていると、誤った入力でも関数が呼ばれた記録が残る。"""
+
+    @simulated_zero_gpu
+    def checks_inside(text: str) -> str:
+        if not text:
+            raise gr.Error("空です")
+        return text
+
+    SIMULATED_CALLS.clear()
+    with pytest.raises(gr.Error, match="空です"):
+        checks_inside("")
+    assert SIMULATED_CALLS == ["checks_inside"]
+    SIMULATED_CALLS.clear()
+
+
+def test_every_event_function_has_a_gpu_function_and_both_exist(simulated_app: gr.Blocks) -> None:
+    for handler_name in GPU_FUNCTION_OF:
+        assert callable(find_handler(simulated_app, handler_name))
+
+
+@pytest.mark.parametrize(("name", "make_arguments", "message"), INVALID_CASES)
+def test_invalid_input_never_reaches_the_gpu_function(
+    resources: Resources,
+    simulated_app: gr.Blocks,
+    name: str,
+    make_arguments: Callable[..., Any],
+    message: str,
+) -> None:
+    """誤った入力では、``gr.Error`` になるだけで、``@gpu`` の関数は呼ばれない(利用枠を使わない)。
+
+    ZeroGPU の外では ``@spaces.GPU`` が何もしないので、ZeroGPU と同じ受け渡しを通す
+    ``@gpu``(呼ばれた順を記録する)に差し替えたアプリで確かめる。誤りの表示(メッセージ)は、
+    検査を外に出す前と同じ。
+    """
+    handler = find_handler(simulated_app, name)
+    SIMULATED_CALLS.clear()
+    with pytest.raises(gr.Error) as caught:
+        for _ in _iterate(handler(**make_arguments(resources))):
+            pass
+    assert message in caught.value.message
+    assert SIMULATED_CALLS == [], f"{name}: 誤った入力で {SIMULATED_CALLS} が呼ばれた"
+
+
+@pytest.mark.parametrize(("name", "make_arguments"), VALID_CASES)
+def test_valid_input_reaches_the_gpu_function_exactly_once(
+    resources: Resources, simulated_app: gr.Blocks, name: str, make_arguments: Callable[..., Any]
+) -> None:
+    """上の試験の対照: 正しい入力では、対応する ``@gpu`` の関数が 1 回だけ呼ばれる。"""
+    handler = find_handler(simulated_app, name)
+    SIMULATED_CALLS.clear()
+    for _ in _iterate(handler(**make_arguments(resources))):
+        pass
+    assert [GPU_FUNCTION_OF[name]] == SIMULATED_CALLS
+    SIMULATED_CALLS.clear()
+
+
+def _iterate(result: Any) -> Any:
+    """生成器なら yield のすべて、そうでなければ戻り値 1 つ。"""
+    return result if inspect.isgenerator(result) else [result]

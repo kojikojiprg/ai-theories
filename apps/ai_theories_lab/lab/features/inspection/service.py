@@ -289,6 +289,34 @@ class ModelAnalysis:
         return math.log(self.vocabulary_size)
 
 
+def check_token_count(num_tokens: int) -> None:
+    """調べられるトークン数(1 以上 ``MAX_INSPECTION_TOKENS`` 以下)かを確かめる。
+
+    Raises:
+        ValueError: 範囲外の場合(メッセージは画面に表示できる日本語)。
+    """
+    if not 1 <= num_tokens <= MAX_INSPECTION_TOKENS:
+        raise ValueError(
+            f"トークン数は 1 以上 {MAX_INSPECTION_TOKENS} 以下にしてください(今は {num_tokens})。"
+        )
+
+
+def check_analysis_request(tokenization: Tokenization | None) -> Tokenization:
+    """GPU を使わずに判定できる入力の検査を行い、検査を通った ``Tokenization`` を返す。
+
+    ``@spaces.GPU`` の関数に入る前に呼ぶ(誤った入力で ZeroGPU の利用枠を使わないため)。
+    ``analyze`` も、トークン数の検査を最初に行う。
+
+    Raises:
+        ValueError: トークン分割がまだない、またはトークン数が範囲外の場合
+            (メッセージは画面に表示できる日本語)。
+    """
+    if tokenization is None:
+        raise ValueError("先にトークン分割を実行してください。")
+    check_token_count(len(tokenization.token_ids))
+    return tokenization
+
+
 @torch.no_grad()
 def analyze(
     loaded: LoadedModel,
@@ -305,10 +333,7 @@ def analyze(
         ValueError: トークン列が空、または ``MAX_INSPECTION_TOKENS`` を超える場合。
     """
     num_tokens = len(token_ids)
-    if not 1 <= num_tokens <= MAX_INSPECTION_TOKENS:
-        raise ValueError(
-            f"トークン数は 1 以上 {MAX_INSPECTION_TOKENS} 以下にしてください(今は {num_tokens})。"
-        )
+    check_token_count(num_tokens)
     model = loaded.model
     tokens = torch.tensor([list(token_ids)], dtype=torch.long, device=device)
 
