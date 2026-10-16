@@ -13,9 +13,15 @@ dependencies = [
     "torchvision>=0.28.0",
 ]
 
-[tool.uv]
-# src/ は import される前提の共通モジュール。パッケージとしてはビルドしない。
-package = false
+[build-system]
+# src/ を `from src.layers import ...` の形のまま import できるパッケージとして install できるようにする。
+# apps/ の各アプリは、このリポジトリをコミット固定の git 依存として持ち込む(CLAUDE.md の apps/ の節)。
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# 配布するのは src/ だけ(theories/・apps/・scripts/ は含めない)。
+packages = ["src"]
 
 [dependency-groups]
 # ローカルでノートブックを実行するための開発用依存(requirements.txt には含めない)。
