@@ -27,7 +27,7 @@ ai-theories/
 │   └── 07_retrieval/
 ├── apps/                   # システム構築の実践(1 つの統合アプリに、機能を段階的に足す)
 │   ├── README.md           # 機能の一覧・段階の計画・公開方針
-│   └── ai_theories_lab/    # 統合アプリ。そのまま Hugging Face Spaces のリポジトリルートになる
+│   └── ai_theories_lab/    # 統合アプリ。公開する場合は、そのまま Hugging Face Spaces のリポジトリルートになる
 │       ├── app.py          #   入口。各機能のページを組み立てるだけ
 │       ├── pyproject.toml / uv.lock / requirements.txt / README.md
 │       ├── lab/
@@ -74,7 +74,7 @@ ai-theories/
 
 ### apps/(システム構築の実践)
 
-- 学んだ理論を使って実際に動くシステムを、**1 つの Web アプリ(統合アプリ「AI Theories Lab」、`apps/ai_theories_lab/`)に機能を段階的に足していく形** で構築する。番号つきの別々のアプリは作らない。Spaces では 1 つの Space(ZeroGPU 上の Gradio)として公開する。
+- 学んだ理論を使って実際に動くシステムを、**1 つの Web アプリ(統合アプリ「AI Theories Lab」、`apps/ai_theories_lab/`)に機能を段階的に足していく形** で構築する。番号つきの別々のアプリは作らない。公開する場合は、Spaces の 1 つの Space(ZeroGPU 上の Gradio)にする。現在は未公開で、ローカルで実行している。
 - **アプリの段階の計画** は`apps/README.md`に置く(段階 1: 生成・KV キャッシュ・GQA・指示への応答・モデルの中を見る、段階 2: 量子化・長い文脈・バッチ推論と待ち行列の自作・API の層、段階 3: RAG、段階 4: チャットボット、段階 5: エージェント)。「第 1 段階(Claude Code)」(Colab 実行を伴うノートブックの二段階運用)とは別のものである。
 - **アプリの機能は、対応する理論トピックが theories/ にできてから実装する。** 段階 4・5 は、対応するトピックを theories/ に足すまで着手しない。
 - `apps/README.md`に、機能の一覧(機能・段階・使用した理論・状態)、段階の計画、公開方針をまとめる。機能の追加・変更のときは、この README も必ず更新する。
@@ -82,16 +82,16 @@ ai-theories/
 - `apps/`は`theories/`とは独立したペースで進めてよいが、**使用した理論トピックへの参照は必ず明記** する。
 - **処理と画面を分ける。** 機能ごとに、処理(`lab/features/<機能>/service.py`)と画面(`ui.py`)を分け、`service.py`は Gradio を import しない(`lab/core/`も同じ)。段階 2 以降で API を足すときや、画面を差し替えるときに、処理の側をそのまま残すためである。`app.py`は入口で、各機能のページを組み立てるだけにする。画面は当面 Gradio とする。
 - **試験は pytest で`tests/`に置く。** `tests/unit/`は常に走らせ、Hub を使わない(乱数の重みの代替アーティファクトを fixture で用意する)。本物の重みを使う試験は`tests/hub/`に置いて`hub`の印をつけ、既定では走らせない(`uv run pytest tests/hub -m hub`)。
-- アプリのディレクトリ(`apps/ai_theories_lab/`)は、**そのまま Hugging Face Spaces のリポジトリルートとして扱う**。すなわち、アプリのディレクトリ直下に`app.py`・`pyproject.toml`・`uv.lock`・`requirements.txt`・Spaces 用の README(先頭に Spaces 用の YAML メタデータを含む)を配置する。アプリ固有のコードは`lab/`、試験は`tests/`に置く。
-- **公開先は ZeroGPU 上の Gradio の Space とする。** Hugging Face Spaces では、Gradio・Docker の Space の作成に有料プランが必要になっており、無料の個人アカウントが置けるのは ZeroGPU で動く Gradio の Space(2 つまで)だけであるため。Space の名前は`ai-theories-lab`を想定する。
-  - 無料枠の条件は、メールアドレスが確認済みで、アカウントの作成から 30 日以上が経っていること。閲覧者ごとの 1 日の GPU の利用枠は、未ログイン 2 分・無料アカウント 5 分・PRO 40 分で、最初の利用から 24 時間後にリセットされる(ZeroGPU の公式ドキュメント(https://huggingface.co/docs/hub/spaces-zerogpu)の 2026 年 10 月時点の記載。変わりうる)。
+- アプリのディレクトリ(`apps/ai_theories_lab/`)は、公開する場合に備えて、**そのまま Hugging Face Spaces のリポジトリルートとして扱えるようにする**。すなわち、アプリのディレクトリ直下に`app.py`・`pyproject.toml`・`uv.lock`・`requirements.txt`・Spaces 用の README(先頭に Spaces 用の YAML メタデータを含む)を配置する。アプリ固有のコードは`lab/`、試験は`tests/`に置く。
+- **ZeroGPU 上での公開を想定して作る。公開するかどうかは別に判断する。** 現在は未公開で、ローカルで実行している。2026 年 10 月に Hugging Face Spaces で Gradio の Space を作成しようとしたが、無料のアカウントでは作成画面で Gradio が選べず、作成できなかった(原因は確かめていない)。公開は、段階 3(RAG)の後に改めて判断する。PRO に入るなどして公開できるようになったときにそのまま使えるよう、下の ZeroGPU 向けの作り(`@spaces.GPU`・プロセス境界を越える値の規則・入力の検査)は残す。公開する場合の公開先は、ZeroGPU 上の Gradio の Space 1 つとし、名前は`ai-theories-lab`を想定する。
+  - 無料枠の条件は、メールアドレスが確認済みで、アカウントの作成から 30 日以上が経っていること。閲覧者ごとの 1 日の GPU の利用枠は、未ログイン 2 分・無料アカウント 5 分・PRO 40 分で、最初の利用から 24 時間後にリセットされる(ZeroGPU の公式ドキュメント(https://huggingface.co/docs/hub/spaces-zerogpu)の 2026 年 10 月時点の記載。変わりうる。上のとおり、この記載どおりには作成できなかったので、公開を判断するときに最新の記載を確かめる)。
   - GPU を使う処理は`@spaces.GPU`を付けた関数の中で行う。モデルの読み込みはモジュールの読み込み時に行う(ZeroGPU の推奨)。`import spaces`は、torch など CUDA を使うパッケージより前に行う(`app.py`の先頭と、`lab/__init__.py`)。
   - `@spaces.GPU`を付けた関数は別のプロセスで動き、引数と戻り値(生成器なら yield した値の 1 つずつ)は pickle で受け渡される(`spaces`のソースで確認)。引数と戻り値は Python の値と numpy 配列だけにし、モデル・トークナイザ・GPU のテンソルは渡さない(`gr.State`に入れる値も同じ)。モデルは、起動時に読み込んだものを関数の中で参照する。入力の検査(GPU を使わずに判定できるもの)は、`@spaces.GPU`の関数に入る前に行う(誤った入力で ZeroGPU の利用枠を使わないため)。検査の関数は`service.py`に置き(Gradio を import しない)、画面のイベントの関数が呼んで、誤りを`gr.Error`に変えてから、検査を通った入力だけを`@spaces.GPU`の関数(計算だけを行い、`raise`や`try`で検査をしない)に渡す。`@spaces.GPU`の関数の中で起きた例外は、`gr.Error`以外ではメッセージが届かず、クラス名だけの「ZeroGPU worker error」になる。ZeroGPU の外では`@spaces.GPU`が何もしないので、この境界は手元の実行には現れない。`tests/unit/`の ZeroGPU の試験(許可リストによる型の検査・往復・構造の規約・誤った入力で`@spaces.GPU`の関数が呼ばれないこと)が確かめるので、`@spaces.GPU`の関数を足したら、その試験の表にも足す。
-  - ローカル(Apple Silicon の MPS(Metal Performance Shaders)または CPU)でも、同じ`app.py`がそのまま動くこと。`@spaces.GPU`は ZeroGPU の外では何もしないので、互換層は置かない。デバイスは CUDA → MPS → CPU の順に自動で選ぶ。
+  - ローカル(Apple Silicon の MPS(Metal Performance Shaders)または CPU)でも、同じ`app.py`がそのまま動くこと(現在の実行方法はこれである)。`@spaces.GPU`は ZeroGPU の外では何もしないので、互換層は置かない。デバイスは CUDA → MPS → CPU の順に自動で選ぶ。
   - ハードウェア(ZeroGPU)は README の YAML では指定できず、Space の設定で選ぶ。この手順をアプリの`README.md`に書く。
 - **アプリは、そのディレクトリを独立した uv プロジェクト(`pyproject.toml` + `uv.lock`)とする。** `ai-theories`(`src/`)は、**GitHub のコミットを固定した git 依存**(アプリの`pyproject.toml`の`[tool.uv.sources]`の`git`と`rev`)で持ち込み、`from src.layers import ...`の形のまま使う。固定するコミットを更新する手順は、アプリの`README.md`に書く。`src/`を変えると固定するコミットの更新が要るので、アプリの都合で`src/`を変えるのは、アプリ側で実現できない場合に限る。
-- デプロイは、`apps/ai_theories_lab/`ディレクトリの内容を Hugging Face Spaces のリポジトリに push する運用とする(例: Spaces リポジトリを別途 remote として追加し`git subtree push`する、または当該ディレクトリの内容を Spaces 側リポジトリに同期する)。具体的な push 手順はアプリの`README.md`に記載する。
-- `ai-theories`リポジトリ本体と Spaces 側リポジトリは **別リポジトリ** として扱う。`ai-theories`側は「開発・学習理論との紐付けを管理する場所」、Spaces 側は「公開用の実行環境」という役割分担とする。
+- 公開する場合のデプロイは、`apps/ai_theories_lab/`ディレクトリの内容を Hugging Face Spaces のリポジトリに push する運用とする(例: Spaces リポジトリを別途 remote として追加し`git subtree push`する、または当該ディレクトリの内容を Spaces 側リポジトリに同期する)。具体的な push 手順は、アプリの`README.md`に「公開する場合」の手順として記載する。
+- 公開する場合、`ai-theories`リポジトリ本体と Spaces 側リポジトリは **別リポジトリ** として扱う。`ai-theories`側は「開発・学習理論との紐付けを管理する場所」、Spaces 側は「公開用の実行環境」という役割分担とする。
 
 ### src/(共通モジュール)
 
@@ -503,7 +503,7 @@ ai-theories/
 2. **使用した理論** — 機能ごとに、`theories/`内の該当ノートブックへのリンクと簡単な説明
 3. **システム構成図** — 簡単なテキストまたは図
 4. **使用技術・構成** — バックエンド、フロントエンド、フレームワーク、ディレクトリの構成等
-5. **デプロイ手順** — 手元での起動、試験の実行、Hugging Face Spaces へのデプロイ手順。Colab での実行方法は、学習・評価を伴う機能がある場合に限って書く
+5. **デプロイ手順** — 手元での起動と試験の実行を先に、公開する場合の Hugging Face Spaces へのデプロイ手順を後に書く。Colab での実行方法は、学習・評価を伴う機能がある場合に限って書く
 
 ## 言語ルール
 
@@ -556,7 +556,7 @@ ai-theories/
 - 見積もりが予算を超える場合は、まず設計を見直す。本番の実行中に削る必要がある場合は、**削る段階とその順序を本番前に宣言し、見積もりのみから自動で選ぶ**(どの実験の結果も参照しない)。選択は本番の冒頭の見積もりのみから自動で行う。
 - 削る段階には、**学習量(学習ステップ数など)を下げる段階を含めてよい**。その場合、学習量の候補と、それを他の削り方(シード数・水準)とどの順で組み合わせるかの優先順位を、理由とともに本番前に宣言する。
 - 複数のセッションへの分割(「ノートブックの出力管理」節の「複数の Colab セッションに分けて実行するノートブック」)は、新しいトピックでは使わない(こうじさんが明示的に認めた場合を除く)。
-- `apps/`のデモ公開は **Hugging Face Spaces の ZeroGPU 上の Gradio** を基本のデプロイ先とし、**Gradio** を標準 UI フレームワークとする(詳細は「apps/」節)。
+- `apps/`のデモを公開する場合は **Hugging Face Spaces の ZeroGPU 上の Gradio** を基本のデプロイ先とし、**Gradio** を標準 UI フレームワークとする(現在は未公開で、ローカルで実行している。詳細は「apps/」節)。
 - 依存関係の管理は **uv が唯一の正** (`pyproject.toml` + `uv.lock`。ルートと、`apps/`のアプリのディレクトリで、それぞれ独立)。`requirements.txt`は uv からの **エクスポート成果物** であり、手で編集しない(詳細は「開発環境・ツール」)。
 - `theories/`の学習・推論はノートブック上で行う。`.py`ファイル単体の直接実行は想定しない(`src/`は import される前提)。
 - `theories/`配下のノートブックは、Colab セットアップセルで`%cd /content/ai-theories`した後、**リポジトリルート(Colab では`/content/ai-theories`)をカレントディレクトリとして実行される前提** とする。ローカルでは、リポジトリルートで Jupyter を起動して同じ前提を満たす。
@@ -638,7 +638,7 @@ import torch  # noqa: E402
 
 ### Hugging Face Spaces へのデプロイ(apps/)
 
-Spaces のビルドは uv を前提としないため、**アプリのディレクトリに`requirements.txt`を配置** してビルドに使わせる。アプリは独立した uv プロジェクトなので、`requirements.txt`はそのアプリのディレクトリで、アプリの`uv.lock`からエクスポートする。
+Spaces のビルドは uv を前提としないため、公開する場合に備えて、**アプリのディレクトリに`requirements.txt`を配置** してビルドに使わせる(現在は未公開でも、この`requirements.txt`は、アプリの`uv.lock`からのエクスポートと揃えておく)。アプリは独立した uv プロジェクトなので、`requirements.txt`はそのアプリのディレクトリで、アプリの`uv.lock`からエクスポートする。
 
 ```bash
 cd apps/ai_theories_lab

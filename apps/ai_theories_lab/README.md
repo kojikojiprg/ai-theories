@@ -17,7 +17,7 @@ models:
 
 # AI Theories Lab
 
-[ai-theories](https://github.com/kojikojiprg/ai-theories)の`theories/`で学んだ理論を、ブラウザで手を動かして確かめる **1 つの Web アプリ** です。スクラッチ実装した小型 GPT(Generative Pre-trained Transformer、英語、約 524 万パラメータ)を動かして、機能ごとにタブで試します。機能は、対応する理論のトピックが`theories/`にできてから、段階的に足していきます(計画は[`apps/README.md`](https://github.com/kojikojiprg/ai-theories/blob/main/apps/README.md))。Hugging Face Spaces の ZeroGPU で公開することを前提にしています。
+[ai-theories](https://github.com/kojikojiprg/ai-theories)の`theories/`で学んだ理論を、ブラウザで手を動かして確かめる **1 つの Web アプリ** です。スクラッチ実装した小型 GPT(Generative Pre-trained Transformer、英語、約 524 万パラメータ)を動かして、機能ごとにタブで試します。機能は、対応する理論のトピックが`theories/`にできてから、段階的に足していきます(計画は[`apps/README.md`](https://github.com/kojikojiprg/ai-theories/blob/main/apps/README.md))。Hugging Face Spaces の ZeroGPU で公開できるように作っていますが、**現在は未公開で、ローカルで実行します**(無料のアカウントでは Gradio の Space を作成できなかったため。起動方法は 5.1)。
 
 - 研究・教育目的のモデルで、品質の保証はありません。ChatGPT のように会話できるモデルではありません。
 - モデルが英語で学習しているため、入力は英語です。画面の文言は日本語を主とし、英語を併記しています。
@@ -52,7 +52,7 @@ models:
 flowchart LR
   subgraph ALL[" "]
     USER["ブラウザ<br/>(Gradio の画面)"]
-    subgraph SPACE["Hugging Face Spaces(ZeroGPU)"]
+    subgraph SPACE["実行環境<br/>(手元。公開する場合は Hugging Face Spaces の ZeroGPU)"]
       APP["app.py<br/>入口(ページの組み立て)"]
       subgraph LAB["lab/"]
         UI["ui/ と features/*/ui.py<br/>画面・@spaces.GPU の関数"]
@@ -70,12 +70,12 @@ flowchart LR
     SVC --> SRC
     CORE --> SRC
     HUB -. "起動時に 1 回だけ取得" .-> CORE
-    GH -. "ビルド時に pip install" .-> SRC
+    GH -. "依存としてインストール<br/>(Space ではビルド時)" .-> SRC
   end
   style ALL fill:#ffffff,stroke:#ffffff
 ```
 
-起動時に、トークナイザと 3 ブランチのモデルを同時にメモリへ載せます(重みの合計は約 59 MiB で、GPU のメモリにも余裕で載ります)。生成などの要求のたびに、`@spaces.GPU`を付けた関数の中で GPU が割り当てられ、終わると解放されます。
+起動時に、トークナイザと 3 ブランチのモデルを同時にメモリへ載せます(重みの合計は約 59 MiB で、GPU のメモリにも余裕で載ります)。生成などの要求のたびに、ZeroGPU 上では、`@spaces.GPU`を付けた関数の中で GPU が割り当てられ、終わると解放されます。手元(現在の実行方法)では、`@spaces.GPU`は何もせず、CUDA → MPS → CPU の順に選んだデバイスで、同じ処理がそのまま動きます。
 
 ## 4. 使用技術・構成
 
@@ -155,13 +155,13 @@ ZeroGPU の外(手元の MPS や CPU)では`@spaces.GPU`が何もしないので
 - `test_zero_gpu_simulated.py`: すべての`@spaces.GPU`の関数が往復を通るアプリを組み立て、`gradio_client`から、往復を通さないアプリと同じ手順で呼んで、出力が一致すること。解析の後の選び直しで、GPU の関数が呼ばれないこと。
 - `test_architecture.py`: 誤った入力(10 通り)では`@spaces.GPU`の関数が呼ばれず、正しい入力では 1 回だけ呼ばれること、`@spaces.GPU`の関数の本体に`raise`・`try`・検査の関数の呼び出しがないこと、`@spaces.GPU`の関数の引数の注釈にモデル・トークナイザがないこと、モデルを動かす関数が`@spaces.GPU`の関数かその補助であること、機能のコードがモデルを読み込まない・デバイスへ移さないこと、`app.py`が起動時にモデルを読み込むこと。
 
-**これらの試験が確かめるのは、受け渡す値の型と往復までです。** 別のプロセスと本物の GPU は使っていないので、本物の ZeroGPU 上の動作(GPU の割り当て・待ち行列・利用枠・本物の CUDA のテンソルを`.cpu()`した結果)は、デプロイの後に確かめる必要があります。
+**これらの試験が確かめるのは、受け渡す値の型と往復までです。** 別のプロセスと本物の GPU は使っていないので、本物の ZeroGPU 上の動作(GPU の割り当て・待ち行列・利用枠・本物の CUDA のテンソルを`.cpu()`した結果)は、公開するときに確かめる必要があります。
 
 ## 5. デプロイ手順
 
-この機能は推論だけで、学習・評価を伴わないので、Google Colab は使いません。
+**現在は未公開で、手元で実行します(5.1・5.2)。** 5.3 は、公開する場合の手順です。Space を作成できていないため、実際には実行していません。この機能は推論だけで、学習・評価を伴わないので、Google Colab は使いません。
 
-### 5.1 手元での起動
+### 5.1 手元での起動(現在の実行方法)
 
 Hub のモデルを取得するため、ネットワークが要ります(公開のリポジトリなのでトークンは不要)。このディレクトリで次の 1 コマンドを実行します。
 
@@ -184,12 +184,14 @@ uv run pytest tests/hub -m hub       # tests/hub/。Hub の本物のアーティ
 - `tests/unit/`の確認: 読み込み(3 ブランチを同時に載せる)・貪欲法で KV キャッシュの有無が一致・`GPTLanguageModel.generate()`および`beam_search()`との一致・008 の`generate_with_filter()`との一致・計測に画面の更新の待ちが含まれないこと・入力の検証・指示の組み立てと採点・`gradio_client`から`app.py`を呼ぶ確認・トークン分割と BPE の結合の過程が`encode_chunk()`と一致すること・注意の重みの取り出しの一致(上の 3 つ)・画面の表示用の整形・構成の規約(`service.py`が Gradio を import しない、`spaces`が torch より先に import される)・入力の検査の関数・ZeroGPU のプロセス境界を越える値と、入力の検査の位置(上の「ZeroGPU のプロセス境界を越える値」)。重みが乱数なので、**生成の中身やモデルの性能は何も確かめられません。**
 - `tests/hub/`の確認: チェックポイントの SHA-256(017・010 のノートブックの記録との一致)、設定が 010 の`PROD_CONFIG`と一致、合成課題の完全一致率(見たことのあるテンプレートが 0.5 以上、未見のテンプレートが基準値 0.25 未満)、退化の例で貪欲法の 4-gram 重複率が top-p より高いこと、本物のトークナイザと本物の重みでの、注意の重みの取り出しの一致。
 
-### 5.3 Hugging Face Spaces(ZeroGPU)へのデプロイ
+### 5.3 公開する場合: Hugging Face Spaces(ZeroGPU)へのデプロイ
 
-**前提(無料枠)**: ZeroGPU の Space は、無料の個人アカウントでも **2 つまで** 作れます。条件は、メールアドレスが確認済みで、アカウントの作成から 30 日以上が経っていることです(PRO は 10 Space まで)。閲覧者ごとの 1 日の GPU の利用枠は、未ログインが 2 分、無料アカウントが 5 分、PRO が 40 分で、最初の GPU の利用から 24 時間後にリセットされます。この数値は、ZeroGPU の公式ドキュメント(https://huggingface.co/docs/hub/spaces-zerogpu、2026 年 10 月に確認)に基づくもので、変わりうるため、デプロイの前に最新の記載を確認してください。
+**これまでの経緯**: このリポジトリの作業では、無料のアカウントで Space の作成画面に Gradio が選べず、Space を作成できませんでした(原因は確かめていません)。PRO に入るなどして作成できるようになってから、次の手順を試します。
+
+**前提(無料枠。公式ドキュメントの記載)**: ZeroGPU の Space は、無料の個人アカウントでも **2 つまで** 作れるとされています。条件は、メールアドレスが確認済みで、アカウントの作成から 30 日以上が経っていることです(PRO は 10 Space まで)。上のとおり、この記載どおりには作成できなかったので、作れるとは限りません。閲覧者ごとの 1 日の GPU の利用枠は、未ログインが 2 分、無料アカウントが 5 分、PRO が 40 分で、最初の GPU の利用から 24 時間後にリセットされます。この数値は、ZeroGPU の公式ドキュメント(https://huggingface.co/docs/hub/spaces-zerogpu、2026 年 10 月に確認)に基づくもので、変わりうるため、デプロイの前に最新の記載を確認してください。
 
 1. Hugging Face で Space を新しく作る(https://huggingface.co/new-space)。名前は`ai-theories-lab`を想定する。SDK は **Gradio** を選ぶ。
-2. **ハードウェアは README.md の YAML では指定できません。** 作成した Space の「Settings」→「Space hardware」で **ZeroGPU** を選びます(選択肢に出ない場合は、上の無料枠の条件を満たしているかを確認します)。
+2. **ハードウェアは README.md の YAML では指定できません。** 作成した Space の「Settings」→「Space hardware」で **ZeroGPU** を選びます(選択肢に出ない場合は、アカウントのプランと、上の無料枠の条件を確認します)。
 3. このディレクトリの内容を、Space のリポジトリへ push します。`ai-theories`と Space のリポジトリは別のリポジトリです。`ai-theories`のリポジトリのルートで、次のとおりにします。
 
    ```bash
@@ -207,7 +209,7 @@ uv run pytest tests/hub -m hub       # tests/hub/。Hub の本物のアーティ
 4. Space のビルドが終わると、起動時に Hub からモデルとトークナイザを取得します(公開のリポジトリなので、Space にトークンは要りません)。「Logs」で、読み込みのエラーがないことを確認します。
 5. 画面で、各タブの処理を 1 回ずつ実行して確認します。
 
-**ZeroGPU 上での動作は、このリポジトリの作業の中では確かめていません**(Space を作成していないため)。手元で確かめたのは、受け渡す値の型と往復までです(上の「ZeroGPU のプロセス境界を越える値」)。初回のデプロイでは、次を確かめてください: 起動に失敗しない(`import spaces`の順序・モジュールの読み込み時のモデルの読み込み)、逐次表示が途切れず動く、速さの表示が出る、「モデルの中を見る」で、解析の後に層・ヘッド・位置を選び直しても動く(本物の CUDA のテンソルから作った`gr.State`が、別のプロセスから戻る)、入力の誤りのメッセージが画面に出る、「指示への応答」が答える。
+**ZeroGPU 上での動作は、このリポジトリの作業の中では確かめていません**(Space を作成できなかったため)。手元で確かめたのは、受け渡す値の型と往復までです(上の「ZeroGPU のプロセス境界を越える値」)。初回のデプロイでは、次を確かめてください: 起動に失敗しない(`import spaces`の順序・モジュールの読み込み時のモデルの読み込み)、逐次表示が途切れず動く、速さの表示が出る、「モデルの中を見る」で、解析の後に層・ヘッド・位置を選び直しても動く(本物の CUDA のテンソルから作った`gr.State`が、別のプロセスから戻る)、入力の誤りのメッセージが画面に出る、「指示への応答」が答える。
 
 ### 5.4 ai-theories の版の更新
 
@@ -224,7 +226,7 @@ uv run pytest tests/hub -m hub       # tests/hub/。Hub の本物のアーティ
    ```
 
 4. `uv run pytest`が通ることを確認する。
-5. `pyproject.toml`・`uv.lock`・`requirements.txt`をコミットし、5.3 の手順で Space へ push する。
+5. `pyproject.toml`・`uv.lock`・`requirements.txt`をコミットする。Space を公開している場合は、5.3 の手順で Space へ push する。
 
 Gradio の版を変えるときは、`pyproject.toml`の`gradio==...`と、この README の YAML の`sdk_version`を同じ値にします。
 
