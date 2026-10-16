@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+
 import torch
 
 from lab.core.artifacts import Resources
@@ -61,3 +63,10 @@ def repeated_ngram_rate(token_ids: list[int], n: int = 4) -> float:
     """n-gram のうち、同じ n-gram が既に出ているものの割合(008 の重複率と同じ考え方)。"""
     grams = [tuple(token_ids[i : i + n]) for i in range(len(token_ids) - n + 1)]
     return 1.0 - len(set(grams)) / len(grams)
+
+
+def free_port() -> int:
+    """空いている TCP ポート(Gradio のサーバーを立てる試験用)。"""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]

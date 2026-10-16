@@ -18,6 +18,7 @@ import pytest
 
 from lab.core.artifacts import Resources, load_resources
 from tests.stand_in import build_stand_in_artifacts
+from tests.zero_gpu import GpuApp, build_app_recording_gpu
 
 
 @pytest.fixture(scope="session")
@@ -40,6 +41,12 @@ def stand_in_hub(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
 def resources(stand_in_hub: Path) -> Resources:
     """代替のアーティファクトから読み込んだトークナイザと 3 ブランチのモデル(アプリと同じ経路)。"""
     return load_resources()
+
+
+@pytest.fixture(scope="session")
+def gpu_app(resources: Resources) -> GpuApp:
+    """``@gpu`` を付けた関数を記録しながら組み立てたアプリ(``app.py`` と同じ構成)。"""
+    return build_app_recording_gpu(resources)
 
 
 @pytest.fixture(scope="session")

@@ -86,6 +86,7 @@ ai-theories/
 - **公開先は ZeroGPU 上の Gradio の Space とする。** Hugging Face Spaces では、Gradio・Docker の Space の作成に有料プランが必要になっており、無料の個人アカウントが置けるのは ZeroGPU で動く Gradio の Space(2 つまで)だけであるため。Space の名前は`ai-theories-lab`を想定する。
   - 無料枠の条件は、メールアドレスが確認済みで、アカウントの作成から 30 日以上が経っていること。閲覧者ごとの 1 日の GPU の利用枠は、未ログイン 2 分・無料アカウント 5 分・PRO 40 分で、最初の利用から 24 時間後にリセットされる(ZeroGPU の公式ドキュメント(https://huggingface.co/docs/hub/spaces-zerogpu)の 2026 年 10 月時点の記載。変わりうる)。
   - GPU を使う処理は`@spaces.GPU`を付けた関数の中で行う。モデルの読み込みはモジュールの読み込み時に行う(ZeroGPU の推奨)。`import spaces`は、torch など CUDA を使うパッケージより前に行う(`app.py`の先頭と、`lab/__init__.py`)。
+  - `@spaces.GPU`を付けた関数は別のプロセスで動き、引数と戻り値(生成器なら yield した値の 1 つずつ)は pickle で受け渡される(`spaces`のソースで確認)。引数と戻り値は Python の値と numpy 配列だけにし、モデル・トークナイザ・GPU のテンソルは渡さない(`gr.State`に入れる値も同じ)。モデルは、起動時に読み込んだものを関数の中で参照する。入力の誤りは、その関数の中でも`gr.Error`にする(ZeroGPU がメッセージごと返すのは`gr.Error`だけ)。ZeroGPU の外では`@spaces.GPU`が何もしないので、この境界は手元の実行には現れない。`tests/unit/`の ZeroGPU の試験(許可リストによる型の検査・往復・構造の規約)が確かめるので、`@spaces.GPU`の関数を足したら、その試験の表にも足す。
   - ローカル(Apple Silicon の MPS(Metal Performance Shaders)または CPU)でも、同じ`app.py`がそのまま動くこと。`@spaces.GPU`は ZeroGPU の外では何もしないので、互換層は置かない。デバイスは CUDA → MPS → CPU の順に自動で選ぶ。
   - ハードウェア(ZeroGPU)は README の YAML では指定できず、Space の設定で選ぶ。この手順をアプリの`README.md`に書く。
 - **アプリは、そのディレクトリを独立した uv プロジェクト(`pyproject.toml` + `uv.lock`)とする。** `ai-theories`(`src/`)は、**GitHub のコミットを固定した git 依存**(アプリの`pyproject.toml`の`[tool.uv.sources]`の`git`と`rev`)で持ち込み、`from src.layers import ...`の形のまま使う。固定するコミットを更新する手順は、アプリの`README.md`に書く。`src/`を変えると固定するコミットの更新が要るので、アプリの都合で`src/`を変えるのは、アプリ側で実現できない場合に限る。
