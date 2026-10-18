@@ -1,23 +1,29 @@
 """推論サーバの実行ループ(反復ごとのスケジューリング)。
 
-1 回の反復(iteration)は次の順に進む。
+1 回の反復(iteration)は、**ちょうど 1 回の forward** で、次の順に進む。
 
 1. 到着した要求を待ち行列に入れる。実行する要求も待っている要求もなければ、
    時計を次の到着まで進める。
-2. スケジューラが、待っている要求から実行に入れるものを選び、ストアに場所を割り当てる。
-3. **prefill**: 入れた要求の文脈(書き出し。退避から戻した要求は、それまでの生成も含む)を 1 回の
-   forward で処理し、各要求の最初の(退避から戻した要求では次の)トークンを生成する。接頭辞が共有
-   できるときは、計算済みの部分を省く。
-4. **decode**: この反復の前から実行中だった要求について、直前に生成したトークンを入力に
-   1 トークン進める。
-   次のトークンの置き場所が足りなければ、最後に実行に入れた要求を **退避** する
-   (Key / Value を捨てて待ち行列の
-   先頭に戻す。再開のときは prefill し直す = 再計算)。
+2. **decode の行の置き場所を用意する**(実行中の要求が優先)。この反復の前から実行中だった要求の、
+   次のトークンの置き場所を、古い要求から順に用意する。足りなければ、最後に実行に入れた要求を
+   **退避** する(Key / Value を捨てて待ち行列の先頭に戻す。再開のときは文脈全体を prefill し直す =
+   再計算)。
+3. **新しい要求を入れる**。スケジューラが、待っている要求から実行に入れるものを選び、残りの場所から
+   文脈の分を割り当てる(2 で退避が起きた反復では、退避した要求がすぐ戻ってメモリを奪い合わない
+   ように、新しい要求を入れない)。接頭辞が共有できるときは、計算済みの部分を省く。
+4. **1 回の forward**: 実行中だった要求の decode の行(直前に生成したトークンを入力に 1 トークン)と、
+   新しく入れた要求の prefill の行(文脈の未計算の部分。退避から戻した要求は、それまでの生成も含む)
+   を、まとめて 1 回の forward で進める(Orca の selective batching に倣う)。prefill の行は最初の
+   (退避から戻した要求では次の)トークンを、decode の行は次のトークンを生成する。行ごとに問い合わせの
+   長さが違うので、短い行(decode の行)は、同じ forward の最長の問い合わせまで埋める(埋めた位置は
+   書き込まず、結果も使わない)。
 5. 終わった要求の場所を返す。static batching では、バッチ全体が終わるまで、終わった行も計算に残す。
 
 1 つの要求は 1 反復に高々 1 トークンを生成する。したがって、反復あたりの「実行中の要求数」は、
 その反復で生成したトークンの数に等しい(終わった行を残して計算する static batching では、
-計算した行の数がそれより多い)。
+計算した行の数がそれより多い)。forward の回数は反復の回数に等しい(退避だけで
+計算する行がない反復は、反復として数えない)。要求の最初のトークンの時刻は、その要求の
+prefill の行を含む forward の終了である。
 
 導入: 027。
 """
@@ -72,13 +78,16 @@ class RequestRecord:
 
 @dataclass(frozen=True)
 class IterationRecord:
-    """1 反復の記録。
+    """1 反復(= 1 回の forward)の記録。
 
     Attributes:
         start_time, end_time: 反復の開始と終了の時刻。
-        prefill_rows, prefill_query_tokens: prefill の行数と、問い合わせのトークン数
-            (行数 × 最長の長さ)。
-        decode_rows: decode で計算した行数(static batching では終わった行を含む)。
+        prefill_rows, decode_rows: forward に入れた prefill の行数と decode の行数
+            (static batching の decode の行は、終わった行を含む)。
+        resumed_rows: prefill の行のうち、退避から戻した要求の行数。
+        prefill_tokens: prefill の行の、実際の問い合わせのトークン数の合計(埋めた分を含まない)。
+        query_tokens: forward が処理した問い合わせのトークン数(全行数 × 最長の問い合わせ。
+            短い行を埋めた分を含む)。
         active_requests: この反復でトークンを生成した要求の数(実行中の要求数)。
         waiting: 反復の終わりに待っている要求の数。
         tokens_used, tokens_allocated, units_in_use: 反復の終わり(要求の場所を返す前)の
@@ -89,8 +98,10 @@ class IterationRecord:
     start_time: float
     end_time: float
     prefill_rows: int
-    prefill_query_tokens: int
     decode_rows: int
+    resumed_rows: int
+    prefill_tokens: int
+    query_tokens: int
     active_requests: int
     waiting: int
     tokens_used: int
@@ -107,12 +118,14 @@ class RunResult:
         requests: 要求ごとの記録(``request_id`` の昇順)。
         iterations: 反復ごとの記録。
         generated: 要求ごとに生成したトークン。
+        forward_calls: 実行器の forward を呼んだ回数(反復の回数に等しい)。
         logits: ``record_logits`` が真のとき、要求ごと・生成したトークンごとの logits。
     """
 
     requests: list[RequestRecord]
     iterations: list[IterationRecord]
     generated: dict[int, list[int]]
+    forward_calls: int = 0
     logits: dict[int, list[np.ndarray]] = field(default_factory=dict)
 
     @property
@@ -189,6 +202,7 @@ class ServingEngine:
         iterations: list[IterationRecord] = []
         admit_counter = 0
         preemptions = 0
+        forward_calls = 0
         self.clock.start()
 
         while pending or waiting or running:
@@ -201,42 +215,13 @@ class ServingEngine:
 
             start = now
             before = list(running)
-            produced = 0
             preempted_now = False
 
-            # --- prefill ---
-            admitted = self.scheduler.select(waiting, running, self.store)
-            prefill_rows = []
-            contexts = []
-            for state, cached in admitted:
-                context = state.context_token_ids()
-                contexts.append(context)
-                prefill_rows.append(Row(state, context[cached:], cached))
-            prefill_query_tokens = 0
-            if prefill_rows:
-                tokens, logits = self.runner.step(prefill_rows, self.store, self.record_logits)
-                longest = max(len(row.query_token_ids) for row in prefill_rows)
-                prefill_query_tokens = len(prefill_rows) * longest
-                self.clock.tick("prefill", len(prefill_rows), prefill_query_tokens)
-                time_prefill = self.clock.now()
-                for i, (state, _) in enumerate(admitted):
-                    state.num_cached_tokens = len(contexts[i])
-                    self.store.after_prefill(state)
-                    state.status = RequestStatus.RUNNING
-                    state.admit_order = admit_counter
-                    admit_counter += 1
-                    if state.admitted_time is None:
-                        state.admitted_time = start
-                    running.append(state)
-                    produced += self._emit(
-                        state, tokens[i], logits[i] if logits is not None else None, time_prefill
-                    )
-
-            # --- decode ---
+            # --- 1) decode の行の置き場所を用意する(実行中の要求が優先。古い要求から順に) ---
             ready: list[RequestState] = []
             for state in before:
                 if state.status == RequestStatus.WAITING:
-                    continue  # この反復の前半で退避された
+                    continue  # この反復で、先に処理した要求のために退避された
                 while not self.store.grow(state):
                     candidates = [s for s in running if not s.finished]
                     if retains or not candidates:
@@ -251,21 +236,53 @@ class ServingEngine:
                         break
                 if state.status != RequestStatus.WAITING:
                     ready.append(state)
-            if ready:
-                rows = [Row(s, [s.last_token()], s.num_cached_tokens) for s in ready]
-                tokens, logits = self.runner.step(rows, self.store, self.record_logits)
-                self.clock.tick("decode", len(rows), len(rows))
-                time_decode = self.clock.now()
-                for i, state in enumerate(ready):
-                    state.num_cached_tokens += 1
-                    if not state.finished:
-                        produced += self._emit(
-                            state, tokens[i], logits[i] if logits is not None else None, time_decode
-                        )
 
-            if not prefill_rows and not ready and not preempted_now:
-                raise RuntimeError(
-                    "進行できない(待っている要求を実行に入れられず、実行中の要求もない。予算が小さすぎる)"
+            # --- 2) 新しい要求を入れる(残りの場所から。退避が起きた反復では入れない) ---
+            admitted = [] if preempted_now else self.scheduler.select(waiting, running, self.store)
+
+            # --- 3) 1 回の forward(decode の行 + prefill の行) ---
+            rows = [Row(s, [s.last_token()], s.num_cached_tokens) for s in ready]
+            contexts = []
+            for state, cached in admitted:
+                context = state.context_token_ids()
+                contexts.append(context)
+                rows.append(Row(state, context[cached:], cached))
+            if not rows:
+                if not preempted_now:
+                    raise RuntimeError(
+                        "進行できない(待っている要求を実行に入れられず、実行中の要求もない。"
+                        "予算が小さすぎる)"
+                    )
+                continue  # 退避だけが起きた(forward しない)。次の反復で退避した要求が戻る
+
+            tokens, logits = self.runner.step(rows, self.store, self.record_logits)
+            forward_calls += 1
+            longest = max(len(row.query_token_ids) for row in rows)
+            self.clock.tick(len(rows), len(rows) * longest)
+            time_forward = self.clock.now()
+
+            produced = 0
+            num_decode = len(ready)
+            for i, state in enumerate(ready):
+                state.num_cached_tokens += 1
+                if not state.finished:
+                    produced += self._emit(
+                        state, tokens[i], logits[i] if logits is not None else None, time_forward
+                    )
+            resumed_rows = 0
+            for k, (state, _) in enumerate(admitted):
+                i = num_decode + k
+                resumed_rows += bool(state.generated)
+                state.num_cached_tokens = len(contexts[k])
+                self.store.after_prefill(state)
+                state.status = RequestStatus.RUNNING
+                state.admit_order = admit_counter
+                admit_counter += 1
+                if state.admitted_time is None:
+                    state.admitted_time = start
+                running.append(state)
+                produced += self._emit(
+                    state, tokens[i], logits[i] if logits is not None else None, time_forward
                 )
 
             usage = self.store.usage()
@@ -284,9 +301,11 @@ class ServingEngine:
                 IterationRecord(
                     start_time=start,
                     end_time=self.clock.now(),
-                    prefill_rows=len(prefill_rows),
-                    prefill_query_tokens=prefill_query_tokens,
-                    decode_rows=len(ready),
+                    prefill_rows=len(admitted),
+                    decode_rows=num_decode,
+                    resumed_rows=resumed_rows,
+                    prefill_tokens=sum(len(row.query_token_ids) for row in rows[num_decode:]),
+                    query_tokens=len(rows) * longest,
                     active_requests=produced,
                     waiting=len(waiting),
                     tokens_used=usage.tokens_used,
@@ -313,6 +332,7 @@ class ServingEngine:
             requests=records,
             iterations=iterations,
             generated={s.request.request_id: list(s.generated) for s in states},
+            forward_calls=forward_calls,
         )
         if self.record_logits:
             result.logits = {s.request.request_id: list(s.logits) for s in states}

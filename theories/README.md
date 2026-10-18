@@ -394,7 +394,7 @@ Transformer Block の Feed-Forward Network(順伝播ネットワーク)を、複
 
 **実験の設計**: 比較する方式は、同じエンジンの上でスケジューラとメモリの割り当てだけを入れ替える。要求の書き出しは検証用の記事の先頭から切り出し、書き出しと出力の長さの上限は、モデルの最大の文脈長(256)に収まる 240 とする。出力長は要求に割り当てた長さで止める。負荷は合成(出力長は平均と変動係数を指定した切り詰めたガンマ分布の形、到着は一括処理または Poisson 過程)で、シードごとに決定的。**実験 A**: 最大バッチサイズを揃え、出力長のばらつきが大きい水準で、continuous batching のスループットが static batching より高いか。**実験 B**: 出力長の平均を揃え、変動係数を 4 水準で変えたとき、その比が変動係数とともに大きくなるか(隣り合う水準の 3 つの比較 B1・B2・B3 に分けて判定。理論の予測を診断量とする)。**実験 C**: KV キャッシュの予算を揃え、どちらも continuous batching で動かしたとき、PagedAttention の方が反復あたりの実行中の要求数が多いか。**観察 D**(判定なし): 最大バッチサイズと到着の速さを変えたときの、スループットと待ち時間の関係。アプリの段階 2 で最大バッチサイズを決める材料にする。**観察 E**(判定なし): ブロックの大きさと内部の断片化・1 反復の時間、全要求が同じ system prompt を持つ負荷での接頭辞の共有の効果。前提条件は P0(エンジンを通した生成が 1 要求ずつの生成と一致)、P1(負荷の実現)、P2(計測の安定)、P3(改善の余地)、P4・P5(実験 C の予算の制約と確保した枠の無駄)。本番の冒頭で、1 反復の時間、単一の条件のばらつき(検出力の事前確認)を測り、シード数と観察の水準を削る段階を、見積もりのみから自動で選ぶ。
 
-**制約**: 小型 GPT では KV キャッシュが T4 のメモリに比べて小さく、メモリの制約は実際にはかからないので、実験 C の予算は人工的に決めている。小型モデルの 1 反復の時間は固定費(Python とカーネルの起動)が支配的になりうるため、スループットの差には計算量の差より forward の回数の差が強く効く。1 反復の時間の行数への依存を本番の冒頭で測って示す。
+**制約**: 小型 GPT では KV キャッシュが T4 のメモリに比べて小さく、メモリの制約は実際にはかからないので、実験 C の予算は人工的に決めている。小型モデルの 1 反復の時間は固定費(Python とカーネルの起動)が支配的になりうるため、スループットの差には計算量の差より反復の回数の差(1 反復は、prefill の行と decode の行をまとめた 1 回の forward)が強く効く。1 回の forward の時間の、行数と問い合わせのトークン数への依存(decode の行だけ・prefill の行だけ・混ぜた形)を本番の冒頭で測って示す。
 
 **状態**: 本番実行の前(縮小スケールでの動作確認まで)。本番の結果と事後の解釈は、本番実行の後に追記する。
 
@@ -477,10 +477,10 @@ Transformer Block の Feed-Forward Network(順伝播ネットワーク)を、複
 | `src/serving/requests.py` | 要求`Request`(書き出し・出力長・到着時刻。出力長は要求に割り当てた長さで止める)と、実行中の状態`RequestState`(生成済みのトークン、KV キャッシュに書き込み済みのトークン数、各時刻、退避の回数)(027) | 027 |
 | `src/serving/workload.py` | 合成の負荷(027)。平均と変動係数が指定の値に一致する、切り詰めたガンマ分布の形の出力長の分布`fit_output_length_distribution()`、分布から取ったバッチ内の最大値の期待値`expected_maximum()`と理論の比`predicted_static_to_continuous_ratio()`、Poisson 過程の到着`poisson_arrival_times()`、標本の平均・変動係数のばらつきの見積もり`moment_sampling_distribution()`、要求の組み立て`build_requests()`(共通の接頭辞を付けられる) | 027 |
 | `src/serving/kv_store.py` | KV キャッシュの管理(027)。最大長の分を前もって確保する方式`ReservedKeyValueStore`(スロット)と、PagedAttention の方式`PagedKeyValueStore`(ブロックの割り当て、要求ごとのブロック表、参照数、書き込み時の複製、`fork()`、接頭辞の共有と登録済みブロックの捨て方、使用状況`StoreUsage`)。どちらも`keys[layer][first, second]`の添字で読み書きし、forward の入力の配置`BatchLayout`を作る | 027 |
-| `src/serving/runner.py` | 長さの違う要求を 1 回の forward で進める実行器`ServingModel`・`ModelRunner`(027)。既存の層の重みをそのまま使い、行ごとの RoPE の位置、ブロック表からの Key / Value の書き込みと集約、位置に基づくマスクを扱う。モデルを実行せずスケジューラとメモリ管理だけを進める`DryRunner`(見積もり用) | 027 |
+| `src/serving/runner.py` | 長さの違う要求を 1 回の forward で進める実行器`ServingModel`・`ModelRunner`(027)。既存の層の重みをそのまま使い、行ごとの RoPE の位置、ブロック表からの Key / Value の書き込みと集約、位置に基づくマスクを扱う。prefill の行と decode の行が混ざる forward では、全行を最長の問い合わせまで埋め、埋めた位置は書き込まず、各行の最後の有効な位置の logits だけを取り出す。モデルを実行せずスケジューラとメモリ管理だけを進める`DryRunner`(見積もり用) | 027 |
 | `src/serving/scheduler.py` | `StaticBatchScheduler`(組を固定し、終わるまで入れ替えず、終わった行も計算に残す)と`ContinuousBatchScheduler`(反復ごとに終わった要求を抜いて待っている要求を入れる)。どちらも先着順(027) | 027 |
-| `src/serving/engine.py` | 実行ループ`ServingEngine`(027)。到着・prefill・decode・終了の処理、メモリ不足のときの退避(最後に実行に入れた要求の Key / Value を捨て、再開のときに prefill し直す)、要求ごとの時刻と反復ごとの記録`RunResult` | 027 |
-| `src/serving/clock.py` | 時計(027)。デバイスの同期を取ってから実時間を読み、待ちの間は時計を進める`WallClock`と、1 反復の時間の一次式`IterationCostModel`(`fit_cost_model()`で最小二乗法により求める)で積算する`ModelClock` | 027 |
+| `src/serving/engine.py` | 実行ループ`ServingEngine`(027)。1 反復を 1 回の forward として進める処理(到着、decode の行の置き場所の用意、新しい要求を入れる、prefill の行と decode の行をまとめた forward、終了)、メモリ不足のときの退避(最後に実行に入れた要求の Key / Value を捨て、再開のときに prefill し直す)、要求ごとの時刻と反復ごとの記録`RunResult` | 027 |
+| `src/serving/clock.py` | 時計(027)。デバイスの同期を取ってから実時間を読み、待ちの間は時計を進める`WallClock`と、1 回の forward の時間の 1 本の一次式`IterationCostModel`(固定の項 + 1 行あたりの項 × 行数 + 1 トークンあたりの項 × (問い合わせのトークン数 - 行数)。`fit_cost_model()`で、係数が負にならない最小二乗法により求める)で積算する`ModelClock` | 027 |
 | `src/serving/metrics.py` | スループット`throughput()`、最初のトークンまでの時間・出力トークンあたりの時間・待ち行列の待ち時間`latency_statistics()`、実行中の要求数`mean_active_requests()`、メモリの使用状況`memory_statistics()`、無駄な行の割合`wasted_row_fraction()`(027) | 027 |
 | `src/serving/reference.py` | 010 の KV キャッシュによる 1 要求ずつの貪欲法の生成`reference_generate()`(logits も返す)と、logits の許容誤差`logits_tolerance()`(計算する型の機械イプシロンと logits の大きさ、直列の行列積の段数から導く。型が違えば例外)(027) | 027 |
 

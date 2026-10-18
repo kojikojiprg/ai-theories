@@ -44,6 +44,7 @@ from src.serving import (  # noqa: E402
     Request,
     RequestState,
     ReservedKeyValueStore,
+    Row,
     ServingEngine,
     ServingModel,
     StaticBatchScheduler,
@@ -61,6 +62,7 @@ from src.serving import (  # noqa: E402
     poisson_arrival_times,
     predicted_static_to_continuous_ratio,
     reference_generate,
+    relative_errors,
     sample_output_lengths,
     sample_prompt_lengths,
     throughput,
@@ -140,7 +142,7 @@ def reserved_store(model, num_slots=4, materialize=True):
 
 
 def dry_run(scheduler, store, requests, cost=None):
-    cost = cost or IterationCostModel(1e-3, 1e-4, 2e-3, 1e-5)
+    cost = cost or IterationCostModel(1e-3, 1e-4, 1e-5)
     return ServingEngine(scheduler, store, DryRunner(), ModelClock(cost)).run(requests)
 
 
@@ -607,7 +609,7 @@ class SchedulerTest(unittest.TestCase):
         self.assertIsNone(result.requests[0].time_per_output_token)
 
     def test_idle_time_is_skipped_until_the_next_arrival(self):
-        cost = IterationCostModel(0.01, 0.0, 0.01, 0.0)
+        cost = IterationCostModel(0.01, 0.0, 0.0)
         store = paged_store(self.model, num_blocks=64, materialize=False)
         requests = self.requests_with_outputs([3, 3], arrival=[0.0, 5.0])
         result = dry_run(ContinuousBatchScheduler(2), store, requests, cost)
@@ -629,12 +631,12 @@ class SchedulerTest(unittest.TestCase):
             ContinuousBatchScheduler(3),
             paged_store(model, materialize=False),
             DryRunner(),
-            ModelClock(IterationCostModel(1e-3, 0, 1e-3, 0)),
+            ModelClock(IterationCostModel(1e-3, 0, 0)),
         ).run(requests)
 
         def schedule(result):
             return [
-                (i.prefill_rows, i.prefill_query_tokens, i.decode_rows, i.active_requests)
+                (i.prefill_rows, i.query_tokens, i.decode_rows, i.active_requests)
                 for i in result.iterations
             ]
 
@@ -663,7 +665,7 @@ class SchedulerTest(unittest.TestCase):
 class MetricsTest(unittest.TestCase):
     def test_throughput_latency_and_memory(self):
         model = tiny_model()
-        cost = IterationCostModel(0.01, 0.0, 0.01, 0.0)
+        cost = IterationCostModel(0.01, 0.0, 0.0)
         requests = [Request(i, (1, 2, 3, 4), 5) for i in range(4)]
         reserved = dry_run(
             ContinuousBatchScheduler(4), reserved_store(model, 4, False), requests, cost
@@ -685,28 +687,277 @@ class MetricsTest(unittest.TestCase):
         self.assertGreater(memory_statistics(paged)["utilization"], 0.8)
         self.assertLess(memory_statistics(paged)["wasted_tokens_mean"], 4 * 4)
 
-    def test_cost_model_fit_recovers_a_line(self):
-        decode = [(n, 0.004 + 0.0002 * n) for n in (1, 2, 4, 8, 16)]
-        prefill = [(n, 0.006 + 0.00003 * n) for n in (10, 50, 100, 400)]
-        model, diagnostics = fit_cost_model(decode, prefill)
-        self.assertAlmostEqual(model.decode_fixed, 0.004, places=9)
-        self.assertAlmostEqual(model.decode_per_row, 0.0002, places=9)
-        self.assertAlmostEqual(model.prefill_per_token, 0.00003, places=9)
-        self.assertAlmostEqual(diagnostics["decode_r2"], 1.0)
-        self.assertAlmostEqual(diagnostics["decode_fixed_share"], 0.004 / 0.0042)
+    def test_cost_model_fit_recovers_a_single_formula_for_mixed_forwards(self):
+        truth = IterationCostModel(0.004, 0.0002, 0.00003)
+        shapes = [(1, 1), (4, 4), (16, 16), (1, 32), (4, 48), (16, 48), (8, 400), (12, 12 * 33)]
+        samples = [(r, q, truth.forward_seconds(r, q)) for r, q in shapes]
+        model, diagnostics = fit_cost_model(samples)
+        self.assertAlmostEqual(model.fixed, 0.004, places=9)
+        self.assertAlmostEqual(model.per_row, 0.0002, places=9)
+        self.assertAlmostEqual(model.per_extra_token, 0.00003, places=9)
+        self.assertAlmostEqual(diagnostics["r2"], 1.0)
+        self.assertAlmostEqual(diagnostics["fixed_share"], 0.004 / 0.0042)
+        self.assertLess(diagnostics["max_relative_error"], 1e-9)
+        self.assertEqual(model.decode_seconds(5), model.forward_seconds(5, 5))
+        self.assertTrue(all(abs(e) < 1e-9 for e in relative_errors(model, samples)))
+
+    def test_cost_model_fit_with_noise_stays_non_negative_and_predicts_mixed_shapes(self):
+        truth = IterationCostModel(0.003, 0.0001, 0.00002)
+        rng = np.random.default_rng(0)
+        pure = [(r, r) for r in (1, 2, 4, 8, 16)] + [
+            (r, r * q) for r, q in ((1, 16), (4, 32), (8, 48))
+        ]
+        mixed = [(16, 16 * 32), (16, 16 * 48), (16, 16 * 24)]
+        noisy = lambda r, q: truth.forward_seconds(r, q) * (1 + 0.02 * rng.standard_normal())  # noqa: E731
+        model, _ = fit_cost_model([(r, q, noisy(r, q)) for r, q in pure])
+        self.assertTrue(model.fixed >= 0 and model.per_row >= 0 and model.per_extra_token >= 0)
+        # 混ぜた形は、混ぜない形だけから作った費用モデルでも、雑音の数倍以内で予測できる
+        errors = relative_errors(model, [(r, q, truth.forward_seconds(r, q)) for r, q in mixed])
+        self.assertLess(max(abs(e) for e in errors), 0.15)
+
+    def test_cost_model_fit_never_returns_negative_coefficients(self):
+        # 行数とともに時間が減るように見える測定(雑音)でも、係数は負にならない
+        samples = [(1, 1, 0.0050), (4, 4, 0.0049), (16, 16, 0.0048), (4, 64, 0.0051)]
+        model, _ = fit_cost_model(samples)
+        self.assertTrue(model.fixed >= 0 and model.per_row >= 0 and model.per_extra_token >= 0)
+        self.assertGreater(model.forward_seconds(1, 1), 0)
 
     def test_model_clock_accumulates_and_never_goes_back(self):
-        clock = ModelClock(IterationCostModel(0.01, 0.001, 0.02, 0.0001))
+        clock = ModelClock(IterationCostModel(0.01, 0.001, 0.0001))
         clock.start()
-        clock.tick("decode", 4, 4)
-        clock.tick("prefill", 2, 30)
-        self.assertAlmostEqual(clock.now(), 0.014 + 0.023)
+        clock.tick(4, 4)  # decode の行だけ
+        clock.tick(8, 8 * 33)  # prefill の行が混ざり、全行が 33 トークンまで埋められる
+        self.assertAlmostEqual(clock.now(), (0.01 + 0.004) + (0.01 + 0.008 + 0.0001 * 8 * 32))
+        before = clock.now()
         clock.advance_to(0.001)
-        self.assertAlmostEqual(clock.now(), 0.037)
-        clock.advance_to(1.0)
-        self.assertAlmostEqual(clock.now(), 1.0)
-        with self.assertRaises(ValueError):
-            clock.tick("other", 1, 1)
+        self.assertAlmostEqual(clock.now(), before)
+        clock.advance_to(100.0)
+        self.assertAlmostEqual(clock.now(), 100.0)
+
+
+class MixedForwardTest(EquivalenceMixin, unittest.TestCase):
+    """prefill の行と decode の行を 1 回の forward にまとめる(埋め・マスク・書き込み・取り出し)。"""
+
+    def row_for(self, store, request_id, prompt, output_length=8, cached=None):
+        state = RequestState(Request(request_id, tuple(prompt), output_length))
+        store.admit(state)
+        return state
+
+    def mixed_and_separate(self, make_store):
+        """同じ要求に対して、混ぜた forward と、行の種類ごとに分けた forward を実行して比べる。"""
+        model = tiny_model(seed=11)
+        runner = ModelRunner(ServingModel(model))
+        rng = np.random.default_rng(3)
+        prompts = [tuple(int(t) for t in rng.integers(0, VOCABULARY, n)) for n in (5, 9, 3, 14)]
+
+        def setup():
+            store = make_store(model)
+            states = [self.row_for(store, i, p) for i, p in enumerate(prompts)]
+            # 要求 0・1 を先に prefill して decode の行にする
+            first = [Row(states[i], list(prompts[i]), 0) for i in (0, 1)]
+            tokens, _ = runner.step(first, store)
+            for i, token in zip((0, 1), tokens, strict=True):
+                states[i].num_cached_tokens = len(prompts[i])
+                states[i].generated.append(token)
+                assert store.grow(states[i])
+            return store, states
+
+        store_a, states_a = setup()
+        decode = [
+            Row(states_a[i], [states_a[i].last_token()], states_a[i].num_cached_tokens)
+            for i in (0, 1)
+        ]
+        prefill = [Row(states_a[i], list(prompts[i]), 0) for i in (2, 3)]
+        tokens_a, logits_a = runner.step(decode + prefill, store_a, return_logits=True)
+
+        store_b, states_b = setup()
+        decode_b = [
+            Row(states_b[i], [states_b[i].last_token()], states_b[i].num_cached_tokens)
+            for i in (0, 1)
+        ]
+        prefill_b = [Row(states_b[i], list(prompts[i]), 0) for i in (2, 3)]
+        tokens_d, logits_d = runner.step(decode_b, store_b, return_logits=True)
+        tokens_p, logits_p = runner.step(prefill_b, store_b, return_logits=True)
+        return (
+            model,
+            (tokens_a, logits_a, store_a),
+            (tokens_d + tokens_p, np.concatenate([logits_d, logits_p]), store_b),
+        )
+
+    def test_mixed_forward_equals_separate_forwards_for_paged_store(self):
+        model, mixed, separate = self.mixed_and_separate(
+            lambda m: paged_store(m, num_blocks=64, block_size=4)
+        )
+        self.assertEqual(mixed[0], separate[0])
+        tolerance = logits_tolerance(model, separate[1])
+        self.assertLessEqual(float(np.abs(mixed[1] - separate[1]).max()), tolerance)
+        # 埋めた位置には何も書き込まれていない(Key / Value のメモリが、分けて実行した場合と一致する)
+        torch.testing.assert_close(mixed[2].keys, separate[2].keys, atol=tolerance, rtol=0)
+        torch.testing.assert_close(mixed[2].values, separate[2].values, atol=tolerance, rtol=0)
+
+    def test_mixed_forward_equals_separate_forwards_for_reserved_store(self):
+        model, mixed, separate = self.mixed_and_separate(lambda m: reserved_store(m, num_slots=4))
+        self.assertEqual(mixed[0], separate[0])
+        tolerance = logits_tolerance(model, separate[1])
+        self.assertLessEqual(float(np.abs(mixed[1] - separate[1]).max()), tolerance)
+        torch.testing.assert_close(mixed[2].keys, separate[2].keys, atol=tolerance, rtol=0)
+
+    def test_padded_decode_rows_do_not_change_their_result(self):
+        # decode の行の結果は、同じ forward に長い prefill の行があっても、変わらない
+        model = tiny_model(seed=12)
+        runner = ModelRunner(ServingModel(model))
+        prompt = (3, 1, 4, 1, 5, 9)
+        reference_tokens, reference_logits = reference_generate(model, prompt, 3)
+        for long_length in (1, 7, 30):
+            store = paged_store(model, num_blocks=64, block_size=4)
+            state = self.row_for(store, 0, prompt)
+            token, _ = runner.step([Row(state, list(prompt), 0)], store)
+            state.num_cached_tokens = len(prompt)
+            state.generated.append(token[0])
+            self.assertTrue(store.grow(state))
+            other = self.row_for(store, 1, tuple(range(1, long_length + 1)))
+            rows = [
+                Row(state, [state.last_token()], state.num_cached_tokens),
+                Row(other, list(range(1, long_length + 1)), 0),
+            ]
+            tokens, logits = runner.step(rows, store, return_logits=True)
+            self.assertEqual(tokens[0], reference_tokens[1])
+            self.assertLessEqual(
+                float(np.abs(logits[0] - reference_logits[1]).max()),
+                logits_tolerance(model, reference_logits),
+            )
+
+    def test_every_iteration_is_one_forward(self):
+        model = tiny_model()
+        requests = random_requests(10, seed=21)
+        for scheduler in (ContinuousBatchScheduler(3), StaticBatchScheduler(3)):
+            result = self.run_engine(model, scheduler, paged_store(model), requests)
+            self.assertEqual(result.forward_calls, len(result.iterations))
+            for it in result.iterations:
+                self.assertGreater(it.prefill_rows + it.decode_rows, 0)
+                rows = it.prefill_rows + it.decode_rows
+                self.assertEqual(it.query_tokens % rows, 0)
+                self.assertGreaterEqual(it.query_tokens, rows)
+                self.assertGreaterEqual(it.query_tokens, it.prefill_tokens + it.decode_rows)
+
+    def test_continuous_mixes_prefill_and_decode_rows_but_static_never_does(self):
+        model = tiny_model()
+        requests = random_requests(10, seed=22, output_range=(2, 12))
+        continuous = self.run_engine(
+            model, ContinuousBatchScheduler(3), paged_store(model), requests
+        )
+        self.assertTrue(
+            any(it.prefill_rows > 0 and it.decode_rows > 0 for it in continuous.iterations)
+        )
+        static = self.run_engine(model, StaticBatchScheduler(3), paged_store(model), requests)
+        self.assertFalse(
+            any(it.prefill_rows > 0 and it.decode_rows > 0 for it in static.iterations)
+        )
+        first_iterations = [it for it in static.iterations if it.prefill_rows > 0]
+        self.assertTrue(
+            all(it.decode_rows == 0 for it in first_iterations)
+        )  # 組を始める反復は prefill の行だけ
+
+    def test_mixed_iterations_match_reference_with_different_prompt_lengths(self):
+        model = tiny_model(seed=13)
+        # 書き出しの長さが大きく違う要求が、実行中の要求の decode と同じ反復に入る
+        rng = np.random.default_rng(6)
+        requests = [
+            Request(i, tuple(int(t) for t in rng.integers(0, VOCABULARY, n)), int(o))
+            for i, (n, o) in enumerate(
+                zip((2, 25, 4, 30, 1, 17, 8, 22), (9, 3, 11, 4, 8, 5, 10, 6), strict=True)
+            )
+        ]
+        for store in (paged_store(model, num_blocks=128, block_size=4), reserved_store(model, 3)):
+            result = self.run_engine(model, ContinuousBatchScheduler(3), store, requests)
+            self.assert_matches_reference(model, requests, result)
+            longest_mixed = max(
+                (it.query_tokens // (it.prefill_rows + it.decode_rows))
+                for it in result.iterations
+                if it.decode_rows and it.prefill_rows
+            )
+            self.assertGreater(
+                longest_mixed, 10
+            )  # 長い prefill の行に、decode の行が埋められた反復がある
+
+    def test_resumed_request_runs_alongside_decode_rows(self):
+        model = tiny_model(seed=14)
+        requests = random_requests(8, seed=8, prompt_range=(4, 8), output_range=(6, 14))
+        store = paged_store(model, num_blocks=16, block_size=2)
+        result = self.run_engine(model, ContinuousBatchScheduler(8), store, requests)
+        self.assertGreater(result.num_preemptions, 0)
+        self.assertTrue(any(it.resumed_rows > 0 and it.decode_rows > 0 for it in result.iterations))
+        self.assert_matches_reference(model, requests, result)
+        # 退避が起きた反復は、新しい要求を入れない(退避した要求がすぐ戻ってメモリを奪い合わない)
+        previous = 0
+        for it in result.iterations:
+            if it.preemptions > previous:
+                self.assertEqual(it.prefill_rows, 0)
+            previous = it.preemptions
+        self.assertEqual(result.forward_calls, len(result.iterations))
+
+    def test_no_new_request_is_admitted_in_an_iteration_with_preemption(self):
+        # 接頭辞の共有があると、退避した要求の登録済みブロックが残り、同じ反復で戻れてしまいうる
+        model = tiny_model(seed=16)
+        for blocks, block_size, count, prompt, output in ((5, 2, 2, 4, 6), (5, 4, 3, 8, 10)):
+            requests = [
+                Request(i, tuple(range(1, prompt)) + (40 + i,), output) for i in range(count)
+            ]
+            store = paged_store(model, num_blocks=blocks, block_size=block_size, prefix=True)
+            result = self.run_engine(model, ContinuousBatchScheduler(count), store, requests)
+            self.assertGreater(result.num_preemptions, 0)
+            previous = 0
+            for it in result.iterations:
+                if it.preemptions > previous:
+                    self.assertEqual(it.prefill_rows, 0)
+                previous = it.preemptions
+            self.assert_matches_reference(model, requests, result)
+            store.check_consistency()
+
+    def test_prefix_sharing_in_mixed_iterations_matches_reference(self):
+        model = tiny_model(seed=15)
+        rng = np.random.default_rng(9)
+        system = tuple(int(t) for t in rng.integers(0, VOCABULARY, 12))
+        requests = [
+            Request(
+                i,
+                system + tuple(int(t) for t in rng.integers(0, VOCABULARY, rng.integers(1, 8))),
+                int(rng.integers(2, 10)),
+            )
+            for i in range(9)
+        ]
+        store = paged_store(model, num_blocks=96, block_size=4, prefix=True)
+        result = self.run_engine(model, ContinuousBatchScheduler(3), store, requests)
+        self.assert_matches_reference(model, requests, result)
+        self.assertGreater(store.num_prefix_hit_blocks, 0)
+        self.assertTrue(any(it.prefill_rows > 0 and it.decode_rows > 0 for it in result.iterations))
+        store.check_consistency()
+
+    def test_first_token_time_is_the_end_of_the_forward_that_contains_its_prefill_row(self):
+        store = paged_store(tiny_model(), num_blocks=128, materialize=False)
+        outputs = [6, 3, 9, 2, 7, 4]
+        requests = [Request(i, (1 + i, 2, 3), o) for i, o in enumerate(outputs)]
+        result = dry_run(
+            ContinuousBatchScheduler(2), store, requests, IterationCostModel(0.01, 0.001, 0.0001)
+        )
+        for record in result.requests:
+            admission = [
+                it for it in result.iterations if abs(it.start_time - record.admitted_time) < 1e-12
+            ]
+            self.assertEqual(len(admission), 1)
+            self.assertAlmostEqual(record.first_token_time, admission[0].end_time)
+            self.assertGreater(admission[0].prefill_rows, 0)
+
+    def test_forward_time_depends_on_padded_tokens_in_mixed_iterations(self):
+        cost = IterationCostModel(0.01, 0.0, 0.001)
+        store = paged_store(tiny_model(), num_blocks=128, materialize=False)
+        requests = [Request(0, (1, 2), 6), Request(1, tuple(range(1, 21)), 3, arrival_time=0.025)]
+        result = dry_run(ContinuousBatchScheduler(2), store, requests, cost)
+        mixed = [it for it in result.iterations if it.prefill_rows and it.decode_rows]
+        self.assertEqual(len(mixed), 1)
+        # 2 行(decode 1 + prefill 1)が、長さ 20 の問い合わせまで埋められる
+        self.assertEqual(mixed[0].query_tokens, 2 * 20)
+        self.assertAlmostEqual(mixed[0].end_time - mixed[0].start_time, 0.01 + 0.001 * (40 - 2))
 
 
 class EquivalenceTest(EquivalenceMixin, unittest.TestCase):

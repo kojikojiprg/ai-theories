@@ -12,7 +12,13 @@
 - ``reference``: 1 要求ずつの生成(正しさの基準)と数値の許容誤差。
 """
 
-from src.serving.clock import IterationCostModel, ModelClock, WallClock, fit_cost_model
+from src.serving.clock import (
+    IterationCostModel,
+    ModelClock,
+    WallClock,
+    fit_cost_model,
+    relative_errors,
+)
 from src.serving.engine import IterationRecord, RequestRecord, RunResult, ServingEngine
 from src.serving.kv_store import (
     BatchLayout,
@@ -85,6 +91,7 @@ __all__ = [
     "poisson_arrival_times",
     "predicted_static_to_continuous_ratio",
     "reference_generate",
+    "relative_errors",
     "sample_output_lengths",
     "sample_prompt_lengths",
     "throughput",
