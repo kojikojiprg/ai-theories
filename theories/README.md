@@ -19,8 +19,8 @@ Theory related to language model pretraining, generation, and scaling (tokenizer
 
 ### 03_efficient_training
 
-限られた計算資源(Colab 無料枠)で学習・推論するための効率化技術(LoRA、量子化、Flash Attention など)。
-Techniques for training/inference under limited compute (LoRA, quantization, Flash Attention, etc.).
+限られた計算資源(Colab 無料枠)で学習・推論するための効率化技術(LoRA、量子化、Flash Attention、推論サーバのバッチ処理とメモリ管理など)。
+Techniques for training/inference under limited compute (LoRA, quantization, Flash Attention, batching and memory management for inference serving, etc.).
 
 ### 04_alignment
 
@@ -85,6 +85,7 @@ flowchart LR
       KV["010 KV キャッシュ(Key-Value Cache)"]
       QNT["013 量子化の基礎"]
       FLA["014 Flash Attention"]
+      SRV["027 推論サーバ<br/>(continuous batching と PagedAttention)"]
     end
     OUT["008 デコーディング戦略<br/>(出力)"]
     AG --> IN
@@ -143,6 +144,7 @@ flowchart LR
       I8["008 デコーディング戦略"]
       I10["010 KV キャッシュ"]
       I14["014 Flash Attention"]
+      I27["027 推論サーバ"]
     end
     subgraph EMB["埋め込みの学習"]
       direction TB
@@ -190,6 +192,7 @@ The theories are organized by category, but I recommend **studying them in the n
 | 024 | テキスト埋め込みと retriever | 07_retrieval | 008, 020 | 言語モデルを埋め込みモデルに転用する仕組み(プーリング・対照学習)と、dense retriever による検索を理解する | C・D 支持 / A 反証 / B 判定不能 | [024_text_embedding_and_retriever.ipynb](./07_retrieval/024_text_embedding_and_retriever.ipynb) |
 | 025 | ANN 検索とリランキング | 07_retrieval | 024, 008, 013 | 近似最近傍探索(転置ファイル・HNSW・積量子化)と、cross-encoder による並べ替えを理解する | A・B・C 支持 / D・E 前提不成立 | [025_ann_search_and_reranking.ipynb](./07_retrieval/025_ann_search_and_reranking.ipynb) |
 | 026 | Inverse Cloze Task と passage 単位の 2 段階検索 | 07_retrieval | 024, 025 | 検索器が何を関連とみなすかが学習で決まることと、Inverse Cloze Task、2 段階検索を理解する | A 支持 / B 反証 / C 前提不成立 | [026_inverse_cloze_task_and_two_stage_retrieval.ipynb](./07_retrieval/026_inverse_cloze_task_and_two_stage_retrieval.ipynb) |
+| 027 | 推論サーバ: continuous batching と PagedAttention | 03_efficient_training | 008, 010 | 複数の要求を同時に進める推論サーバで、continuous batching と PagedAttention がスループットとメモリ効率を改善する仕組みを理解する | 本番実行前 | [027_inference_serving.ipynb](./03_efficient_training/027_inference_serving.ipynb) |
 
 > 「未作成 / TBD」の行は今後追加予定のトピックです。追加のたびにこの表を更新します。
 > Rows marked "未作成 / TBD" are planned topics; this table is updated whenever a topic is added.
@@ -380,6 +383,23 @@ Transformer Block の Feed-Forward Network(順伝播ネットワーク)を、複
 
 </details>
 
+<details>
+<summary>027 推論サーバ: continuous batching と PagedAttention</summary>
+
+010 は 1 件の要求の生成を KV キャッシュで速くした。推論サーバは、到着時刻も出力長も違う多数の要求を 1 つのデバイスで同時に進める。性能を決めるのは、どの要求をいつ同じバッチに入れるか(スケジューリング)と、要求ごとの KV キャッシュのメモリをどう割り当てるか(メモリ管理)である。学習は行わず、008 の小型 GPT(`main`)の推論だけを扱う。
+
+**理論の範囲**: 推論サーバの指標(スループット、最初のトークンまでの時間、出力トークンあたりの時間、待ち行列の待ち時間と、スループットと待ち時間の交換)。static batching の無駄(バッチ内の出力長の最大値の期待値 $\mathbb{E}[\max_B O]$ から求めた反復数の比 $\mathbb{E}[\max_B O] / \mathbb{E}[O]$)。continuous batching(Orca の iteration-level scheduling、Yu et al., OSDI 2022。反復ごとに終わった要求を抜いて待っている要求を入れ、prefill と decode を扱う)。最大長の分を前もって確保する方式の内部の断片化と、PagedAttention(Kwon et al., SOSP 2023。固定長のブロック・ブロック表・参照数・書き込み時の複製(copy-on-write)・接頭辞の共有・メモリ不足のときの退避(再計算を実装、swap は位置づけのみ)・ブロックの大きさの選び方)。位置づけのみ: chunked prefill(Sarathi)、speculative decoding、専用の注意機構のカーネル。
+
+**実装**: アプリ(`apps/`)の段階 2 から再利用するため、`src/serving/`に置いた(要求の状態・負荷の生成・KV キャッシュの管理・実行器・スケジューラ・実行ループ・時計と費用モデル・指標・1 要求ずつの生成との比較)。既存の`GPTLanguageModel.forward`と`KeyValueCache`は、バッチの全行が同じ位置・同じ長さであることを前提にするため、既存の`src/`は変えず、既存の層の重みをそのまま使って、行ごとの RoPE の位置とブロック表からの Key / Value の読み書きを扱う forward を書いた。単体テストは`scripts/test_serving.py`。
+
+**実験の設計**: 比較する方式は、同じエンジンの上でスケジューラとメモリの割り当てだけを入れ替える。要求の書き出しは検証用の記事の先頭から切り出し、書き出しと出力の長さの上限は、モデルの最大の文脈長(256)に収まる 240 とする。出力長は要求に割り当てた長さで止める。負荷は合成(出力長は平均と変動係数を指定した切り詰めたガンマ分布の形、到着は一括処理または Poisson 過程)で、シードごとに決定的。**実験 A**: 最大バッチサイズを揃え、出力長のばらつきが大きい水準で、continuous batching のスループットが static batching より高いか。**実験 B**: 出力長の平均を揃え、変動係数を 4 水準で変えたとき、その比が変動係数とともに大きくなるか(隣り合う水準の 3 つの比較 B1・B2・B3 に分けて判定。理論の予測を診断量とする)。**実験 C**: KV キャッシュの予算を揃え、どちらも continuous batching で動かしたとき、PagedAttention の方が反復あたりの実行中の要求数が多いか。**観察 D**(判定なし): 最大バッチサイズと到着の速さを変えたときの、スループットと待ち時間の関係。アプリの段階 2 で最大バッチサイズを決める材料にする。**観察 E**(判定なし): ブロックの大きさと内部の断片化・1 反復の時間、全要求が同じ system prompt を持つ負荷での接頭辞の共有の効果。前提条件は P0(エンジンを通した生成が 1 要求ずつの生成と一致)、P1(負荷の実現)、P2(計測の安定)、P3(改善の余地)、P4・P5(実験 C の予算の制約と確保した枠の無駄)。本番の冒頭で、1 反復の時間、単一の条件のばらつき(検出力の事前確認)を測り、シード数と観察の水準を削る段階を、見積もりのみから自動で選ぶ。
+
+**制約**: 小型 GPT では KV キャッシュが T4 のメモリに比べて小さく、メモリの制約は実際にはかからないので、実験 C の予算は人工的に決めている。小型モデルの 1 反復の時間は固定費(Python とカーネルの起動)が支配的になりうるため、スループットの差には計算量の差より forward の回数の差が強く効く。1 反復の時間の行数への依存を本番の冒頭で測って示す。
+
+**状態**: 本番実行の前(縮小スケールでの動作確認まで)。本番の結果と事後の解釈は、本番実行の後に追記する。
+
+</details>
+
 ### 実装済みの共通モジュール / Implemented Shared Modules
 
 | モジュール                           | 内容                                                                                                      | 初出トピック |
@@ -454,6 +474,15 @@ Transformer Block の Feed-Forward Network(順伝播ネットワーク)を、複
 | `src/retrieval/passage_level.py` | passage 単位の評価(026)。単一の正例の順位`rank_single_positive()`(同点は正例に不利)、同じ索引・同じ query の記事単位のラベルの順位`rank_article_label()`、並べ替えの順位`rerank_single_positive()`、可変長の cross-encoder による候補のスコア`score_candidates_variable()` | 026 |
 | `src/training/update_step.py` | 全パラメータ更新の学習ループに共通の 1 ステップの部品(019)。重み減衰を掛ける・掛けないパラメータの分割と 2 つの`AdamW`の構築`build_weight_decay_split_optimizers()`、損失スケールの unscale と勾配ノルム`unscale_gradients_and_compute_norm()`、gradient clipping`clip_gradients_to_threshold()`、更新と損失スケールの記録`step_optimizers_and_update_loss_scale()`、クリップ発動の判定`flag_clipped_steps()`。019・020・024・025・026 の 6 つの学習ループが同一の記述を持っていたものを統合した(挙動は変えない) | 019 |
 | `src/utils/device.py` | `synchronize_device()`(CUDA・MPS の非同期の処理の完了を待つ。学習ループの実時間の計測で使う。6 つの学習ループが持っていた同一の関数を統合した) | 019 |
+| `src/serving/requests.py` | 要求`Request`(書き出し・出力長・到着時刻。出力長は要求に割り当てた長さで止める)と、実行中の状態`RequestState`(生成済みのトークン、KV キャッシュに書き込み済みのトークン数、各時刻、退避の回数)(027) | 027 |
+| `src/serving/workload.py` | 合成の負荷(027)。平均と変動係数が指定の値に一致する、切り詰めたガンマ分布の形の出力長の分布`fit_output_length_distribution()`、分布から取ったバッチ内の最大値の期待値`expected_maximum()`と理論の比`predicted_static_to_continuous_ratio()`、Poisson 過程の到着`poisson_arrival_times()`、標本の平均・変動係数のばらつきの見積もり`moment_sampling_distribution()`、要求の組み立て`build_requests()`(共通の接頭辞を付けられる) | 027 |
+| `src/serving/kv_store.py` | KV キャッシュの管理(027)。最大長の分を前もって確保する方式`ReservedKeyValueStore`(スロット)と、PagedAttention の方式`PagedKeyValueStore`(ブロックの割り当て、要求ごとのブロック表、参照数、書き込み時の複製、`fork()`、接頭辞の共有と登録済みブロックの捨て方、使用状況`StoreUsage`)。どちらも`keys[layer][first, second]`の添字で読み書きし、forward の入力の配置`BatchLayout`を作る | 027 |
+| `src/serving/runner.py` | 長さの違う要求を 1 回の forward で進める実行器`ServingModel`・`ModelRunner`(027)。既存の層の重みをそのまま使い、行ごとの RoPE の位置、ブロック表からの Key / Value の書き込みと集約、位置に基づくマスクを扱う。モデルを実行せずスケジューラとメモリ管理だけを進める`DryRunner`(見積もり用) | 027 |
+| `src/serving/scheduler.py` | `StaticBatchScheduler`(組を固定し、終わるまで入れ替えず、終わった行も計算に残す)と`ContinuousBatchScheduler`(反復ごとに終わった要求を抜いて待っている要求を入れる)。どちらも先着順(027) | 027 |
+| `src/serving/engine.py` | 実行ループ`ServingEngine`(027)。到着・prefill・decode・終了の処理、メモリ不足のときの退避(最後に実行に入れた要求の Key / Value を捨て、再開のときに prefill し直す)、要求ごとの時刻と反復ごとの記録`RunResult` | 027 |
+| `src/serving/clock.py` | 時計(027)。デバイスの同期を取ってから実時間を読み、待ちの間は時計を進める`WallClock`と、1 反復の時間の一次式`IterationCostModel`(`fit_cost_model()`で最小二乗法により求める)で積算する`ModelClock` | 027 |
+| `src/serving/metrics.py` | スループット`throughput()`、最初のトークンまでの時間・出力トークンあたりの時間・待ち行列の待ち時間`latency_statistics()`、実行中の要求数`mean_active_requests()`、メモリの使用状況`memory_statistics()`、無駄な行の割合`wasted_row_fraction()`(027) | 027 |
+| `src/serving/reference.py` | 010 の KV キャッシュによる 1 要求ずつの貪欲法の生成`reference_generate()`(logits も返す)と、logits の許容誤差`logits_tolerance()`(計算する型の機械イプシロンと logits の大きさ、直列の行列積の段数から導く。型が違えば例外)(027) | 027 |
 
 ## 各ノートブックの構成 / Notebook Structure
 
