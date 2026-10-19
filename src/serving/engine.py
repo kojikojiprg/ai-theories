@@ -93,6 +93,11 @@ class IterationRecord:
         tokens_used, tokens_allocated, units_in_use: 反復の終わり(要求の場所を返す前)の
             メモリの使用状況。
         preemptions: ここまでの退避の累積回数。
+        forward_start_time, forward_end_time: forward(実行器の ``step`` の呼び出し)の前後の時刻
+            (デバイスの同期を取ってから読む)。
+        layout_seconds: forward のうち、入力の配置(添字の組み立てとデバイスへの転送)に使った時間。
+        idle_seconds: この反復の前に、要求も実行もなく次の到着まで進めた時計の時間
+            (実際には待たない)。
     """
 
     start_time: float
@@ -108,6 +113,23 @@ class IterationRecord:
     tokens_allocated: int
     units_in_use: int
     preemptions: int
+    forward_start_time: float
+    forward_end_time: float
+    layout_seconds: float
+    idle_seconds: float
+
+    @property
+    def forward_seconds(self) -> float:
+        """forward(実行器の ``step``)の時間。入力の配置とモデルの計算を含む。"""
+        return self.forward_end_time - self.forward_start_time
+
+    @property
+    def other_seconds(self) -> float:
+        """反復の中の、forward 以外の時間。
+
+        スケジューラの判断、置き場所の確保と解放、行の組み立て、記録を含む。
+        """
+        return self.end_time - self.start_time - self.forward_seconds
 
 
 @dataclass
@@ -142,6 +164,38 @@ class RunResult:
     @property
     def num_preemptions(self) -> int:
         return self.iterations[-1].preemptions if self.iterations else 0
+
+    def time_breakdown(self) -> dict[str, float]:
+        """スループットの分母(``makespan``)の内訳 [秒]。4 つの和が ``makespan`` に等しい。
+
+        - ``forward``: forward(実行器の ``step``)の時間の合計。うち ``layout`` は入力の配置の時間。
+        - ``other``: 反復の中の、forward 以外の時間(スケジューラの判断、置き場所の確保と解放、
+          行の組み立て、記録)。最後の反復の、最後のトークンを生成した後の分は含まない。
+        - ``between``: 反復と反復の間の時間(反復を数えない進行を含む)。
+        - ``idle``: 要求も実行もなく、次の到着まで時計を進めた時間(最初の到着までを除く)。
+
+        Returns:
+            上の 4 つに ``makespan`` と ``layout`` を加えた辞書。
+        """
+        its = self.iterations
+        first_arrival = min(r.arrival_time for r in self.requests)
+        forward = sum(it.forward_seconds for it in its)
+        inside = sum(it.end_time - it.start_time for it in its) - forward
+        tail = (
+            its[-1].end_time - its[-1].forward_end_time
+        )  # 最後のトークンの後に、反復が終わるまでの分
+        idle_total = sum(it.idle_seconds for it in its)
+        gaps = its[0].start_time + sum(
+            b.start_time - a.end_time for a, b in zip(its, its[1:], strict=False)
+        )
+        return {
+            "makespan": self.makespan,
+            "forward": forward,
+            "layout": sum(it.layout_seconds for it in its),
+            "other": inside - tail,
+            "between": gaps - idle_total,
+            "idle": idle_total - first_arrival,
+        }
 
 
 class ServingEngine:
@@ -203,6 +257,7 @@ class ServingEngine:
         admit_counter = 0
         preemptions = 0
         forward_calls = 0
+        idle_pending = 0.0
         self.clock.start()
 
         while pending or waiting or running:
@@ -211,6 +266,7 @@ class ServingEngine:
                 waiting.append(pending.popleft())
             if not waiting and not running:
                 self.clock.advance_to(pending[0].request.arrival_time)
+                idle_pending += max(pending[0].request.arrival_time - now, 0.0)
                 continue
 
             start = now
@@ -255,6 +311,7 @@ class ServingEngine:
                     )
                 continue  # 退避だけが起きた(forward しない)。次の反復で退避した要求が戻る
 
+            forward_start = self.clock.now()
             tokens, logits = self.runner.step(rows, self.store, self.record_logits)
             forward_calls += 1
             longest = max(len(row.query_token_ids) for row in rows)
@@ -312,8 +369,13 @@ class ServingEngine:
                     tokens_allocated=usage.tokens_allocated,
                     units_in_use=usage.units_in_use,
                     preemptions=preemptions,
+                    forward_start_time=forward_start,
+                    forward_end_time=time_forward,
+                    layout_seconds=getattr(self.runner, "last_layout_seconds", 0.0),
+                    idle_seconds=idle_pending,
                 )
             )
+            idle_pending = 0.0
 
         records = [
             RequestRecord(

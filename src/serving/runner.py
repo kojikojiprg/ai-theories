@@ -49,6 +49,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Sequence
 
 import numpy as np
@@ -174,6 +175,10 @@ class ModelRunner:
     def __init__(self, serving_model: ServingModel) -> None:
         self.serving_model = serving_model
         self.device = serving_model.device
+        # 直前の ``step`` のうち、forward の入力の配置(添字の組み立てとデバイスへの転送)に使った
+        # 時間 [秒]。
+        # 残りが、モデルの計算(デバイスの完了を待つ時間を含む)。
+        self.last_layout_seconds = 0.0
 
     def step(
         self, rows: Sequence[Row], store: KeyValueStore, return_logits: bool = False
@@ -184,7 +189,9 @@ class ModelRunner:
             ``(次のトークンのリスト, logits)``。logits は ``return_logits`` が真のときだけ
             ``(R, V)`` の numpy 配列(計算した型のまま)。
         """
+        started = time.perf_counter()
         layout = store.build_layout(rows)
+        self.last_layout_seconds = time.perf_counter() - started
         logits = self.serving_model.forward(layout, store)
         tokens = logits.argmax(dim=-1).tolist()  # デバイスの完了を待つ
         return tokens, (logits.cpu().numpy() if return_logits else None)
@@ -198,6 +205,7 @@ class DryRunner:
     """
 
     device = torch.device("cpu")
+    last_layout_seconds = 0.0
 
     def step(
         self, rows: Sequence[Row], store: KeyValueStore, return_logits: bool = False

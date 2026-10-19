@@ -960,6 +960,78 @@ class MixedForwardTest(EquivalenceMixin, unittest.TestCase):
         self.assertAlmostEqual(mixed[0].end_time - mixed[0].start_time, 0.01 + 0.001 * (40 - 2))
 
 
+class TimeBreakdownTest(EquivalenceMixin, unittest.TestCase):
+    """スループットの分母(makespan)の内訳: forward・反復の中のその他・反復の間・待ち。"""
+
+    def assert_sums_to_makespan(self, result, places=9):
+        parts = result.time_breakdown()
+        total = parts["forward"] + parts["other"] + parts["between"] + parts["idle"]
+        self.assertAlmostEqual(total, parts["makespan"], places=places)
+        return parts
+
+    def test_model_clock_has_only_forward_time_in_an_offline_run(self):
+        cost = IterationCostModel(0.01, 0.001, 0.0001)
+        store = paged_store(tiny_model(), num_blocks=128, materialize=False)
+        requests = [Request(i, (1 + i, 2, 3), 2 + i) for i in range(5)]
+        result = dry_run(ContinuousBatchScheduler(2), store, requests, cost)
+        parts = self.assert_sums_to_makespan(result)
+        self.assertAlmostEqual(parts["forward"], parts["makespan"])
+        for key in ("other", "between", "idle", "layout"):
+            self.assertAlmostEqual(parts[key], 0.0)
+        for it in result.iterations:
+            self.assertAlmostEqual(
+                it.forward_seconds,
+                cost.forward_seconds(it.prefill_rows + it.decode_rows, it.query_tokens),
+            )
+            self.assertAlmostEqual(it.other_seconds, 0.0)
+            self.assertEqual(it.idle_seconds, 0.0)
+
+    def test_idle_time_is_separated_and_the_first_arrival_is_excluded(self):
+        cost = IterationCostModel(0.01, 0.0, 0.0)
+        store = paged_store(tiny_model(), num_blocks=128, materialize=False)
+        requests = [
+            Request(0, (1, 2, 3), 3, arrival_time=2.0),
+            Request(1, (4, 5, 6), 3, arrival_time=9.0),
+        ]
+        result = dry_run(ContinuousBatchScheduler(2), store, requests, cost)
+        parts = self.assert_sums_to_makespan(result)
+        # 最初の到着(2.0)までは makespan に含まれず、2 件目の到着までの待ち(9.0 - 2.03)だけが
+        # idle になる
+        self.assertAlmostEqual(parts["idle"], 9.0 - (2.0 + 0.03))
+        self.assertAlmostEqual(parts["forward"], 0.06)
+        self.assertAlmostEqual(parts["makespan"], (9.0 + 0.03) - 2.0)
+        idle_records = [it.idle_seconds for it in result.iterations]
+        self.assertAlmostEqual(idle_records[0], 2.0)
+        self.assertAlmostEqual(sum(idle_records), 2.0 + (9.0 - 2.03))
+
+    def test_iterations_without_a_forward_are_counted_between_iterations(self):
+        # 退避だけが起きて forward しない反復は、反復として数えず、反復の間に入る(和は変わらない)
+        store = paged_store(tiny_model(), num_blocks=10, block_size=2, materialize=False)
+        requests = [Request(i, (1 + i, 2, 3, 4), 12) for i in range(6)]
+        result = dry_run(ContinuousBatchScheduler(6), store, requests)
+        self.assertGreater(result.num_preemptions, 0)
+        self.assert_sums_to_makespan(result)
+
+    def test_wall_clock_breakdown_sums_to_makespan_and_is_consistent(self):
+        model = tiny_model()
+        requests = random_requests(8, seed=31, arrival=[0.0, 0.0, 0.0, 3.0, 3.0, 8.0, 8.0, 8.0])
+        for scheduler in (ContinuousBatchScheduler(3), StaticBatchScheduler(3)):
+            result = self.run_engine(model, scheduler, paged_store(model), requests)
+            parts = self.assert_sums_to_makespan(result, places=9)
+            self.assertGreater(parts["idle"], 0.0)  # 到着までの待ちは、実際には待たず、idle に入る
+            self.assertGreaterEqual(parts["other"], 0.0)
+            self.assertGreaterEqual(parts["between"], 0.0)
+            self.assertLessEqual(parts["layout"], parts["forward"])
+            self.assertGreater(parts["layout"], 0.0)
+            for it in result.iterations:
+                self.assertGreaterEqual(it.forward_start_time, it.start_time)
+                self.assertLessEqual(it.forward_end_time, it.end_time)
+                self.assertGreaterEqual(it.other_seconds, 0.0)
+                self.assertLessEqual(it.layout_seconds, it.forward_seconds)
+            for a, b in zip(result.iterations, result.iterations[1:], strict=False):
+                self.assertGreaterEqual(b.start_time, a.end_time)
+
+
 class EquivalenceTest(EquivalenceMixin, unittest.TestCase):
     def test_continuous_with_paged_store_and_swapping(self):
         model = tiny_model()
