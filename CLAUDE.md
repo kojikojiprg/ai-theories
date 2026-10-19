@@ -45,6 +45,7 @@ ai-theories/
 │   ├── scaling/
 │   ├── quantization/
 │   ├── retrieval/
+│   ├── serving/
 │   ├── data/
 │   └── utils/
 └── scripts/                 # 特定のトピック・アプリに紐付かないリポジトリ運用スクリプト
@@ -54,6 +55,7 @@ ai-theories/
     ├── promote_canonical_corpora.py
     ├── promote_canonical_tokenizers.py
     ├── test_check_notebook_edit_equivalence.py
+    ├── test_serving.py
     ├── test_src_refactor_equivalence.py
     └── transfer_rerun_outputs.py
 ```
@@ -109,6 +111,7 @@ ai-theories/
 - `check_notebook_edit_equivalence.py`は、実行済みのノートブックの編集が、コードセルの実行結果を変えていないこと(構文木・出力・実行回数の一致と、Zenn のタグの使い方)を、git の基準と比べて確かめる。規則は「ノートブックの圧縮と保守(実行済みのノートブックの編集)」節にある。試験は`test_check_notebook_edit_equivalence.py`(`uv run python scripts/test_check_notebook_edit_equivalence.py`で実行する)。
 - `check_notebook_imports.py`は、実行済みのノートブックのコードセルにある`from src... import ...`と`import src...`の文だけを取り出して実行し、すべて import できることを確かめる(コードセルは実行しない)。`src/`の関数の移動・統合・削除の後に、ノートブックのコードセルを変えずに済むことの確認に使う(`uv run python scripts/check_notebook_imports.py`)。
 - `test_src_refactor_equivalence.py`は、`src/`の整理(関数の移動・統合)が挙動を変えていないことの試験である。参照のコミット(`--base`、整理の前のコミット)を`git worktree`で取り出し、同じ入力の計算を参照のコミットと作業ツリーで別のサブプロセスに行わせ、結果を bit 単位で比べる。入力は CPU で軽く終わる小さなものだけにする(`uv run python scripts/test_src_refactor_equivalence.py --base <コミット>`)。
+- `test_serving.py`は、`src/serving/`(推論サーバのスケジューラ・KV キャッシュの管理・実行ループ)の単体テストである。標準ライブラリの`unittest`で、乱数の重みの小さなモデルを CPU で動かし、Hugging Face Hub は使わない(`uv run python scripts/test_serving.py`)。エンジンを通した生成が 1 要求ずつの生成と一致すること、ブロックの確保と解放の整合、書き込み時の複製などを確かめる。027 のノートブックの実装の節でも実行する。
 - 長時間を要する処理は **中断・再開が可能であること**(ローカルのキャッシュを利用し、再実行時に取得済みの分をやり直さない)。
 - `theories/`の「実験」規約(判定基準の事前登録、支持 / 反証 / 判定不能の 3 値判定など)は適用されない。ここに置くのは科学的検証ではなく、リポジトリ運用上の作業である。
 - ただし、「共有アーティファクトの管理方針」節の規約(下記)には従う。
