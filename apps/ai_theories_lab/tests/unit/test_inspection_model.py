@@ -132,7 +132,8 @@ def test_the_probabilities_and_the_entropy_match_a_direct_softmax(resources: Res
     token_ids = resources.tokenizer.encode(TEXT)
     analysis = analyze(loaded, resources.device, token_ids)
     with torch.no_grad():
-        logits = loaded.model(torch.tensor([token_ids], device=resources.device))[0].double()
+        # float64 の参照は CPU で計算する(MPS は float64 に対応しない)
+        logits = loaded.model(torch.tensor([token_ids], device=resources.device))[0].cpu().double()
     probabilities = torch.softmax(logits, dim=-1)
     entropy = torch.distributions.Categorical(logits=logits).entropy()
     num_tokens = len(token_ids)
