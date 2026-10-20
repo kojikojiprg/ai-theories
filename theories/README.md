@@ -192,7 +192,7 @@ The theories are organized by category, but I recommend **studying them in the n
 | 024 | テキスト埋め込みと retriever | 07_retrieval | 008, 020 | 言語モデルを埋め込みモデルに転用する仕組み(プーリング・対照学習)と、dense retriever による検索を理解する | C・D 支持 / A 反証 / B 判定不能 | [024_text_embedding_and_retriever.ipynb](./07_retrieval/024_text_embedding_and_retriever.ipynb) |
 | 025 | ANN 検索とリランキング | 07_retrieval | 024, 008, 013 | 近似最近傍探索(転置ファイル・HNSW・積量子化)と、cross-encoder による並べ替えを理解する | A・B・C 支持 / D・E 前提不成立 | [025_ann_search_and_reranking.ipynb](./07_retrieval/025_ann_search_and_reranking.ipynb) |
 | 026 | Inverse Cloze Task と passage 単位の 2 段階検索 | 07_retrieval | 024, 025 | 検索器が何を関連とみなすかが学習で決まることと、Inverse Cloze Task、2 段階検索を理解する | A 支持 / B 反証 / C 前提不成立 | [026_inverse_cloze_task_and_two_stage_retrieval.ipynb](./07_retrieval/026_inverse_cloze_task_and_two_stage_retrieval.ipynb) |
-| 027 | 推論サーバ: continuous batching と PagedAttention | 03_efficient_training | 008, 010 | 複数の要求を同時に進める推論サーバで、continuous batching と PagedAttention がスループットとメモリ効率を改善する仕組みを理解する | 本番実行前 | [027_inference_serving.ipynb](./03_efficient_training/027_inference_serving.ipynb) |
+| 027 | 推論サーバ: continuous batching と PagedAttention | 03_efficient_training | 008, 010 | 複数の要求を同時に進める推論サーバで、continuous batching と PagedAttention がスループットとメモリ効率を改善する仕組みを理解する | A・B1・B2・B3・C 支持 | [027_inference_serving.ipynb](./03_efficient_training/027_inference_serving.ipynb) |
 
 > 「未作成 / TBD」の行は今後追加予定のトピックです。追加のたびにこの表を更新します。
 > Rows marked "未作成 / TBD" are planned topics; this table is updated whenever a topic is added.
@@ -396,7 +396,7 @@ Transformer Block の Feed-Forward Network(順伝播ネットワーク)を、複
 
 **制約**: 小型 GPT では KV キャッシュが T4 のメモリに比べて小さく、メモリの制約は実際にはかからないので、実験 C の予算は人工的に決めている。小型モデルの 1 反復の時間は固定費(Python とカーネルの起動)が支配的になりうるため、スループットの差には計算量の差より反復の回数の差(1 反復は、prefill の行と decode の行をまとめた 1 回の forward)が強く効く。1 回の forward の時間の、行数と問い合わせのトークン数への依存(decode の行だけ・prefill の行だけ・混ぜた形)を本番の冒頭で測って示す。
 
-**状態**: 本番実行の前(縮小スケールでの動作確認まで)。本番の結果と事後の解釈は、本番実行の後に追記する。
+**Colab T4 の本番結果(コミット`830f599`、2026-10-19 23:31 UTC)**: **計画 0**(削らない。実験 A・B・C のシード数 8、観察 D・E のシード数 2、全体 16.4 分)。前提条件 P0〜P5 はすべて成立した。**実験 A: 支持**(変動係数 1.0 で continuous の static に対するスループットの比 2.649、対比量 +0.9743、閾値 0.0577)。**実験 B1・B2・B3: すべて支持**(比は変動係数 0.25・0.5・0.75・1.0 で 1.373・1.832・2.184・2.649 と単調に大きくなる。対比量 +0.2883・+0.1760・+0.1930、閾値 0.0567・0.0599・0.0671)。**実験 C: 支持**(実行中の要求数は 3.94 → 11.36、スループットは 657 → 1,768 トークン/秒、対比量 +7.419、閾値 0.317、使用中の枠の割合は 0.241 → 0.892)。1 反復の時間の内訳では、2 つの方式の 1 反復の時間の差が -0.3%〜+1.8% で、forward 以外の時間は makespan の約 2% だったので、スループットの差はほぼ反復の回数の差から生じた(費用モデルの決定係数は 0.109、行数 32 の decode は行数 1 の 1.14 倍で、固定費が支配的)。観察 D では、到着の速さが基準の 1.2 倍でも最大バッチサイズ 16 でスループットが飽和し、出力トークンあたりの時間は最大バッチサイズによらず約 6 ms だった。観察 E では、内部の断片化がブロック 4〜32 で理論の $(b - 1)/2$ と一致し(ブロック 64 は 28.45 で、理論の 31.50 より小さい)、接頭辞の共有(実装は、共有した接頭辞の prefill の計算を省いている)で使用ブロックは平均 22.0 → 12.8 に減ったが、最初のトークンまでの時間は変わらなかった。**事後的な解釈(検証済みの結論ではない)**: 実測の比が理論の比(1.489〜3.172)より小さいのは、continuous の 1 反復あたりの行数が最大バッチサイズ 16 に届かない(13.12〜14.70)ことと合い、オフラインの負荷の終盤の尾が候補である(理論の比 × 行数 / 16 が実測と 2.2% 以内で合うが、これは尾の直接の証拠ではない)。実験 C の差 7.42 が設計時の予測 8.96 より小さいのは、退避(1.2 回 / 実行)と終盤の行数の減りが候補である。接頭辞の共有で時間が変わらないのは、省いた計算が小型モデルの固定費(約 6 ms)に比べて小さいためと考えられる。いずれも確かめる方法はノートブックの 7.9 節に記した。
 
 </details>
 
