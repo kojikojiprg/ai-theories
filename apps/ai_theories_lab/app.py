@@ -21,13 +21,14 @@ from lab.core.artifacts import load_resources
 from lab.features.generation.ui import PAGE as GENERATION_PAGE
 from lab.features.inspection.ui import PAGE as INSPECTION_PAGE
 from lab.features.instruction.ui import PAGE as INSTRUCTION_PAGE
+from lab.features.serving.ui import PAGE as SERVING_PAGE
 from lab.ui.layout import build_app
 from lab.ui.theme import launch_kwargs
 
 # 起動時に 1 回だけ読み込む(トークナイザと 3 ブランチのモデルを、同時にメモリへ載せる)
 RESOURCES = load_resources()
 
-demo = build_app(RESOURCES, [GENERATION_PAGE, INSPECTION_PAGE, INSTRUCTION_PAGE])
+demo = build_app(RESOURCES, [GENERATION_PAGE, INSPECTION_PAGE, INSTRUCTION_PAGE, SERVING_PAGE])
 
 if __name__ == "__main__":
     demo.launch(**launch_kwargs())

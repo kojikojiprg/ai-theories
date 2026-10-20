@@ -172,3 +172,33 @@ def test_inspection_runs_through_the_session_state(client: Client) -> None:
     assert plot  # 図のファイルが返る
     assert "hsla(25,90%,50%" in probability_html
     assert "エントロピー" in position_md
+
+
+# ---- バッチ推論 ----
+
+
+def test_batch_inference_endpoint_shows_both_schedulers_and_the_figures(client: Client) -> None:
+    summary, timeline, memory = client.predict(
+        "main",
+        8,
+        6,
+        0.5,
+        "offline",
+        30,
+        4,
+        "paged",
+        16,
+        4,
+        False,
+        0,
+        api_name="/run_batch_inference",
+    )
+    for expected in ("static", "continuous", "スループット", "無駄な行の割合", "退避の回数"):
+        assert expected in summary
+    assert timeline and memory  # 図のファイルが返る
+
+
+def test_batch_size_sweep_endpoint_returns_the_table_and_the_figure(client: Client) -> None:
+    summary, plot = client.predict("main", 8, 5, 0.5, 0.8, 0, api_name="/measure_batch_sizes")
+    assert "基準の到着率" in summary and "最大バッチサイズ" in summary
+    assert plot

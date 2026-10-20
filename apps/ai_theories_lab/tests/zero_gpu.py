@@ -393,6 +393,10 @@ PLAIN_ANNOTATION_NAMES = frozenset(
         "Tokenization",
         "ModelAnalysis",
         "DecodingSettings",
+        "BatchSettings",
+        "BatchOutcome",
+        "SweepSettings",
+        "SweepOutcome",
     }
 )
 """``@gpu`` を付けた関数の引数に使ってよい型の注釈の名前(Python の組み込みの型と、このアプリの
@@ -419,6 +423,8 @@ MODEL_RUNNER_NAMES = frozenset(
         "stream_generation",
         "run_beam_search",
         "greedy_generate_until_stop",
+        "run_batching_comparison",
+        "run_batch_size_sweep",
     }
 )
 MODEL_ATTRIBUTES = frozenset({"model"})

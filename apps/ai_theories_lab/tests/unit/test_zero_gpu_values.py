@@ -57,6 +57,15 @@ from lab.features.instruction.service import (
     instruction_choices,
     respond,
 )
+from lab.features.serving import ui as serving_ui
+from lab.features.serving.service import (
+    BatchOutcome,
+    BatchSettings,
+    SweepOutcome,
+    SweepSettings,
+    run_batch_size_sweep,
+    run_batching_comparison,
+)
 from src.data.tokenizer import BPEIDTokenizer
 from src.models.gpt import GPTLanguageModel
 from tests.stand_in import TRAINING_SENTENCES
@@ -73,10 +82,12 @@ from tests.zero_gpu_cases import (
     GENERATOR_HANDLERS,
     GPU_FUNCTION_OF,
     PROMPT,
+    batch_arguments,
     comparison_arguments,
     generation_arguments,
     inspection_arguments,
     instruction_arguments,
+    sweep_arguments,
 )
 
 # ---------------------------------------------------------------------------
@@ -296,6 +307,32 @@ def test_the_analysis_holds_only_numpy_arrays_and_python_numbers(resources: Reso
     assert type(analysis.vocabulary_size) is int
 
 
+def test_the_batch_comparison_crosses_the_boundary_and_holds_only_numpy_and_python_values(
+    resources: Resources,
+) -> None:
+    settings = BatchSettings(
+        num_requests=6, output_mean=6, max_batch_size=3, kv_budget_slots=3, shared_prefix=True
+    )
+    outcome = run_batching_comparison(
+        resources.models["main"], resources.tokenizer, resources.device, settings
+    )
+    assert_transferable(outcome, "outcome")
+    for run in (outcome.static, outcome.continuous):
+        for field in dataclasses.fields(run):
+            assert not isinstance(getattr(run, field.name), torch.Tensor), field.name
+    assert type(outcome.device) is str
+
+
+def test_the_batch_size_sweep_crosses_the_boundary(resources: Resources) -> None:
+    outcome = run_batch_size_sweep(
+        resources.models["main"],
+        resources.tokenizer,
+        resources.device,
+        SweepSettings(num_requests=8, output_mean=5),
+    )
+    assert_transferable(outcome, "outcome")
+
+
 # ---------------------------------------------------------------------------
 # 3. @gpu を付けた関数(*_on_gpu)の引数・戻り値・yield
 # ---------------------------------------------------------------------------
@@ -355,6 +392,35 @@ GPU_CASES: list[Any] = [
         id="answer_instruction-unseen",
     ),
     pytest.param("run_model_on_gpu", inspection_arguments, id="run_model"),
+    pytest.param(
+        "run_batch_inference_on_gpu",
+        lambda r: {
+            "settings": BatchSettings(
+                num_requests=6, output_mean=6, max_batch_size=3, kv_budget_slots=3
+            )
+        },
+        id="batch-offline-paged",
+    ),
+    pytest.param(
+        "run_batch_inference_on_gpu",
+        lambda r: {
+            "settings": BatchSettings(
+                model_key="gqa",
+                num_requests=6,
+                output_mean=6,
+                arrival="poisson",
+                max_batch_size=3,
+                kv_manager="reserved",
+                kv_budget_slots=2,
+            )
+        },
+        id="batch-poisson-reserved-gqa",
+    ),
+    pytest.param(
+        "measure_batch_sizes_on_gpu",
+        lambda r: {"settings": SweepSettings(num_requests=8, output_mean=5)},
+        id="sweep",
+    ),
 ]
 SEEN_REVERSE = instruction_choices("reverse", "seen")[0]
 UNSEEN_ROTATE_LEFT = instruction_choices("rotate_left", "unseen")[0]
@@ -408,6 +474,14 @@ def test_gpu_function_arguments_and_outputs_cross_the_boundary(
         (outcome,) = outputs
         assert isinstance(outcome, InstructionOutcome)
         assert outcome.answer
+    elif name == "run_batch_inference_on_gpu":
+        (batch,) = outputs
+        assert isinstance(batch, BatchOutcome)
+        assert batch.static.output_lengths.sum() == batch.continuous.output_lengths.sum()
+    elif name == "measure_batch_sizes_on_gpu":
+        (sweep,) = outputs
+        assert isinstance(sweep, SweepOutcome)
+        assert len(sweep.throughput) == len(sweep.batch_sizes)
     else:
         (analysis,) = outputs
         assert isinstance(analysis, ModelAnalysis)
@@ -439,6 +513,10 @@ ALLOWED_ARGUMENT_TYPES: tuple[type, ...] = (
     ModelAnalysis,
     DecodingSettings,
     InstructionOutcome,
+    BatchSettings,
+    BatchOutcome,
+    SweepSettings,
+    SweepOutcome,
 )
 
 
@@ -518,6 +596,8 @@ def test_event_functions_use_the_models_loaded_at_startup(
     generate_calls = _spy(monkeypatch, generation_ui, "generate_events")
     respond_calls = _spy(monkeypatch, instruction_ui, "respond")
     analyze_calls = _spy(monkeypatch, inspection_ui, "analyze")
+    batch_calls = _spy(monkeypatch, serving_ui, "run_batching_comparison")
+    sweep_calls = _spy(monkeypatch, serving_ui, "run_batch_size_sweep")
 
     _consume(gpu_app.handler("generate_text")(**generation_arguments(model_key="gqa")))
     _consume(gpu_app.handler("compare_methods")(**comparison_arguments()))
@@ -527,6 +607,9 @@ def test_event_functions_use_the_models_loaded_at_startup(
         )
     )
     _consume(gpu_app.handler("run_model")(**inspection_arguments(resources)))
+    # 画面のイベントの関数の戻り値には図(matplotlib)が入る。境界を越えるのは @gpu の関数の戻り値だけ
+    gpu_app.handler("run_batch_inference")(**batch_arguments(model_key="gqa"))
+    gpu_app.handler("measure_batch_sizes")(**sweep_arguments())
 
     assert len(generate_calls) == 3  # generate_text が 1 回、compare_methods が 2 回
     assert generate_calls[0][0] is resources.models["gqa"]
@@ -539,4 +622,12 @@ def test_event_functions_use_the_models_loaded_at_startup(
     assert device is resources.device
     ((loaded, device, *_),) = analyze_calls
     assert loaded is resources.models["main"]
+    assert device is resources.device
+    ((loaded, tokenizer, device, *_),) = batch_calls
+    assert loaded is resources.models["gqa"]
+    assert tokenizer is resources.tokenizer
+    assert device is resources.device
+    ((loaded, tokenizer, device, *_),) = sweep_calls
+    assert loaded is resources.models["main"]
+    assert tokenizer is resources.tokenizer
     assert device is resources.device

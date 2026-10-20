@@ -30,6 +30,7 @@ from tests.zero_gpu_cases import GPU_FUNCTION_OF, INVALID_CASES, VALID_CASES
 APP_DIR = Path(__file__).resolve().parents[2]
 SERVICE_FILES = sorted((APP_DIR / "lab" / "features").glob("*/service.py"))
 CORE_FILES = sorted((APP_DIR / "lab" / "core").glob("*.py"))
+SERVING_FILES = sorted((APP_DIR / "lab" / "serving").glob("*.py"))
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -44,11 +45,16 @@ def _imported_modules(path: Path) -> set[str]:
 
 
 def test_the_services_exist() -> None:
-    assert {p.parent.name for p in SERVICE_FILES} == {"generation", "inspection", "instruction"}
+    assert {p.parent.name for p in SERVICE_FILES} == {
+        "generation",
+        "inspection",
+        "instruction",
+        "serving",
+    }
 
 
 @pytest.mark.parametrize(
-    "path", SERVICE_FILES + CORE_FILES, ids=lambda p: str(p.relative_to(APP_DIR))
+    "path", SERVICE_FILES + CORE_FILES + SERVING_FILES, ids=lambda p: str(p.relative_to(APP_DIR))
 )
 def test_services_and_core_do_not_import_gradio_or_ui(path: Path) -> None:
     for module in _imported_modules(path):
@@ -57,10 +63,45 @@ def test_services_and_core_do_not_import_gradio_or_ui(path: Path) -> None:
         assert not module.endswith(".ui"), f"{path.name} が {module} を import している"
 
 
-@pytest.mark.parametrize("path", SERVICE_FILES, ids=lambda p: p.parent.name)
+@pytest.mark.parametrize(
+    "path", SERVICE_FILES + SERVING_FILES, ids=lambda p: str(p.relative_to(APP_DIR))
+)
 def test_services_do_not_import_spaces(path: Path) -> None:
-    """GPU の割り当ては画面の側の関数で行う。処理は ZeroGPU を知らない。"""
+    """GPU の割り当ては画面の側の関数で行う。処理は ZeroGPU を知らない。
+    常駐サーバ(``lab/serving/``)は手元専用で、``@spaces.GPU`` を使わない。
+    """
     assert "spaces" not in {m.split(".")[0] for m in _imported_modules(path)}
+
+
+def test_the_resident_server_package_exists_and_is_separate_from_the_screen() -> None:
+    """常駐サーバは Gradio・画面・ZeroGPU から独立している(Spaces は app.py だけを起動する)。"""
+    assert {p.name for p in SERVING_FILES} >= {
+        "api.py",
+        "contract.py",
+        "engine.py",
+        "loadgen.py",
+        "runtime.py",
+    }
+    for path in [*SERVING_FILES, APP_DIR / "serve.py"]:
+        modules = _imported_modules(path)
+        assert not any(m.startswith("lab.features") and m.endswith(".ui") for m in modules), path
+        assert "gradio" not in {m.split(".")[0] for m in modules}, path
+    app_modules = _imported_modules(APP_DIR / "app.py")
+    assert not any(m.startswith("lab.serving") for m in app_modules), (
+        "app.py が常駐サーバに依存している"
+    )
+
+
+def test_the_http_layer_does_not_touch_torch() -> None:
+    """HTTP の層(イベントループ)は、要求を待ち行列に入れてトークンを受け取るだけで、
+    torch を呼ばない。
+    torch に触れてよいのは、エンジンのスレッドが動かすコード(``engine.py``・``runtime.py``)だけ。
+    """
+    for name in ("api.py", "contract.py", "loadgen.py"):
+        modules = _imported_modules(APP_DIR / "lab" / "serving" / name)
+        assert "torch" not in {m.split(".")[0] for m in modules}, (
+            f"{name} が torch を import している"
+        )
 
 
 def test_app_py_imports_spaces_before_anything_else() -> None:
@@ -102,7 +143,12 @@ def _ui_tree(path: Path) -> ast.Module:
 
 
 def test_the_ui_files_exist_and_use_the_gpu_decorator() -> None:
-    assert {p.parent.name for p in UI_FILES} == {"generation", "inspection", "instruction"}
+    assert {p.parent.name for p in UI_FILES} == {
+        "generation",
+        "inspection",
+        "instruction",
+        "serving",
+    }
     assert gpu_function_names_in_source() == set(GPU_FUNCTION_OF.values())
 
 

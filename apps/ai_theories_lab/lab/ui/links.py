@@ -22,6 +22,10 @@ THEORY_TOPICS: dict[str, tuple[str, str]] = {
     ),
     "016": ("SFT(指示チューニング)", "04_alignment/016_supervised_fine_tuning.ipynb"),
     "017": ("報酬モデルと RLHF", "04_alignment/017_reward_model_and_rlhf.ipynb"),
+    "027": (
+        "推論サーバ: continuous batching と PagedAttention",
+        "03_efficient_training/027_inference_serving.ipynb",
+    ),
 }
 
 

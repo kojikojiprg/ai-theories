@@ -207,3 +207,50 @@ def test_an_error_message_reaches_the_client_without_calling_the_gpu_function(
             "", "main", True, METHOD_GREEDY, 1.0, 40, 0.9, 2, 1.0, 8, 3, api_name="/generate_text"
         )
     assert SIMULATED_CALLS == []
+
+
+# ---------------------------------------------------------------------------
+# バッチ推論のタブ
+# ---------------------------------------------------------------------------
+BATCH_ARGUMENTS = ("main", 6, 6, 0.5, "offline", 30, 3, "paged", 16, 3, False, 0)
+"""``/run_batch_inference`` の引数(モデル、要求の数、出力長の平均、変動係数、到着、到着率、最大
+バッチサイズ、KV キャッシュの管理、ブロックの大きさ、予算、共通の system prompt、シード)。"""
+
+
+def _table_row(summary: str, label: str) -> list[str]:
+    for line in summary.splitlines():
+        if line.startswith(f"| {label}"):
+            return [cell.strip() for cell in line.strip("|").split("|")]
+    raise AssertionError(f"表に {label} の行がない")
+
+
+def test_the_batch_inference_tab_gives_the_same_load_through_the_simulated_boundary(
+    simulated: Client, direct: Client
+) -> None:
+    SIMULATED_CALLS.clear()
+    summary, timeline, memory = simulated.predict(*BATCH_ARGUMENTS, api_name="/run_batch_inference")
+    expected_summary, _, _ = direct.predict(*BATCH_ARGUMENTS, api_name="/run_batch_inference")
+    assert SIMULATED_CALLS == ["run_batch_inference_on_gpu"]
+    # 時間は計測値なので比べない。機器によらない量は、一括の負荷では決まった値になる
+    for label in ("反復の回数", "無駄な行の割合", "待ちの反復数", "出力トークンあたりの反復数"):
+        assert _table_row(summary, label)[1:3] == _table_row(expected_summary, label)[1:3], label
+    assert _picture(timeline) and _picture(memory)
+    assert "理論との比較" in summary
+
+
+def test_the_batch_size_sweep_runs_through_the_simulated_boundary(simulated: Client) -> None:
+    SIMULATED_CALLS.clear()
+    summary, plot = simulated.predict("main", 8, 5, 0.5, 1.2, 0, api_name="/measure_batch_sizes")
+    assert SIMULATED_CALLS == ["measure_batch_sizes_on_gpu"]
+    assert "基準の到着率" in summary
+    assert _picture(plot)
+
+
+def test_a_batch_error_reaches_the_client_without_calling_the_gpu_function(
+    simulated: Client,
+) -> None:
+    SIMULATED_CALLS.clear()
+    too_many = ("main", 128, 96, 0.5, "offline", 30, 1, "paged", 16, 1, False, 0)
+    with pytest.raises(Exception, match="負荷が大きすぎます"):
+        simulated.predict(*too_many, api_name="/run_batch_inference")
+    assert SIMULATED_CALLS == []

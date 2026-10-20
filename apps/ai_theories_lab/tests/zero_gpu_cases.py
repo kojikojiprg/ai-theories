@@ -34,6 +34,8 @@ GPU_FUNCTION_OF = {
     "compare_methods": "compare_methods_on_gpu",
     "answer_instruction": "answer_instruction_on_gpu",
     "run_model": "run_model_on_gpu",
+    "run_batch_inference": "run_batch_inference_on_gpu",
+    "measure_batch_sizes": "measure_batch_sizes_on_gpu",
 }
 """画面のイベントの関数の名前から、その中で呼ぶ ``@gpu`` の関数の名前へ。"""
 GENERATOR_HANDLERS = {"generate_text", "compare_methods"}
@@ -78,6 +80,36 @@ def inspection_arguments(resources: Resources) -> dict[str, Any]:
     return {"tokenization": tokenize(resources.tokenizer, TRAINING_SENTENCES[0])}
 
 
+def batch_arguments(**overrides: Any) -> dict[str, Any]:
+    """``run_batch_inference`` の引数(小さな負荷。スライダー・数値欄は float で届く)。"""
+    return {
+        "model_key": "main",
+        "num_requests": 6.0,
+        "output_mean": 6.0,
+        "output_cv": 0.5,
+        "arrival": "offline",
+        "arrival_rate": 30.0,
+        "max_batch_size": 3.0,
+        "kv_manager": "paged",
+        "block_size": 16,
+        "kv_budget_slots": 3.0,
+        "shared_prefix": False,
+        "seed": 0.0,
+    } | overrides
+
+
+def sweep_arguments(**overrides: Any) -> dict[str, Any]:
+    """``measure_batch_sizes`` の引数(小さな負荷)。"""
+    return {
+        "model_key": "main",
+        "num_requests": 8.0,
+        "output_mean": 5.0,
+        "output_cv": 0.5,
+        "arrival_ratio": 1.2,
+        "seed": 0.0,
+    } | overrides
+
+
 def _too_many_tokens(resources: Resources) -> dict[str, Any]:
     base = tokenize(resources.tokenizer, TRAINING_SENTENCES[0])
     return {"tokenization": dataclasses.replace(base, pieces=base.pieces * 20)}
@@ -116,6 +148,15 @@ VALID_CASES: list[Any] = [
         id="answer_instruction-unseen",
     ),
     pytest.param("run_model", inspection_arguments, id="run_model"),
+    pytest.param("run_batch_inference", lambda r: batch_arguments(), id="batch-offline-paged"),
+    pytest.param(
+        "run_batch_inference",
+        lambda r: batch_arguments(
+            arrival="poisson", kv_manager="reserved", model_key="gqa", shared_prefix=True
+        ),
+        id="batch-poisson-reserved-gqa-shared",
+    ),
+    pytest.param("measure_batch_sizes", lambda r: sweep_arguments(), id="sweep"),
 ]
 """正しい入力。``(イベントの関数の名前, 引数を作る関数)``。"""
 
@@ -172,6 +213,43 @@ INVALID_CASES: list[Any] = [
         ),
         "KV キャッシュ",
         id="second-method-is-invalid",
+    ),
+    pytest.param(
+        "run_batch_inference",
+        lambda r: batch_arguments(num_requests=500.0),
+        "要求の数",
+        id="too-many-requests",
+    ),
+    pytest.param(
+        "run_batch_inference",
+        lambda r: batch_arguments(output_mean=96.0, output_cv=1.0),
+        "変動係数",
+        id="cv-too-large-for-the-mean",
+    ),
+    pytest.param(
+        "run_batch_inference",
+        # 要求 128 件・出力長の平均 96・最大バッチサイズ 1: 反復の回数が 1 万を超え、上限を超える
+        lambda r: batch_arguments(num_requests=128.0, output_mean=96.0, max_batch_size=1.0),
+        "負荷が大きすぎます",
+        id="load-over-the-time-limit",
+    ),
+    pytest.param(
+        "run_batch_inference",
+        lambda r: batch_arguments(arrival="poisson", arrival_rate=0.0),
+        "到着率",
+        id="zero-arrival-rate",
+    ),
+    pytest.param(
+        "measure_batch_sizes",
+        lambda r: sweep_arguments(arrival_ratio=0.5),
+        "到着の速さ",
+        id="sweep-unknown-ratio",
+    ),
+    pytest.param(
+        "measure_batch_sizes",
+        lambda r: sweep_arguments(num_requests=128.0, output_mean=96.0, output_cv=0.5),
+        "負荷が大きすぎます",
+        id="sweep-over-the-time-limit",
     ),
 ]
 """誤った入力。``(イベントの関数の名前, 引数を作る関数, 画面に出るメッセージに含まれる文字列)``。"""
