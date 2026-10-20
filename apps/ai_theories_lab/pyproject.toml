@@ -13,6 +13,11 @@ dependencies = [
     # ZeroGPU が対応する版(公式ドキュメントは 2.8.0 以降を挙げ、2.13.0 を例に載せている)。
     # ai-theories が要求する torchvision>=0.28.0 とも整合する(torchvision 0.28.0 は torch 2.13.0 と対)。
     "torch==2.13.0",
+    # 常駐サーバ(serve.py、lab/serving/)の HTTP の API と、負荷を掛ける道具(lab/serving/loadgen.py)。
+    # いずれも gradio の依存に入っているが、アプリが直接使うので明示する(手元専用で、Spaces は app.py だけを起動する)。
+    "fastapi>=0.143",
+    "uvicorn>=0.54",
+    "httpx>=0.28",
 ]
 
 [tool.uv]
@@ -21,7 +26,7 @@ package = false
 
 [tool.uv.sources]
 # ai-theories は GitHub のコミットを固定して持ち込む。更新の手順は README.md の「ai-theories の版の更新」を参照。
-ai-theories = { git = "https://github.com/kojikojiprg/ai-theories", rev = "07368dafee39e088bcb2df98a267f0c4d0e3e5ab" }
+ai-theories = { git = "https://github.com/kojikojiprg/ai-theories", rev = "518c01d7853422a88cd8663d6082fc2244f180b8" }
 
 [dependency-groups]
 dev = [

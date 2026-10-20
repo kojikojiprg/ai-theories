@@ -10,7 +10,7 @@ resolution-markers = [
 [[package]]
 name = "ai-theories"
 version = "0.1.0"
-source = { git = "https://github.com/kojikojiprg/ai-theories?rev=07368dafee39e088bcb2df98a267f0c4d0e3e5ab#07368dafee39e088bcb2df98a267f0c4d0e3e5ab" }
+source = { git = "https://github.com/kojikojiprg/ai-theories?rev=518c01d7853422a88cd8663d6082fc2244f180b8#518c01d7853422a88cd8663d6082fc2244f180b8" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "matplotlib" },
@@ -26,9 +26,12 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "ai-theories" },
+    { name = "fastapi" },
     { name = "gradio" },
+    { name = "httpx" },
     { name = "spaces" },
     { name = "torch" },
+    { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
@@ -39,10 +42,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-theories", git = "https://github.com/kojikojiprg/ai-theories?rev=07368dafee39e088bcb2df98a267f0c4d0e3e5ab" },
+    { name = "ai-theories", git = "https://github.com/kojikojiprg/ai-theories?rev=518c01d7853422a88cd8663d6082fc2244f180b8" },
+    { name = "fastapi", specifier = ">=0.143" },
     { name = "gradio", specifier = "==6.30.0" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "spaces", specifier = ">=0.51.3" },
     { name = "torch", specifier = "==2.13.0" },
+    { name = "uvicorn", specifier = ">=0.54" },
 ]
 
 [package.metadata.requires-dev]
